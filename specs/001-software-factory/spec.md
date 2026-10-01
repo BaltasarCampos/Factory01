@@ -4,13 +4,13 @@
 
 **Created**: 2026-10-01
 
-**Status**: Draft
+**Status**: Approved
 
 **Work item**: Owner-authored source document `software-factory-spec-v1.5.txt` ("Software Factory — Specification v1.5 (kill switch)", derived from "Software Factory — Design v1.5"; companion constitution 2.4.0). Originally generated from v1.2; updated to v1.5 on 2026-10-01. No GitHub issue yet.
 
 **Risk tier**: 3 — High (the factory defines permission rules, guardrail protection and the merge/release path for every project; agents MUST NOT lower it)
 
-**Owner approval**: Pending — tier 3 needs explicit approval of this spec, including the "Risks" section
+**Owner approval**: Approved by the Owner on 2026-10-01, including the "Risks" section (recorded in chat; signed approvals do not exist yet; see plan Complexity Tracking #2)
 
 **Input**: User description: "take software-factory-spec-v1.2.txt as source for generating this spec"
 
