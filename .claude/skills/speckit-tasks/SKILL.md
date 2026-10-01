@@ -81,10 +81,10 @@ You **MUST** consider the user input before proceeding (if not empty).
    - Phase 1: Setup tasks (project initialization)
    - Phase 2: Foundational tasks (blocking prerequisites for all user stories)
    - Phase 3+: One phase per user story (in priority order from spec.md)
-   - Each phase includes: story goal, independent test criteria, tests (if requested), implementation tasks
-   - Final Phase: Polish & cross-cutting concerns
+   - Each phase includes: story goal, independent test criteria, test tasks (mandatory, first), implementation tasks
+   - Final Phase: Polish & release readiness (coverage ≥ 90% on changed lines, feature flag for tier 2–3, rollback path)
    - All tasks must follow the strict checklist format (see Task Generation Rules below)
-   - Clear file paths for each task
+   - A `· Files:` list on every task naming exactly the files it may create or modify
    - Dependencies section showing story completion order
    - Parallel execution examples per story
    - Implementation strategy section (MVP first, incremental delivery)
@@ -131,8 +131,9 @@ Output path to generated tasks.md and summary:
 - Task count per user story
 - Parallel opportunities identified
 - Independent test criteria for each story
+- Criterion coverage: every AC-### from spec.md and the plan's "Acceptance Criteria → Tests" table mapped to a test task (list any gap as an ERROR)
 - Suggested MVP scope (typically just User Story 1)
-- Format validation: Confirm ALL tasks follow the checklist format (checkbox, ID, labels, file paths)
+- Format validation: Confirm ALL tasks follow the checklist format (checkbox, ID, labels, `· Files:` list) and that test tasks precede implementation tasks in every story
 
 Context for task generation: $ARGUMENTS
 
@@ -142,14 +143,19 @@ The tasks.md should be immediately executable - each task must be specific enoug
 
 **CRITICAL**: Tasks MUST be organized by user story to enable independent implementation and testing.
 
-**Tests are OPTIONAL**: Only generate test tasks if explicitly requested in the feature specification or if user requests TDD approach.
+**Tests are MANDATORY** (Constitution Principle III):
+
+- Every acceptance criterion (AC-###) in spec.md MUST map to at least one test task, and the test task names it, e.g. `(AC-001)`.
+- Within each user story, test tasks come BEFORE the implementation tasks they cover; they are written, run and seen failing before implementation starts.
+- Tier 2 work adds property-based test tasks for changed logic. Tier 3 work adds a formal verification task for the critical property in the spec's "Risks" section (TLA+ for workflows and state machines, Dafny for small critical functions), checked in CI.
+- No task may weaken, delete or skip existing tests.
 
 ### Checklist Format (REQUIRED)
 
 Every task MUST strictly follow this format:
 
 ```text
-- [ ] [TaskID] [P?] [Story?] Description with file path
+- [ ] [TaskID] [P?] [Story?] Description (AC-###, test tasks only) · Files: <path>[, <path>...]
 ```
 
 **Format Components**:
@@ -163,18 +169,23 @@ Every task MUST strictly follow this format:
    - Foundational phase: NO story label
    - User Story phases: MUST have story label
    - Polish phase: NO story label
-5. **Description**: Clear action with exact file path
+5. **Description**: Clear action; test tasks name the criterion they cover `(AC-###)`
+6. **Files list**: REQUIRED on every task: `· Files:` followed by exactly the files the task may create or modify (Principles VII, VIII). The Builder must not touch other files; if more are needed, the task returns to planning. No task may list a guardrail file (`.claude/`, `.mcp.json`, hooks, `.github/workflows/`, `.factory/config`, `.specify/memory/constitution.md`, lockfile policy).
+
+Each task must fit one fresh agent session. [P] means the task can be batched with others; separate parallel sessions need Owner approval.
 
 **Examples**:
 
-- ✅ CORRECT: `- [ ] T001 Create project structure per implementation plan`
-- ✅ CORRECT: `- [ ] T005 [P] Implement authentication middleware in src/middleware/auth.py`
-- ✅ CORRECT: `- [ ] T012 [P] [US1] Create User model in src/models/user.py`
-- ✅ CORRECT: `- [ ] T014 [US1] Implement UserService in src/services/user_service.py`
-- ❌ WRONG: `- [ ] Create User model` (missing ID and Story label)
-- ❌ WRONG: `T001 [US1] Create model` (missing checkbox)
-- ❌ WRONG: `- [ ] [US1] Create User model` (missing Task ID)
-- ❌ WRONG: `- [ ] T001 [US1] Create model` (missing file path)
+- ✅ CORRECT: `- [ ] T001 Create project structure per implementation plan · Files: src/index.ts, tsconfig.json`
+- ✅ CORRECT: `- [ ] T005 [P] Implement authentication middleware · Files: src/middleware/auth.ts`
+- ✅ CORRECT: `- [ ] T010 [P] [US1] Integration test for sign-up journey (AC-001) · Files: tests/integration/sign-up.test.ts`
+- ✅ CORRECT: `- [ ] T012 [P] [US1] Create User model · Files: src/models/user.ts`
+- ✅ CORRECT: `- [ ] T014 [US1] Implement UserService · Files: src/services/user-service.ts`
+- ❌ WRONG: `- [ ] Create User model` (missing ID, Story label and Files list)
+- ❌ WRONG: `T001 [US1] Create model · Files: src/models/user.ts` (missing checkbox)
+- ❌ WRONG: `- [ ] [US1] Create User model · Files: src/models/user.ts` (missing Task ID)
+- ❌ WRONG: `- [ ] T001 [US1] Create model` (missing Files list)
+- ❌ WRONG: `- [ ] T010 [US1] Test sign-up · Files: tests/integration/sign-up.test.ts` (test task missing its AC-###)
 
 ### Task Organization
 
@@ -184,12 +195,12 @@ Every task MUST strictly follow this format:
      - Models needed for that story
      - Services needed for that story
      - Interfaces/UI needed for that story
-     - If tests requested: Tests specific to that story
+     - Tests specific to that story, one or more per acceptance criterion (AC-###)
    - Mark story dependencies (most stories should be independent)
 
 2. **From Contracts**:
    - Map each interface contract → to the user story it serves
-   - If tests requested: Each interface contract → contract test task [P] before implementation in that story's phase
+   - Each interface contract → contract test task [P] before implementation in that story's phase
 
 3. **From Data Model**:
    - Map each entity to the user story(ies) that need it
@@ -207,12 +218,13 @@ Every task MUST strictly follow this format:
 - **Phase 1**: Setup (project initialization)
 - **Phase 2**: Foundational (blocking prerequisites - MUST complete before user stories)
 - **Phase 3+**: User Stories in priority order (P1, P2, P3...)
-  - Within each story: Tests (if requested) → Models → Services → Endpoints → Integration
+  - Within each story: Tests → Models → Services → Endpoints → Integration
   - Each phase should be a complete, independently testable increment
-- **Final Phase**: Polish & Cross-Cutting Concerns
+- **Final Phase**: Polish & Release Readiness (coverage ≥ 90% on changed lines, feature flag for tier 2–3, documented rollback path; tier 3: tested rollback step)
 
 ## Done When
 
-- [ ] tasks.md generated with all phases, task IDs, and file paths
+- [ ] tasks.md generated with all phases, task IDs, and a Files list on every task
+- [ ] Every AC-### mapped to a test task, and test tasks precede implementation in every story
 - [ ] Extension hooks dispatched or skipped according to the rules in Mandatory Post-Execution Hooks above
 - [ ] Completion reported to user with task count, story breakdown, and MVP scope

@@ -28,13 +28,19 @@ Modified sections:
 Added principles: none
 Removed sections: none
 
-Templates (read at runtime; not modified by this command):
-  - .specify/templates/plan-template.md — ⚠ update "Constitution Check" to cover I–IX,
-    risk tier, lane, and plan-usage budget
-  - .specify/templates/spec-template.md — ⚠ add risk tier and "risks" section (tier 3);
-    acceptance criteria must be testable (III)
-  - .specify/templates/tasks-template.md — ⚠ test tasks precede implementation tasks; each
-    task lists the files it may touch (VII, VIII)
+Templates (project overrides in .specify/templates/overrides/, which take precedence over the
+core templates; core templates are left at upstream Spec Kit so upgrades do not overwrite the
+alignment):
+  - overrides/plan-template.md — ✅ "Constitution Check" covers I–IX, risk tier and lane; adds
+    plan-usage budget, new-dependency gate table, criterion → test mapping and rollback path
+  - overrides/spec-template.md — ✅ risk tier, Owner approval status, AC-### IDs on testable
+    acceptance criteria (III), "Risks" section (mandatory for tier 3), tier 1 one-line spec
+  - overrides/tasks-template.md — ✅ test tasks are mandatory and precede implementation
+    tasks; each task lists the files it may touch (VII, VIII)
+Commands:
+  - .claude/skills/speckit-tasks/SKILL.md — ✅ test tasks mandatory (III); every task lists
+    its files; test tasks precede implementation. Edited at the Owner's direction (guardrail
+    file, Principle VII).
 
 Source design: "Software Factory — Design v1.2", 2026-10-01.
 Deferred TODOs: token budgets per role, retry count, security fix targets and metric targets
