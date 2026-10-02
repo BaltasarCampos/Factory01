@@ -17,7 +17,7 @@ cloud marker confirmed in Phase 0) is set or when stdin is not a TTY.
 | `factory config set <key> <value>` | laptop only | Change one `.factory/config` field (not `factory_release`) as a signed commit on main | FR-007f, AC-090 |
 | `factory release <tag>` | laptop only (factory repo) | Show the diff since the last signed tag → Owner confirms → build `guardrails.manifest.json` → `git tag -s <tag>` (passphrase) → push the tag; the release workflow attaches the manifest, `allowed_signers` and `revoked_keys` | FR-007e, AC-083 |
 | `factory pause [station]` | anywhere | Add `pause:line` / `pause:<station>` to inbox issue | FR-007c |
-| `factory resume [station]` | laptop only | Passphrase → sign resume record → post to inbox → remove label | FR-007d |
+| `factory resume [station]` | laptop only | Read the scope's latest pause label-add time from the inbox timeline (warn if the laptop clock is > 60 s off GitHub's) → passphrase → sign resume record with `timestamp` = later of now and that time + 1 s → post to inbox → remove label | FR-007d |
 | `factory upgrade <tag>` | laptop | Verify the tag's signature with main's pinned `allowed_signers` and resolve it to `<sha>` → branch `factory/upgrade-<tag>` with the release's guardrails + pin `<tag>@<sha>` → PR for the Owner → print `factory approve <pr> waiver check:guardrail-change@<tag>@<sha>`, then `factory merge <pr>`; if the release revokes a key, list in-flight items whose approvals used it | FR-006, AC-054, AC-083, AC-085 |
 | `factory inbox [--all]` | laptop | List alerts; mark read | FR-034a |
 | `factory mcp` | session (stdio) | Factory MCP server, see [mcp-tools.md](mcp-tools.md) | FR-022 |

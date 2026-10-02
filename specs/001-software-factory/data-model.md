@@ -230,7 +230,13 @@ paused(scope) = ∃ labeled(pause:scope) at t1
 ```
 
 A resume record lifts only pauses added before its signed `timestamp`, so reposting an old
-record after a new pause never lifts it.
+record after a new pause never lifts it. The comparison mixes two clocks (the laptop's in the
+record, GitHub's on label events), so `factory resume` sets `timestamp` to the later of the
+laptop's current time and the latest `pause:<scope>` label-add time plus one second, read from
+the inbox timeline before signing. A slow laptop clock therefore cannot produce a resume that
+lifts nothing; a fast one only makes the record lift pauses that already exist. `factory resume`
+also warns when the laptop clock differs from GitHub's (`Date` header of the API response) by
+more than 60 seconds.
 
 If `paused(scope)` and the label is absent → re-apply label, urgent alert (AC-076).
 
