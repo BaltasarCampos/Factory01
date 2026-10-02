@@ -1,34 +1,3 @@
-<!--
-Sync Impact Report
-==================
-Version change: 2.3.0 → 2.4.0
-Bump rationale: MINOR. Defines the kill switch from "Software Factory — Design v1.5": pause
-labels on a pinned Owner inbox issue, added by anyone without a signature, lifted only by a
-signed `factory resume`. No principle is removed and no gate is relaxed.
-Modified principles:
-  - VII. Bounded Autonomy and Safe Operations: agents may add but never remove `pause:` labels;
-    a pause ends only with a signed resume
-Modified sections:
-  - Operating Constraints: kill switch and Owner inbox issue
-  - Branches and Approval Labels: pause labels
-  - Security Operations: secret leaks name who pauses and who resumes
-  - Governance: source design v1.5
-Added sections: none
-Removed sections: none
-Templates (read at runtime; not modified by this command):
-  - .specify/templates/plan-template.md — ⚠ update "Constitution Check" to cover I–IX,
-    risk tier, lane, and plan-usage budget
-  - .specify/templates/spec-template.md — ⚠ add risk tier and "risks" section (tier 3);
-    acceptance criteria must be testable (III)
-  - .specify/templates/tasks-template.md — ⚠ test tasks precede implementation tasks; each
-    task lists the files it may touch (VII, VIII)
-Source design: "Software Factory — Design v1.5", 2026-10-01.
-Deferred TODOs: token budgets per role, retry count, security fix targets and metric targets
-are set from shadow-mode data (specification §17). Spec Kit command naming is confirmed in
-Phase 0, together with how Spec Kit is told which feature folder and branch to use and a
-test that forged, edited and replayed approval records are rejected.
--->
- 
 # Factory Constitution
  
 ## Core Principles
@@ -162,7 +131,10 @@ usage records are what make that approval informed rather than blind.
   Owner's laptop, with a key that never leaves it. The dispatcher verifies every signature in
   code and rejects an `owner:` label without a valid record, stops the item, and alerts the
   Owner. `factory merge` and `factory deploy` re-verify every approval on the laptop before
-  anything irreversible.
+  anything irreversible. Every first-parent commit on main is signed by the Owner.
+  `factory merge` makes the merge commit itself, on the laptop, after checking the pull request
+  with its own code. The dispatcher, `factory merge` and `factory deploy` stop on any unsigned
+  commit.
 - Any agent MAY add a `pause:` label; no agent may remove one. A pause ends only with a signed
   `factory resume`; pause state is read from label history, so a removed label does not end
   it.
@@ -248,6 +220,7 @@ only where it is measured, reversible, and cannot move the yardstick it is judge
 |--------|-------|--------------|
 | `claude/<issue>-<slug>`, one per work item, created by the dispatcher when the Owner approves the item | `specs/<issue>-<slug>/` (`spec.md`, `plan.md`, `tasks.md`, `reports/`, `events.jsonl`) and the item's code and tests | When the Owner merges the item's pull request |
 | `claude/factory-log`, one per project | Post-merge event lines, release notes, `.factory/ops/`, `.factory/lessons/`; additions only | When the Owner merges it, weekly |
+| `claude/define`, one per project, created by `factory new` / `factory adopt` | `.factory/brief.md`, the walking skeleton, `.factory/define/` | When the Owner merges Define's pull request with `factory merge`; that merge is the brief approval |
  
 - One item, one branch, one pull request, opened as a draft at Specify. Larger work is split
   into more work items, never into several pull requests for one item.
@@ -265,9 +238,14 @@ only where it is measured, reversible, and cannot move the yardstick it is judge
   passphrase) that exists only on the Owner's laptop, using `ssh-keygen -Y sign` (namespace
   `factory-approve`). The record names the repository, issue, gate, confirmed tier, item branch,
   and for spec approval the commit hash of `spec.md`, with a timestamp and a one-time number, so
-  it cannot be reused for another item or a changed spec. The public key is pinned in the
-  factory release's `allowed_signers` file and in the cloud routine's environment, set only by
-  the Owner; the two copies MUST match.
+  it cannot be reused for another item or a changed spec. The factory release's
+  `allowed_signers` lists every public key the Owner has used, and `revoked_keys` lists
+  compromised ones, whose signatures MUST fail. Records are always checked against the copy
+  pinned on main, never a pull request's. The newest non-revoked key is also set in the cloud
+  routine's environment, set only by the Owner, and the two MUST match. The one exception:
+  after an upgrade adds a key, the line stays stopped ("key rotation pending") until the Owner
+  updates the routine. The same key signs the Owner's commits on main and the factory's
+  release tags.
 
 ## Risk Tiers and Lanes
  
@@ -285,11 +263,11 @@ only where it is measured, reversible, and cannot move the yardstick it is judge
  
 | # | Station | Spec Kit command | Output artifact | Gate to proceed |
 |---|---------|------------------|-----------------|-----------------|
-| 0 | Define (once per project) | — (`factory new`/`adopt` runs `specify init` and installs the constitution) | `.factory/brief.md`, starter, seed issues | Clarifying questions answered; **Owner approves brief and backlog** |
+| 0 | Define (once per project) | — (`factory new`/`adopt` runs `specify init` and installs the constitution) | `.factory/brief.md`, starter, seed issues | Clarifying questions answered; **Owner approves the brief by merging the `claude/define` pull request with `factory merge`, and each seed issue with `factory approve`** |
 | 1 | Intake | — | Issue with type, priority, proposed tier | Classified and deduplicated; **`owner:approved` via `factory approve`** |
-| 2 | Specify / Clarify | `/speckit.specify`, `/speckit.clarify` | `specs/<issue>-<slug>/spec.md` | Criteria testable; questions answered or deferred; **`owner:spec-approved` (tier 2–3)** |
-| 3 | Plan / Tasks | `/speckit.plan`, `/speckit.tasks`, `/speckit.analyze` | `plan.md`, `tasks.md` | Constitution Check passes; usage budget and dependencies stated; every criterion mapped to a test; test tasks precede implementation; each task lists its files |
-| 4 | Build | `/speckit.implement` | Code + tests on the item's branch | Tests seen failing first, then passing |
+| 2 | Specify / Clarify | `/speckit-specify`, `/speckit-clarify` | `specs/<issue>-<slug>/spec.md` | Criteria testable; questions answered or deferred; **`owner:spec-approved` (tier 2–3)** |
+| 3 | Plan / Tasks | `/speckit-plan`, `/speckit-tasks`, `/speckit-analyze` | `plan.md`, `tasks.md` | Constitution Check passes; usage budget and dependencies stated; every criterion mapped to a test; test tasks precede implementation; each task lists its files |
+| 4 | Build | `/speckit-implement` | Code + tests on the item's branch | Tests seen failing first, then passing |
 | 5 | Verify | — | `specs/<issue>-<slug>/reports/verify.md` | CI green; coverage ≥ 90% on changed lines; SAST, SCA, secret and licence scans clean; independent review report attached; blocking findings resolved |
 | 6 | Integrate | — | Rebased branch | CI green on rebased branch; **Owner merges with `factory merge`, which re-verifies every signed approval** |
 | 7 | Release | — | Release notes and rollback path on `claude/factory-log`, deployment (behind a flag for tier 2–3) | Rollback path documented; **Owner approves by running `factory deploy`**; health signals green |
@@ -299,8 +277,8 @@ Additional Owner gates: new dependencies, changes to guardrail files, Coach pull
 dismissal of security findings, factory upgrades, the weekly merge of `claude/factory-log`,
 and any recorded waiver (`owner:waiver`).
  
-Spec Kit commands are written in their documented form; Phase 0 confirms the form the installed
-version uses, and this table is aligned to it by PATCH amendment.
+The installed Spec Kit (1.0.13) exposes its commands as hyphenated skills; this table uses that
+form.
  
 - A failed gate returns work to the earliest station that can fix it, not merely the previous
   one. After three failed attempts the item escalates to the Owner.
@@ -338,7 +316,7 @@ version uses, and this table is aligned to it by PATCH amendment.
   (Principle VII). It implements the factory design; where the two disagree, the design is
   corrected first and the constitution amended to match.
 - **Amendments**: Only the Owner ratifies amendments. Agents MAY propose amendments with a
-  rationale and impact analysis via `/speckit.constitution`, as a pull request; the amendment
+  rationale and impact analysis via `/speckit-constitution`, as a pull request; the amendment
   takes effect when the Owner merges it. General amendments are made in the factory repository
   and reach projects through `factory upgrade`.
 - **Versioning**: Semantic versioning applies. MAJOR for removing or redefining a principle or
@@ -350,4 +328,4 @@ version uses, and this table is aligned to it by PATCH amendment.
 - **Periodic review**: The Owner reviews this constitution, usage records, and escaped defects
   at least quarterly and amends where the rules no longer serve the product.
   
-**Version**: 2.4.0 | **Ratified**: 2026-09-30 | **Last Amended**: 2026-10-01
+**Version**: 2.6.0 | **Ratified**: 2026-09-30 | **Last Amended**: 2026-10-02

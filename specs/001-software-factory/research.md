@@ -46,13 +46,22 @@ probes are tasks in Phase 0 and their results amend this file.
   exit code only. Payload format, fields and canonicalisation are in
   [data-model.md](data-model.md#approval-record) and
   [contracts/approval-record.md](contracts/approval-record.md).
-- **Two-copy key check (FR-016e)**: the verifier builds `allowed_signers` from the pinned
-  release file **and** `FACTORY_ALLOWED_SIGNERS` (routine env) / the laptop's own copy, and
-  refuses unless the two public keys are byte-identical after whitespace normalisation.
+- **Keys and two-copy check (FR-016e, updated 2026-10-02)**: the release's `allowed_signers`
+  lists every key ever used (`namespaces="factory-approve,git"`) and `revoked_keys` lists
+  compromised ones, passed as `ssh-keygen -Y verify -r`. Both are always read from the release
+  pinned on main, never a PR's copy. `FACTORY_ALLOWED_SIGNERS` (routine env) / the laptop's
+  copy must equal the newest non-revoked key after whitespace normalisation; a mismatch right
+  after an upgrade that added a key is reported as "key rotation pending", not tampering.
+  Keeping old keys means no history lookup is needed to verify old records, and cloud
+  sessions may clone shallow.
 - **Replay (AC-079)**: a nonce is 128 random bits (hex). Verification is stateless and derived
-  from history: across all records on the item (and on the inbox issue for resumes), each
+  from history: across all records on the item, each `approved`/`spec-approved`/`waiver`
   nonce may back exactly one label-add event — the first one after the record's comment
-  timestamp. A second use of the same nonce fails. The laptop additionally keeps
+  timestamp. A resume record lifts only pauses added before its signed `timestamp`, and
+  `deployed` nonces must be first occurrences in the repo (contract step 6). Timestamps are set
+  by the key holder, so they order records but prove nothing against a stolen key; that case
+  is handled by revocation. A
+  second use of the same nonce fails. The laptop additionally keeps
   `~/.factory/nonces.log` of nonces it has issued and seen, so `factory merge` rejects a
   replay even if GitHub history were edited.
 - **Spec binding (AC-071)**: spec approval binds the blob hash of `spec.md`
@@ -61,8 +70,8 @@ probes are tasks in Phase 0 and their results amend this file.
   taken to mean. Interpretation approved by the Owner on 2026-10-01.
 - **Key never unlocked (FR-016e)**: `factory approve` runs `ssh-keygen -Y sign` directly
   against the key file (passphrase prompted on the TTY); no `ssh-agent`.
-- **Alternatives**: GPG signing (heavier, agent-based); signed git tags (bind to commits, not
-  to issue/gate); GitHub's own review approvals (agents act as the Owner, so unforgeable only
+- **Alternatives**: GPG signing (heavier, agent-based); signed git tags alone (bind to
+  commits, not to issue/gate; used for releases instead, R19); GitHub's own review approvals (agents act as the Owner, so unforgeable only
   with a second account — rejected by constraints).
 - **Phase 0 probe**: `ssh-keygen -Y verify` exists in the cloud image (OpenSSH ≥ 8.2; laptop
   has 9.2p1); forged, edited, cross-item and replayed records rejected by `factory dispatch`
@@ -132,8 +141,7 @@ probes are tasks in Phase 0 and their results amend this file.
   local sessions. `/speckit-specify` then writes into the existing folder instead of creating
   a branch.
 - **Command form**: the installed version exposes hyphenated skills (`/speckit-specify`);
-  station prompts and role files use that form, and the constitution table is aligned by a
-  PATCH amendment (FR-026). Recorded as a Phase 0 finding.
+  station prompts and role files use that form, and constitution v2.5.0 adopts it (FR-026).
 - **Phase 0 probe**: run `/speckit-specify` on a dispatcher-created branch and confirm no new
   branch or folder is made.
 
@@ -149,24 +157,39 @@ probes are tasks in Phase 0 and their results amend this file.
 ## R11. Guardrail integrity
 
 - **Decision**: Each factory release carries `guardrails.manifest.json` (path → sha256) built
-  in the release workflow. The session-start hook hashes the project's guardrail files and
-  compares them to the manifest **fetched from the pinned tag of the public factory repo**
-  (not the project's own copy), so tampering with both the files and the local manifest is
-  still caught. Mismatch → stop session, urgent alert.
-- **CI `guardrail-change`**: fails any PR whose diff touches a protected path unless the PR
-  carries a signed `owner:waiver` record for that PR (same verifier as R4).
+  on the laptop by `factory release` and covered by the Owner's tag signature (R19). The
+  session-start hook checks that the branch's own commits changed no protected file,
+  `.gitattributes`, `.gitmodules` or `.factory/config`, and that the merge base's guardrail
+  files match the manifest **fetched by the commit hash pinned in the merge base's config**
+  (not the project's own copy, not by tag), so tampering with both the files and the local
+  manifest is still caught. Checking against the merge base rather than main keeps in-flight
+  items running after an upgrade; they pick up the new release at Integrate's rebase.
+  Mismatch → stop session, urgent alert.
+- **CI `guardrail-change`**: fails any item or Define PR touching a protected path,
+  `.gitattributes`, `.gitmodules` or `.factory/config` (no waiver); an upgrade PR must equal
+  the manifest of the release it names. Early feedback only: `factory merge` repeats the check
+  on the laptop (R18).
 
 ## R12. Append-only logs
 
 - **Decision**: CI job `append-only` on pushes to `claude/factory-log` and on PRs touching
   `specs/**/events.jsonl`: for every file present at the base, the head content must start
   with the base content byte-for-byte; deleted files fail. Implemented as `factory ci
-  append-only <base> <head>`.
+  append-only <base> <head>`. On `claude/factory-log` it also enforces the allowed paths and
+  regular text files only; `factory merge` repeats the whole check on the laptop (R18).
+- **Trust**: append-only gives ordering, not authorship. Agents with a shell can write event
+  lines with any `ts`, so the event log is telemetry and decides nothing (FR-028).
 
 ## R13. Quality checks owned by the factory
 
-- **Changed-line coverage (QG-3)**: `factory ci coverage --min 90` intersects
-  `git diff -U0 base...head` with Vitest's lcov output (`@vitest/coverage-v8`). Avoids a
+- **CI runs only release code (FR-048, 2026-10-02)**: workflows check out the factory repo at
+  the commit pinned on main, build the CLI, and run `factory ci test|lint|scan|coverage|
+  red-green|…` with configs and thresholds from `factory/profiles/typescript/ci/`. The PR's
+  `package.json` scripts and tool configs are never used in CI.
+- **Changed-line coverage (QG-3)**: `factory ci coverage` (threshold = the stricter of the
+  release's floor, 90, and `coverage_min` in main's config) intersects
+  `git diff -U0 --no-renames --no-ext-diff --no-textconv base...head` (`.gitattributes`
+  ignored) with Vitest's lcov output (`@vitest/coverage-v8`). Avoids a
   Python dependency such as diff-cover.
 - **Size limit (QG-6)**: `factory ci size --max 400` counts changed lines excluding
   `specs/**`, lockfiles and generated files.
@@ -207,7 +230,61 @@ probes are tasks in Phase 0 and their results amend this file.
 ## R17. Throwaway sample project and benchmark
 
 - **Decision**: Phase 0 uses a private throwaway repo `factory-sample-<date>` created by
-  `factory new`. The benchmark repo is created empty in Phase 2; Gate C needs ≥ 5 items.
+  `factory new`. The benchmark repo is created in Phase 2 with `factory benchmark init` and
+  filled by the Owner with `factory benchmark add <issue>` from merged items; Gate C needs
+  ≥ 5 items, and the replay runner marks no Coach proposal adoptable below that.
+
+## R18. Laptop merge and signed main history (2026-10-02)
+
+- **Problem**: GitHub runs `pull_request` workflows from the PR's own files, so CI can be made
+  to pass by the PR it checks; agents act on GitHub as the Owner, so labels, tags and merges
+  made through GitHub prove nothing; hooks share a user with the agent's shell.
+- **Decision**: `factory merge` is the only merge path. On the laptop it computes the diff
+  (`git -c core.attributesFile=/dev/null diff --no-renames --no-ext-diff --no-textconv`),
+  applies the per-branch rules (data-model § Pull request merge checks), checks CI on the
+  checked commit, then runs `git merge --no-ff -S <sha>` and pushes main. `gh pr merge` is
+  not used: GitHub would sign the merge commit with its own key. A rejected push (main moved)
+  aborts; a moved PR head is closed with a comment; merged item branches are deleted.
+- **Signed history**: git SSH signing (`gpg.format ssh`, `user.signingkey` = Owner key,
+  passphrase per signature, no agent). Every first-parent commit after `baseline` must pass
+  `git verify-commit` against main's pinned `allowed_signers`. The dispatcher deepens its
+  fetch of main's first-parent history to the baseline; the laptop verifies incrementally from
+  `~/.factory/verified/<repo>`.
+- **Baseline**: a commit cannot contain its own hash, so adopted repos record the last
+  unsigned commit; `factory new` creates an empty repo and pushes a signed root commit, so
+  GitHub's auto-generated commit never appears.
+- **Replaces**: the `merged` record, `--record-only`, and "flag merges without a record".
+- **Phase 0 probe**: `git verify-commit` with an SSH allowed-signers file works in the cloud
+  image (git ≥ 2.34).
+
+## R19. Release pinning and signed tags (2026-10-02)
+
+- **Decision**: projects pin `<tag>@<sha>`. `factory release <tag>` (laptop, factory repo)
+  shows the diff since the last signed tag, asks the Owner to confirm, builds the manifest and
+  runs `git tag -s`. `factory upgrade` verifies the tag with main's pinned `allowed_signers`
+  (for `factory new`, the laptop's key list) and records `<tag>@<sha>` in the waiver;
+  `factory merge` refuses if the tag moved or the PR's protected set differs from the
+  manifest at that commit. CI and session-start fetch the release by commit hash, so a moved
+  tag never reaches them.
+- **Rationale**: resolving a tag at upgrade time only catches moves after that moment; a
+  signature catches a move at any time. Tag protection on GitHub cannot tell agents from the
+  Owner.
+- **Alternatives**: a separate release key (two keys to guard; namespaces already separate
+  the uses); signing only the manifest file (does not bind the code the CLI is built from).
+
+## R20. Red-green check and test quality (2026-10-02)
+
+- **Decision**: `factory ci red-green` reads the AC IDs from the approved `spec.md`, finds
+  tests whose titles carry them, runs them against the code at the merge base (head test
+  files over base sources) and at the head. Each AC needs ≥ 1 tagged test failing at the base
+  and passing at the head. Skipped if every changed file matches the release's test-path
+  patterns; refactors need a `gate:red-green` waiver bound to the head. Replaces red/green
+  events, which an agent could write.
+- **Limit**: proves something changed, not that the right thing changed; a tagged test can
+  fail at the base for an irrelevant reason (for example a missing import). The independent
+  review remains the control.
+- **Deferred option**: mutation testing (for example Stryker on changed files) would measure
+  whether tests catch broken code; it costs CI minutes, so it is not in v1.
 
 ---
 

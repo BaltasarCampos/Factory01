@@ -15,17 +15,23 @@ projects (role files, permission rules, hooks, CI workflows, Spec Kit templates,
 TypeScript stack profile). The CLI has three faces:
 
 1. **Laptop commands** for the Owner — `new`, `adopt`, `approve`, `merge`, `deploy`,
-   `pause`, `resume`, `upgrade`, `inbox`, `keygen`.
+   `pause`, `resume`, `upgrade`, `inbox`, `keygen`, `config set`, `release`. `merge` is the
+   only merge path: it computes its own checks and makes an Owner-signed merge commit.
 2. **Dispatcher** — `factory dispatch` / `run`: a deterministic state machine over GitHub
-   issue labels that verifies SSH-signed Owner records, derives pause state from label
-   history, and launches one Claude Code session per station (cloud or local).
+   issue labels that verifies SSH-signed Owner records and main's signed history, derives
+   pause state from label history, and launches one Claude Code session per station (cloud or
+   local). Its decisions are advisory; the laptop checks decide.
 3. **In-session enforcement** — `factory hook …` (path, read and command guards, logging,
    stop and session-start checks) and `factory mcp` (`advance_item`, `log_event`,
    `request_split`).
 
 The critical property — nothing reaches main or the laptop without the Owner — is modelled in
 TLA+ and checked in CI, and the TypeScript transition table is property-tested against the
-same invariants. Delivery follows the source roadmap: Phase 0 (P1 stories, Gate A) first.
+same invariants. Enforcement does not rest on in-session hooks alone: every commit on main is
+Owner-signed, releases are Owner-signed tags pinned by commit, CI runs only the pinned
+release's tools, and `factory merge` re-checks every pull request on the laptop. Delivery
+follows the source roadmap: Phase 0 (P1 stories, Gate A) first. Updated 2026-10-02 for spec
+v1.6 (research R18–R20).
 
 ## Technical Context
 
@@ -33,12 +39,12 @@ same invariants. Delivery follows the source roadmap: Phase 0 (P1 stories, Gate 
 
 **Primary Dependencies**: `gh` CLI, OpenSSH `ssh-keygen -Y`, Claude Code, GitHub Spec Kit
 1.0.13 (external tools); npm: `@modelcontextprotocol/sdk`, `yaml` (runtime); `typescript`,
-`vitest`, `@vitest/coverage-v8`, `fast-check`, `eslint`, `typescript-eslint`, `prettier`
-(dev). See New Dependencies.
+`vitest`, `@vitest/coverage-v8`, `fast-check`, `eslint`, `typescript-eslint`, `prettier`,
+`@types/node` (dev). See New Dependencies.
 
 **Storage**: No database. GitHub issues/labels/comments/PRs, repository files
 (`events.jsonl`, `.factory/`, `claude/factory-log`), laptop `~/.factory/` (nonce ledger,
-read alerts, approval key) ([R15](research.md#r15-storage))
+read alerts, Owner key, last verified main commit per repo) ([R15](research.md#r15-storage))
 
 **Testing**: Vitest (unit, integration, contract), fast-check (property), TLA+/TLC (formal,
 CI), scripted attack suite inside a routine (Phase 0, SC-002)
@@ -55,8 +61,8 @@ session it starts; hooks add < 300 ms per tool call (they run on every call)
 (no local model, no long-running services besides the product); GitHub Free (no branch
 protection on private repos); fail closed on every guard
 
-**Scale/Scope**: One active project, 3–5 items/week, 12 roles, 9 stations, ~80 acceptance
-criteria; factory code estimated 6–9k lines over ~22 work items
+**Scale/Scope**: One active project, 3–5 items/week, 12 roles, 9 stations, 90 acceptance
+criteria; factory code estimated 8–11k lines over ~36 work items
 
 ## Plan Usage Budget
 
@@ -66,7 +72,7 @@ criteria; factory code estimated 6–9k lines over ~22 work items
 | Estimated share of weekly plan limit | ~20–30% per week during Phase 0 build-out; re-measured in shadow mode |
 | Models | Sonnet main, Opus advisor; no Fable |
 | Parallel sessions | None |
-| Estimated changed lines | 6–9k total → split into ~22 work items of < 400 lines (see Delivery slices) |
+| Estimated changed lines | 8–11k total → split into ~36 work items of < 400 lines (see Delivery slices) |
 
 ## New Dependencies
 
@@ -81,6 +87,7 @@ and age figures are filled by the gate, not guessed here.
 | vitest, @vitest/coverage-v8 | 3.x exact | MIT | active | gate | Profile test runner; lcov for changed-line coverage | pending | pending |
 | fast-check | 3.x exact | MIT | active | gate | Property tests (tier 2–3, guard tokenizer, transitions) | pending | pending |
 | eslint, typescript-eslint, prettier | exact | MIT | active | gate | Lint and format (QG-4, FR-021 post-edit hook) | pending | pending |
+| @types/node | 24.x exact | MIT | DefinitelyTyped | gate | Node 24 typings for strict TypeScript; not shipped with Node | pending | pending |
 
 External tools (not npm): `gh`, OpenSSH, TLA+ `tla2tools.jar` (MIT, CI only), Semgrep CE,
 gitleaks, license-checker (profile CI only).
@@ -91,8 +98,8 @@ gitleaks, license-checker (profile CI only).
 
 | # | Principle | Check | Status |
 |---|-----------|-------|--------|
-| I | Owner Holds Intent and the Keys | No scope beyond spec v1.5 + clarifications; open points (R5, R8, R9, R10, R4 spec-hash interpretation) raised as Phase 0 probes, not assumed; spec approved by the Owner on 2026-10-01 | ✅ |
-| II | Spec-Driven Assembly Line | Spec exists; the whole factory is far above one slice → delivered as ~22 work items | ⚠️ deviation (Complexity Tracking #1) |
+| I | Owner Holds Intent and the Keys | No scope beyond spec v1.6 (source v1.5 + clarifications of 2026-10-01 and 2026-10-02); every merge is an Owner-signed commit made on the laptop; open points (R5, R8, R9, R10, R4 spec-hash interpretation) raised as Phase 0 probes, not assumed; spec approved by the Owner on 2026-10-01 | ✅ |
+| II | Spec-Driven Assembly Line | Spec exists; the whole factory is far above one slice → delivered as ~36 work items | ⚠️ deviation (Complexity Tracking #1) |
 | III | Test-Gated Delivery | Every AC mapped below; ≥ 90% changed-line coverage enforced by `factory ci coverage`; property tests for guards and transitions; TLA+ model of critical property | ✅ |
 | IV | Independent Agent Review | Each slice reviewed by a fresh session; two reviews (tier 3) | ✅ |
 | V | Frugal by Design | No paid service; deps minimal; stdlib first (parseArgs, crypto, child_process, node:sqlite); one session at a time | ✅ |
@@ -104,9 +111,13 @@ gitleaks, license-checker (profile CI only).
 
 **Gate result**: passes; both recorded deviations approved by the Owner on 2026-10-01; no ❌.
 
-**Post-design re-check (after Phase 1)**: unchanged. The design adds no gate relaxation; the
-dispatcher never moves an item on a label alone; every Owner-only action requires a laptop
-TTY and a passphrase-signed record; CI duplicates every in-session guard.
+**Post-design re-check (after Phase 1, repeated 2026-10-02)**: unchanged. The design adds no
+gate relaxation; the dispatcher never moves an item on a label alone; every Owner-only action
+requires a laptop TTY and a passphrase signature (a record, a signed commit or a signed tag);
+in-session hooks are defence in depth, and the binding checks run on the laptop in
+`factory merge` and `factory deploy`. Constitution v2.6.0 (2026-10-02) states the key list,
+revocation, rotation-pending exception and signed main history, so the design and the
+constitution agree.
 
 ### Acceptance Criteria → Tests
 
@@ -119,8 +130,18 @@ Test files are under `tests/`; task IDs come from `tasks.md` (`/speckit-tasks`).
 | AC-008, AC-009, AC-055 | unit (admission, dedup) | tests/unit/intake.test.ts | tasks.md |
 | AC-010, AC-011, AC-069 | unit + property (transitions) | tests/unit/transitions.test.ts, tests/property/transitions.prop.test.ts | tasks.md |
 | AC-012, AC-066, AC-080 | integration (branch creation, manifest, guard) | tests/integration/branch.test.ts | tasks.md |
+| AC-012, AC-089 | contract (red-green) | tests/contract/red-green.test.ts | T135 |
 | AC-013, AC-042 | contract (CI checks) | tests/contract/ci-checks.test.ts | tasks.md |
-| AC-014, AC-015, AC-073, AC-078 | integration (merge/deploy with fake `gh`) | tests/integration/merge-deploy.test.ts | tasks.md |
+| AC-014, AC-015, AC-073, AC-078, AC-081–AC-083, AC-086, AC-088 | integration (merge/deploy with fake `gh`, temp repos, real `ssh-keygen`) | tests/integration/merge-deploy.test.ts | T053 |
+| AC-073, AC-087, AC-088 | integration (signed main history) | tests/integration/signed-history.test.ts | T134 |
+| AC-081, AC-082 | contract (safe diff, append-only) | tests/contract/git-diff.test.ts, tests/contract/append-only.test.ts | T133, T052 |
+| AC-083 | integration (release tags) | tests/integration/release.test.ts | T131 |
+| AC-084, AC-085 | integration (rotation, revocation) | tests/integration/rotation.test.ts | T144 |
+| AC-090 | integration (config set, session-start) | tests/integration/config-set.test.ts, tests/integration/session-start.test.ts | T137, T078 |
+| FR-048, FR-049 (CI independent of the PR) | contract | tests/contract/ci-release-tools.test.ts | T136 |
+| FR-037 (CI minutes) | integration | tests/integration/ops.test.ts | T108 |
+| SC-009 (benchmark ≥ 5 items) | integration | tests/integration/benchmark.test.ts | T149 |
+| FR-034 (daily product backup) | integration | tests/integration/backup.test.ts | T129 |
 | AC-016, AC-017, AC-048 | unit (summary, trace, events) | tests/unit/summary.test.ts, tests/unit/events.test.ts | tasks.md |
 | AC-018, AC-019, AC-022, AC-067, AC-074 | unit + property (guards) + routine attack suite | tests/unit/guards.test.ts, tests/property/command-guard.prop.test.ts, tests/e2e/attack-suite.test.ts | tasks.md |
 | AC-020, AC-021 | contract + integration | tests/contract/guardrail-change.test.ts, tests/integration/session-start.test.ts | tasks.md |
@@ -141,8 +162,8 @@ Test files are under `tests/`; task IDs come from `tasks.md` (`/speckit-tasks`).
 ### Rollback Path
 
 - **Feature flag**: Not applicable to the factory (spec Risks). Kill switch: `pause:line`.
-- **Rollback steps**: Projects pin a release tag; roll back by `factory upgrade <previous-tag>`
-  (an Owner-approved PR). Within the factory repo, each slice is one PR revertable with
+- **Rollback steps**: Projects pin a signed release as `<tag>@<sha>`; roll back by
+  `factory upgrade <previous-tag>` (an Owner-approved PR merged with `factory merge`). Within the factory repo, each slice is one PR revertable with
   `git revert -m 1 <merge>`. Role files are versioned; reverting one is one commit.
 - **Tier 3**: Written rollback test — `tests/e2e/upgrade-rollback.test.ts` upgrades the
   sample project to a broken tag, then pins back and checks the guardrail manifest matches
@@ -174,9 +195,16 @@ specs/001-software-factory/
 src/
 ├── cli/                  # entry point, sub-command table (parseArgs), laptop-only checks
 ├── commands/             # new, adopt, run, dispatch, approve, merge, deploy, pause,
-│                         # resume, upgrade, inbox, keygen
-├── dispatcher/           # transitions.ts (pure table), dispatch.ts, launcher/{cloud,local}.ts
-├── approvals/            # record.ts (canonical format), sign.ts, verify.ts, nonces.ts
+│                         # resume, upgrade, inbox, keygen, config, release, benchmark, ci,
+│                         # hook, mcp
+├── dispatcher/           # transitions.ts (pure table), dispatch.ts, launcher/{cloud,local}.ts,
+│                         # history-audit.ts, rotation.ts, branch.ts, evidence.ts
+├── approvals/            # record.ts (canonical format), sign.ts, verify.ts, nonces.ts, keys.ts
+├── git/                  # diff.ts (safe diff), sign.ts (signed commits), history.ts (signed main)
+├── merge/                # rules.ts (per-branch checks), local-merge.ts
+├── release/              # tag.ts (signed release tags)
+├── stations/             # checks/ (per-station output checks), edges.ts
+├── security/, ops/, coach/  # Phase 1–3 modules (US6–US8)
 ├── pause/                # derive.ts (label-history → pause state)
 ├── guard/                # policy.ts (from roles.yaml), tokenizer.ts, path-guard.ts,
 │                         # command-guard.ts, read-guard.ts
@@ -185,7 +213,8 @@ src/
 ├── github/               # gh.ts wrapper, labels, timeline, comments, PRs
 ├── events/               # schema, append, redact
 ├── notify/               # inbox, owner-alert
-├── ci/                   # coverage, size, ac-map, append-only, guardrail-change, new-deps
+├── ci/                   # test, lint, scan, coverage, red-green, size, ac-map, append-only,
+│                         # guardrail-change, new-deps
 ├── install/              # render templates, guardrail manifest, labels, inbox issue
 └── model/                # shared types (data-model.md)
 
@@ -197,10 +226,14 @@ factory/                  # material installed into projects (source of truth fo
 ├── speckit/              # Spec Kit template overrides
 ├── constitution.md       # installed as .specify/memory/constitution.md
 ├── prompts/              # station prompts 0–8
-└── profiles/typescript/  # walking skeleton, tool settings, CI fragments
+└── profiles/typescript/  # walking skeleton, tool settings, ci/ (CI configs, thresholds,
+                          # test-path patterns used only by `factory ci`)
 
 formal/                   # Dispatcher.tla, Dispatcher.cfg (TLC in CI)
-allowed_signers           # Owner approval public key (release artifact)
+allowed_signers           # every Owner public key ever used (release artifact)
+revoked_keys              # compromised Owner keys (release artifact)
+docs/                     # operator docs, routine setup, rollback
+scripts/                  # tlc.sh
 
 tests/
 ├── unit/
@@ -216,19 +249,23 @@ lets one release tag pin code and guardrails together, which the integrity check
 
 ### Delivery slices (each one work item, < 400 changed lines, own PR)
 
-Phase 0 (P1, Gate A): 1 repo skeleton + CI · 2 approval records (sign/verify/nonces) ·
-3 pause derivation · 4 transitions table + TLA+ model · 5 guard policy + tokenizer ·
-6 path/command/read guards · 7 hooks + events · 8 MCP server · 9 gh wrapper + notify ·
-10 install (`new`/`adopt`, manifest, labels, inbox) · 11 dispatcher + launchers ·
-12 `approve`/`merge`/`deploy`/`pause`/`resume` · 13 role files + station prompts ·
-14 CI checks (`coverage`, `size`, `ac-map`, `append-only`, `guardrail-change`) ·
-15 TypeScript profile skeleton · 16 attack suite + Phase 0 probes.
-Phase 1–2 (P2): 17 lanes/tiers/batch · 18 security flow + new-deps gate · 19 routine +
-review trigger. Phase 3 (P3): 20 ops/metrics · 21 coach + benchmark · 22 upgrade.
+Phase 0 (P1, Gate A), 29 slices; the task-level mapping is in tasks.md § Incremental Delivery:
+1 repo skeleton + CI · 2 types, config, CLI shell · 3 approval records (sign/verify/nonces/keys) ·
+4 pause derivation · 5 transitions table + TLA+ model · 6 gh wrapper + notify · 7 events + hook
+entry · 8 dispatcher core · 9 `approve`/`pause`/`resume` · 10 `factory release` + tag
+verification · 11 install (`new`/`adopt`, manifest, labels, inbox) · 12 Define · 13 factory
+copies + profile skeleton · 14 station checks · 15 summary, trace, edge rules · 16 item
+branch, draft PR, launchers · 17 MCP server · 18 safe diff + CI checks · 19 red-green +
+release-shipped CI + workflows · 20 signed main history + `config set` · 21–22
+`factory merge` · 23 `factory deploy` + backups · 24 role files + station prompts · 25–26
+guards · 27 `guardrail-change` · 28 session-start · 29 Gate A e2e + injection + attack suite.
+Phase 1–2 (P2): 30 lanes/tiers/batch · 31 security flow + new-deps gate · 32 routine +
+review trigger. Phase 3 (P3): 33 ops/metrics · 34 coach + benchmark · 35 upgrade · 36 key
+rotation.
 
 ## Complexity Tracking
 
 | Deviation | Principle | Why Needed | Simpler Alternative Rejected Because | Owner approval |
 |-----------|-----------|------------|-------------------------------------|----------------|
-| One spec covers the whole factory (6–9k lines), above the 400-line slice | II | The spec is the v1 system definition; it is delivered as ~22 slices, each its own PR under the limit | Re-specifying each slice as a separate spec now would duplicate the cross-cutting requirements (signatures, pause, guards) that must stay consistent | Approved by the Owner, 2026-10-01 (chat) |
-| The factory is built outside its own line: no issue, no `claude/<issue>-<slug>` branch, no signed approvals, work currently on `master`; guardrail files are authored here by an agent session | VII, II | Bootstrapping: the guards, dispatcher and signing do not exist until Phase 0 ships. Mitigation: every slice is a PR the Owner merges; guardrail sources live under `factory/` (not this repo's live `.claude/`); once Gate A passes, the factory repo adopts itself (`factory adopt`) and further work goes through the line | Waiting for a line that cannot exist yet is impossible; hand-writing everything without agents defeats the goal | Approved by the Owner, 2026-10-01 (chat) |
+| One spec covers the whole factory (8–11k lines), above the 400-line slice | II | The spec is the v1 system definition; it is delivered as ~36 slices, each its own PR under the limit | Re-specifying each slice as a separate spec now would duplicate the cross-cutting requirements (signatures, pause, guards) that must stay consistent | Approved by the Owner, 2026-10-01 (chat) |
+| The factory is built outside its own line: no issue, no `claude/<issue>-<slug>` branch, no signed approvals, work currently on `master`; guardrail files are authored here by an agent session | VII, II | Bootstrapping: the guards, dispatcher and signing do not exist until Phase 0 ships. Mitigation: every slice is a PR the Owner merges locally with a signed merge commit (`git merge --no-ff -S`) until `factory merge` exists, so main's history is signed from the start; guardrail sources live under `factory/` (not this repo's live `.claude/`); once Gate A passes, the factory repo adopts itself (`factory adopt`) and further work goes through the line | Waiting for a line that cannot exist yet is impossible; hand-writing everything without agents defeats the goal | Approved by the Owner, 2026-10-01 (chat) |

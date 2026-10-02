@@ -1,10 +1,10 @@
 # Implementation Plan: [FEATURE]
 
-**Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
+**Branch**: `claude/[issue]-[slug]` | **Date**: [DATE] | **Spec**: [link]
 
 **Work item**: [#issue] | **Risk tier**: [1 / 2 / 3, copied from the spec] | **Lane**: [Lean / Full / Batch]
 
-**Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
+**Input**: Feature specification from `/specs/[issue]-[slug]/spec.md` (tier 2–3: the version the Owner's `owner:spec-approved` record names)
 
 **Note**: This template is filled in by the `/speckit-plan` command; its definition describes the execution workflow.
 
@@ -47,8 +47,8 @@ constitution amendment)
 |------|-------|
 | Model sessions planned (per station) | [e.g., Build 1 · Review 1 (tier 3: 2) · Test 1] |
 | Estimated share of weekly plan limit | [e.g., ~5%] |
-| Models | Sonnet main, Opus advisor (Intake/Test: Sonnet only); [any escalation + reason] |
-| Parallel sessions | None [or: Owner approval reference] |
+| Models | Sonnet main, Opus advisor (Intake/Test: Sonnet only); no Fable; [any escalation + reason] |
+| Parallel sessions | None [or: `parallel_sessions` value set by the Owner with `factory config set`] |
 | Estimated changed lines | [target < 400; otherwise split the work item] |
 
 ## New Dependencies
@@ -56,7 +56,9 @@ constitution amendment)
 <!--
   Principle VII and Operating Constraints: every addition needs the dependency gate and Owner
   approval. Prefer existing code → standard library → established dependency → new code.
-  Write "None" if nothing is added.
+  The gate checks the package exists, is not a near-name of a popular package, and has real
+  age and usage. Owner approval is a signed waiver `dep:<name>@<version>` on the pull request
+  that adds it. Write "None" if nothing is added.
 -->
 
 | Package | Version | Licence | Maintenance | Usage / age | Why not existing code or stdlib | Gate passed | Owner approval |
@@ -72,20 +74,23 @@ with Owner approval).
 
 | # | Principle | Check | Status |
 |---|-----------|-------|--------|
-| I | Owner Holds Intent and the Keys | Plan adds no scope beyond the approved spec; open questions are raised to the Owner, not assumed; spec approved (tier 2–3) or skimmed (tier 1) | [ ] |
-| II | Spec-Driven Assembly Line | Input spec exists and passed its gate; work is one independently releasable slice (< 400 changed lines, reviewable in < 30 min) | [ ] |
-| III | Test-Gated Delivery | Every acceptance criterion maps to an automated test (see table below); coverage ≥ 90% on changed lines is achievable; tier 2: property-based tests planned; tier 3: formal verification of the critical property planned (TLA+ or Dafny) | [ ] |
+| I | Owner Holds Intent and the Keys | Plan adds no scope beyond the approved spec; open questions are raised to the Owner, not assumed; spec approved with a signed `owner:spec-approved` record (tier 2–3) or skimmed (Owner-confirmed tier 1); the Owner alone merges (`factory merge`, a signed merge commit) and deploys (`factory deploy`) | [ ] |
+| II | Spec-Driven Assembly Line | Input spec exists and passed its gate; work is one independently releasable slice (< 400 changed lines, reviewable in < 30 min) on one branch and one pull request; larger work is split into more work items | [ ] |
+| III | Test-Gated Delivery | Every acceptance criterion maps to an automated test carrying its AC-### ID (see table below); each criterion's tests fail before the change and pass after it (CI red-green check); coverage on changed lines ≥ the stricter of the release's floor (90%) and the project's `coverage_min` is achievable; tier 2: property-based tests planned; tier 3: formal verification of the critical property planned (TLA+ or Dafny) | [ ] |
 | IV | Independent Agent Review | Review by a separate fresh session planned; tier 3: second independent review planned | [ ] |
 | V | Frugal by Design | Usage budget stated above; no API credits or new paid services; dependencies minimal and justified | [ ] |
-| VI | Traceable and Observable Work | Trace links request → spec → plan → tasks are present; structured logs and health signals for new behavior are planned | [ ] |
-| VII | Bounded Autonomy and Safe Operations | No guardrail file changes (`.claude/`, `.mcp.json`, hooks, `.github/workflows/`, `.factory/config`, constitution, lockfile policy); no secrets; new dependencies gated; irreversible actions flagged for the Owner; rollback path defined (tier 3: written and tested) | [ ] |
+| VI | Traceable and Observable Work | Trace links request → spec → plan → tasks are present; commits carry `Factory-Role:` and `Factory-Item:`; events are written by the hooks to `events.jsonl` (never by hand); structured logs and health signals for new behavior are planned | [ ] |
+| VII | Bounded Autonomy and Safe Operations | No guardrail file changes (`.claude/`, `.mcp.json`, hooks, `.github/workflows/`, `.factory/config`, constitution, lockfile policy, `.gitattributes`, `.gitmodules`) — `factory merge` refuses any pull request that touches them; pushes only to the branch named in the station prompt; no secrets; new dependencies gated; irreversible actions flagged for the Owner; rollback path defined (tier 3: written and tested) | [ ] |
 | VIII | Fresh Context, File Hand-offs | Each task fits one fresh session; hand-offs only via repository artifacts | [ ] |
 | IX | Learning Within Limits | Relevant `.factory/lessons/` entries consulted; no changes to gates, permissions or budgets | [ ] |
 | — | Risk tier and lane | Tier matches the spec (agents never lower it); lane allowed for the tier | [ ] |
 
 ### Acceptance Criteria → Tests
 
-<!-- Station 3 gate: every criterion in the spec maps to at least one automated test. -->
+<!--
+  Station 3 gate: every criterion in the spec maps to at least one automated test whose title
+  carries the AC-### ID. Test files must match the release's test-path patterns.
+-->
 
 | Criterion (spec) | Test type | Test file | Task |
 |------------------|-----------|-----------|------|
@@ -104,14 +109,17 @@ with Owner approval).
 ### Documentation (this feature)
 
 ```text
-specs/[###-feature]/
+specs/[issue]-[slug]/      # on branch claude/[issue]-[slug]
+├── spec.md              # Station 2 output (/speckit-specify)
 ├── plan.md              # This file (/speckit-plan command output)
 ├── research.md          # Phase 0 output (/speckit-plan command)
 ├── data-model.md        # Phase 1 output (/speckit-plan command)
 ├── quickstart.md        # Phase 1 output (/speckit-plan command)
 ├── contracts/           # Phase 1 output (/speckit-plan command)
 ├── tasks.md             # Phase 2 output (/speckit-tasks command - NOT created by /speckit-plan)
-└── reports/             # Station 5+ output (verify.md, review reports)
+├── reports/             # Station 5+ output (verify.md, review reports; also posted on the PR)
+├── events.jsonl         # Append-only event log, written only by the hooks (telemetry)
+└── .station.json        # Station manifest, written only by the dispatcher
 ```
 
 ### Source Code (repository root)
@@ -152,7 +160,7 @@ frontend/
 └── tests/
 
 # [REMOVE IF UNUSED] Tier 3 formal verification
-specs/[###-feature]/formal/   # TLA+ (.tla) or Dafny (.dfy) models, checked in CI
+specs/[issue]-[slug]/formal/   # TLA+ (.tla) or Dafny (.dfy) models, checked in CI
 ```
 
 **Structure Decision**: [Document the selected structure and reference the real
@@ -161,7 +169,8 @@ directories captured above]
 ## Complexity Tracking
 
 > **Fill ONLY if Constitution Check has deviations that must be justified. Each row needs
-> Owner approval before the plan passes its gate.**
+> Owner approval before the plan passes its gate. Skipping a gate needs a signed
+> `owner:waiver` record (`factory approve <issue> waiver gate:<gate>`).**
 
 | Deviation | Principle | Why Needed | Simpler Alternative Rejected Because | Owner approval |
 |-----------|-----------|------------|-------------------------------------|----------------|
