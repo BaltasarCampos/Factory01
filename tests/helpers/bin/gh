@@ -1,0 +1,3 @@
+#!/bin/sh
+# Fake GitHub CLI for tests: see tests/helpers/fake-gh.ts. State file: $FAKE_GH_STATE.
+exec node --disable-warning=ExperimentalWarning "$(dirname "$0")/../fake-gh.ts" "$@"
