@@ -1,0 +1,65 @@
+# CI for the factory repository itself.
+# Source file: the Owner copies it to .github/workflows/ci.yml (guardrail path; Owner action).
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
+  TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Install (scripts disabled)
+        run: npm ci --ignore-scripts
+      - name: Build
+        run: npm run build
+      - name: Lint
+        run: npm run lint
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Format check
+        run: npx --no-install prettier --check .
+      - name: Test
+        run: npm test
+
+  formal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - name: Fetch tla2tools.jar (pinned by SHA-256)
+        run: |
+          curl -sSLf -o tla2tools.jar "$TLA2TOOLS_URL"
+          echo "$TLA2TOOLS_SHA256  tla2tools.jar" | sha256sum -c -
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Model check
+        run: npm run test:formal

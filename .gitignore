@@ -1,0 +1,5 @@
+node_modules/
+dist/
+coverage/
+formal/states/
+*.tla.out
