@@ -52,9 +52,20 @@ nonce: 9f2c1e0a7b4d4e8f8a1b2c3d4e5f6a7b
      however late the record is posted. Its nonce must be the first occurrence among all
      record comments on the inbox issue.
    - `deployed`: the nonce must be the first occurrence among all records in the repo.
-   Laptop commands also reject any nonce already in `~/.factory/nonces.log` (AC-079).
+   Laptop commands also keep `~/.factory/nonces.log`, one `<nonce> <repo>#<issue>/<comment id>`
+   line per nonce, appended the first time the laptop issues or sees it. A nonce already
+   recorded against another comment → replay (AC-079); the same comment verifies again, so
+   `factory merge` can re-verify records that `factory approve` wrote.
 
-Any failure → item stops, urgent alert "tampering", event logged (AC-068).
+Each failure has a kind, and the kind decides what happens:
+
+| Kind | Cause | Effect |
+|------|-------|--------|
+| `tampering` | Step 1–4 failure; an identity field (repo, issue, gate, tier, branch, scope, waiver target) does not match; an `owner:` label not backed by a verified record; a guardrail-change waiver outside the upgrade PR for its release; a deploy record for another head | Item stops, urgent alert "tampering", event logged (AC-068) |
+| `replay` | Step 6 failure | Same as tampering (AC-079) |
+| `stale` | A genuine record that no longer covers the item: `spec.md` changed since `spec-approved` (AC-071), or the PR head moved past a code-gate waiver's `head` (AC-089) | No alert; the item waits for a fresh signature (`factory merge` offers to re-sign a stale waiver) |
+| `rotation-pending` | Step 3 rotation case | Line halts, one urgent alert naming the key to update (AC-084) |
+| `missing` | No `owner:` label yet, or no verified waiver for the target asked about | The item waits for the Owner |
 
 ## Signed merge commits (replace the earlier `merged` record)
 

@@ -1,5 +1,16 @@
-import { renameSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { chmodSync, copyFileSync, mkdirSync, renameSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { beforeAll, describe, expect, it } from 'vitest';
+import {
+  checkSecondCopy,
+  keyOf,
+  newestKey,
+  secondCopy,
+  pinOnMain,
+  releaseKeys,
+  type ReleaseKeys,
+} from '../../src/approvals/keys.js';
+import { firstUses, NonceLedger } from '../../src/approvals/nonces.js';
 import {
   extractFromComment,
   FIELD_ORDER,
@@ -12,13 +23,25 @@ import {
   serialise,
 } from '../../src/approvals/record.js';
 import { sign, SigningError } from '../../src/approvals/sign.js';
+import {
+  specBlobSha,
+  verifyGate,
+  verifySignature,
+  type Expected,
+  type GateCheck,
+  type LabelAdd,
+  type PostedComment,
+} from '../../src/approvals/verify.js';
 import type { ApprovalRecord } from '../../src/model/types.js';
+import { makeRepo } from '../helpers/git-repo.js';
 import {
   makeKeys,
   makeOtherKeys,
   sshVerifies,
   startAgent,
+  tempDir,
   writeKeyFiles,
+  type TestKeys,
 } from '../helpers/keys.js';
 
 const SPEC_SHA = '3b18e512dba79e4c8300dd08aeb37f8e728b8dad';
@@ -367,5 +390,305 @@ describe('signing records with ssh-keygen (T032)', () => {
     expect(() => sign(SPEC_APPROVED, '/nonexistent/approve_ed25519', { stdinIsTTY: true })).toThrow(
       /\/nonexistent\/approve_ed25519/,
     );
+  });
+});
+
+describe('record verification (T033, contracts/approval-record.md steps 3–6)', () => {
+  let old: TestKeys, owner: TestKeys, other: TestKeys;
+  let keys: ReleaseKeys;
+  beforeAll(() => {
+    old = makeKeys();
+    owner = makeKeys();
+    other = makeOtherKeys();
+    keys = writeKeyFiles([old, owner]);
+  });
+
+  let ids = 0;
+  const at = (minute: number) => `2026-10-01T10:${String(minute).padStart(2, '0')}:00Z`;
+  const post = (record: ApprovalRecord, key: TestKeys, minute: number): PostedComment => ({
+    id: String(++ids),
+    createdAt: at(minute),
+    body: renderComment(record, sign(record, key.privateKey, { stdinIsTTY: true })),
+  });
+  const added = (label: string, minute: number): LabelAdd => ({ label, createdAt: at(minute) });
+  const approvedLabel = [added('owner:approved', 1)];
+  const EXPECT: Expected = { repo: 'baltisark/sample', issue: 42, gate: 'approved', tier: 1 };
+
+  const gate = (
+    comments: PostedComment[],
+    labelAdds: LabelAdd[] = approvedLabel,
+    more: Partial<GateCheck> = {},
+  ) =>
+    verifyGate({
+      keys,
+      secondCopy: owner.publicKey,
+      expected: EXPECT,
+      comments,
+      labelAdds,
+      ...more,
+    });
+
+  describe('keys and signatures (AC-072, AC-084, AC-085)', () => {
+    it('verifies a record signed with any listed key, including an older one (AC-084)', () => {
+      expect(gate([post(VALID.approved, owner, 0)])).toMatchObject({ ok: true });
+      expect(gate([post(VALID.approved, old, 0)])).toMatchObject({
+        ok: true,
+        record: VALID.approved,
+      });
+    });
+
+    it('fails a record signed with a revoked or unknown key (AC-085)', () => {
+      const revoked = writeKeyFiles([old, owner], [old]);
+      expect(gate([post(VALID.approved, old, 0)], approvedLabel, { keys: revoked })).toMatchObject({
+        ok: false,
+        kind: 'tampering',
+      });
+      expect(gate([post(VALID.approved, owner, 0)], approvedLabel, { keys: revoked }).ok).toBe(
+        true,
+      );
+      expect(gate([post(VALID.approved, other, 0)])).toMatchObject({
+        ok: false,
+        kind: 'tampering',
+      });
+    });
+
+    it('decides by the ssh-keygen exit code only', () => {
+      const signed = sign(VALID.approved, owner.privateKey, { stdinIsTTY: true });
+      expect(verifySignature(signed, keys)).toBe(true);
+      const fake = (stdout: string, code: number) => {
+        const bin = tempDir('factory-fake-bin-');
+        const script = join(bin, 'ssh-keygen');
+        // Reads the record like the real tool; exiting unread can fail the write with EPIPE.
+        writeFileSync(
+          script,
+          `#!/bin/sh\ncat >/dev/null\necho '${stdout}'\nexit ${String(code)}\n`,
+        );
+        chmodSync(script, 0o755);
+        return { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
+      };
+      expect(verifySignature(signed, keys, fake('Good "factory-approve" signature', 1))).toBe(
+        false,
+      );
+      expect(verifySignature(signed, keys, fake('Could not verify signature.', 0))).toBe(true);
+    });
+
+    it('fails every record when the second copy is not the newest key (AC-072)', () => {
+      const record = [post(VALID.approved, owner, 0)];
+      for (const secondCopy of [other.publicKey, old.publicKey, undefined]) {
+        expect(gate(record, approvedLabel, { secondCopy })).toMatchObject({
+          ok: false,
+          kind: 'tampering',
+          reason: expect.stringMatching(/second copy/) as unknown,
+        });
+      }
+    });
+
+    it('compares the second copy after whitespace normalisation, ignoring comments', () => {
+      const [type, blob] = owner.publicKey.split(' ');
+      for (const secondCopy of [`  ${type}   ${blob} laptop\n`, owner.allowedSignersLine]) {
+        expect(checkSecondCopy(keys, secondCopy)).toEqual({ status: 'ok' });
+      }
+    });
+
+    it('takes the newest key as the last line not revoked', () => {
+      expect(newestKey(keys)).toBe(owner.publicKey.split(' ').slice(0, 2).join(' '));
+      const ownerRevoked = writeKeyFiles([old, owner], [owner]);
+      expect(newestKey(ownerRevoked)).toBe(old.publicKey.split(' ').slice(0, 2).join(' '));
+      expect(checkSecondCopy(ownerRevoked, old.publicKey)).toEqual({ status: 'ok' });
+      const broken = writeKeyFiles([owner]);
+      writeFileSync(broken.allowedSigners, 'owner not-a-key\n');
+      expect(() => newestKey(broken)).toThrow(/not a public key line/);
+    });
+
+    it('takes the second copy from the routine variable in the cloud, the laptop key otherwise', () => {
+      const home = tempDir();
+      const cloud = { CLAUDE_CODE_REMOTE: '1', FACTORY_ALLOWED_SIGNERS: owner.publicKey };
+      expect(secondCopy(cloud, home)).toBe(owner.publicKey);
+      expect(secondCopy({ CLAUDE_CODE_REMOTE: '1' }, home)).toBeUndefined();
+      expect(secondCopy({ FACTORY_ALLOWED_SIGNERS: other.publicKey }, home)).toBeUndefined();
+      mkdirSync(join(home, '.factory', 'keys'), { recursive: true });
+      copyFileSync(owner.publicKeyPath, join(home, '.factory', 'keys', 'approve_ed25519.pub'));
+      expect(keyOf(secondCopy({ FACTORY_ALLOWED_SIGNERS: other.publicKey }, home) ?? '')).toBe(
+        keyOf(owner.publicKey),
+      );
+    });
+
+    it('reports rotation-pending, not tampering, while the second copy holds the previous key (AC-084)', () => {
+      expect(checkSecondCopy(keys, old.publicKey, old.publicKey)).toMatchObject({
+        status: 'rotation-pending',
+      });
+      expect(
+        gate([post(VALID.approved, old, 0)], approvedLabel, {
+          secondCopy: old.publicKey,
+          previousNewest: old.publicKey,
+        }),
+      ).toMatchObject({ ok: false, kind: 'rotation-pending' });
+      // A compromised previous key is never a pending rotation.
+      const oldRevoked = writeKeyFiles([old, owner], [old]);
+      expect(checkSecondCopy(oldRevoked, old.publicKey, old.publicKey)).toMatchObject({
+        status: 'tampering',
+      });
+    });
+
+    it("reads keys from the release pinned on main, never a pull request's copy (AC-084)", () => {
+      const factory = makeRepo({
+        files: { allowed_signers: `${owner.allowedSignersLine}\n`, revoked_keys: '' },
+      });
+      const good = factory.revParse('HEAD');
+      const bad = factory.commit({ allowed_signers: `${other.allowedSignersLine}\n` }, 'swap');
+      const config = (sha: string) =>
+        `factory_release: v1.0.0@${sha}\nrepo: baltisark/sample\ninbox_issue: 1\n`;
+      const project = makeRepo({ files: { '.factory/config': config(good) } });
+      project.checkout('claude/42-add-login', { create: true });
+      project.commit(
+        { '.factory/config': config(bad), allowed_signers: `${other.allowedSignersLine}\n` },
+        'pin the attacker release',
+      );
+      project.push();
+
+      const pin = pinOnMain(project.path);
+      expect(pin).toEqual({ tag: 'v1.0.0', sha: good });
+      const pinned = releaseKeys(factory.path, pin.sha, tempDir());
+      expect(gate([post(VALID.approved, owner, 0)], approvedLabel, { keys: pinned }).ok).toBe(true);
+      expect(gate([post(VALID.approved, other, 0)], approvedLabel, { keys: pinned })).toMatchObject(
+        { ok: false, kind: 'tampering' },
+      );
+
+      const noRevoked = factory.commit({ revoked_keys: null }, 'drop revoked_keys');
+      expect(() => releaseKeys(factory.path, noRevoked, tempDir())).toThrow(/revoked_keys/);
+    });
+  });
+
+  describe('labels and fields (AC-068, AC-070, AC-071)', () => {
+    it('treats an owner: label without a matching record as tampering (AC-068)', () => {
+      expect(gate([])).toMatchObject({
+        ok: false,
+        kind: 'tampering',
+        reason: expect.stringMatching(/owner:approved.*without a matching record/) as unknown,
+      });
+      // A record backs only label-adds after its comment, and a forged one backs nothing.
+      expect(gate([post(VALID.approved, owner, 2)])).toMatchObject({ kind: 'tampering' });
+      expect(gate([post(VALID.approved, other, 0)])).toMatchObject({ kind: 'tampering' });
+    });
+
+    it('reports a record with no label as missing, not tampering', () => {
+      expect(gate([post(VALID.approved, owner, 0)], [])).toMatchObject({ kind: 'missing' });
+    });
+
+    it('fails a record copied to another item or edited (AC-070)', () => {
+      const comment = post(VALID.approved, owner, 0);
+      expect(gate([comment], approvedLabel, { expected: { ...EXPECT, issue: 43 } })).toMatchObject({
+        kind: 'tampering',
+      });
+      expect(
+        gate([comment], approvedLabel, { expected: { ...EXPECT, repo: 'baltisark/other' } }),
+      ).toMatchObject({ kind: 'tampering' });
+      expect(gate([comment], approvedLabel, { expected: { ...EXPECT, tier: 3 } })).toMatchObject({
+        kind: 'tampering',
+      });
+      const edited = { ...comment, body: comment.body.replace('tier: 1', 'tier: 3') };
+      expect(gate([edited], approvedLabel, { expected: { ...EXPECT, tier: 3 } })).toMatchObject({
+        kind: 'tampering',
+      });
+    });
+
+    it('binds a spec approval to the current spec.md blob (AC-071)', () => {
+      const repo = makeRepo({ files: { 'README.md': 'sample\n' } });
+      repo.checkout('claude/42-add-login', { create: true });
+      repo.commit({ 'specs/42-add-login/spec.md': '# Spec v1\n' }, 'spec');
+      const blob = () => specBlobSha(repo.path, 'claude/42-add-login', 'specs/42-add-login/');
+      const signedSha = blob();
+      const comments = [post({ ...SPEC_APPROVED, spec_sha: signedSha }, owner, 0)];
+      const check = (specSha: string) =>
+        gate(comments, [added('owner:spec-approved', 1)], {
+          expected: { ...EXPECT, gate: 'spec-approved', tier: 2, specSha },
+        });
+      expect(check(signedSha).ok).toBe(true);
+      repo.commit({ 'specs/42-add-login/spec.md': '# Spec v2\n' }, 'edit spec');
+      expect(blob()).not.toBe(signedSha);
+      expect(check(blob())).toMatchObject({ ok: false, kind: 'stale' });
+    });
+  });
+
+  describe('waivers (AC-089)', () => {
+    const waiverLabel = [added('owner:waiver', 1)];
+    const forItem: Expected = { ...EXPECT, gate: 'waiver', tier: 2 };
+
+    it('counts a code-gate waiver only while the PR head equals its head', () => {
+      const comments = [post(VALID['code-gate waiver'], owner, 0)];
+      const check = (head: string) =>
+        gate(comments, waiverLabel, { expected: { ...forItem, waives: 'gate:red-green', head } });
+      expect(check(HEAD).ok).toBe(true);
+      expect(check(RELEASE_SHA)).toMatchObject({ ok: false, kind: 'stale' });
+    });
+
+    it('keeps a pre-build gate waiver valid across new commits', () => {
+      const comments = [post(VALID['pre-build gate waiver'], owner, 0)];
+      const expected = { ...forItem, waives: 'gate:spec-approved', head: RELEASE_SHA };
+      expect(gate(comments, waiverLabel, { expected }).ok).toBe(true);
+    });
+
+    it('binds each waiver target to its own issue', () => {
+      const dep = [post(VALID['dependency waiver'], owner, 0)];
+      const expectDep: Expected = {
+        ...base,
+        issue: 58,
+        gate: 'waiver',
+        waives: 'dep:@scope/pkg@1.2.3',
+      };
+      expect(gate(dep, waiverLabel, { expected: expectDep }).ok).toBe(true);
+      expect(gate(dep, waiverLabel, { expected: { ...expectDep, issue: 59 } })).toMatchObject({
+        ok: false,
+      });
+      expect(
+        gate(dep, waiverLabel, { expected: { ...expectDep, waives: 'dep:other@1.0.0' } }),
+      ).toMatchObject({ ok: false, kind: 'missing' });
+
+      const upgrade = [post(VALID['upgrade waiver'], owner, 0)];
+      const expectUpgrade: Expected = {
+        ...base,
+        issue: 57,
+        gate: 'waiver',
+        waives: `check:guardrail-change@v1.2.0@${RELEASE_SHA}`,
+        branch: 'factory/upgrade-v1.2.0',
+      };
+      expect(gate(upgrade, waiverLabel, { expected: expectUpgrade }).ok).toBe(true);
+      expect(
+        gate(upgrade, waiverLabel, {
+          expected: { ...expectUpgrade, branch: 'factory/upgrade-v1.3.0' },
+        }),
+      ).toMatchObject({ ok: false, kind: 'tampering' });
+    });
+  });
+
+  describe('single use (AC-079)', () => {
+    it('rejects a nonce backing a second label-add', () => {
+      const original = post(VALID.approved, owner, 0);
+      const reAdded = [...approvedLabel, added('owner:approved', 5)];
+      expect(gate([original], reAdded)).toMatchObject({ ok: false, kind: 'tampering' });
+      const copy = { ...original, id: 'copy', createdAt: at(4) };
+      expect(gate([original, copy], reAdded)).toMatchObject({ ok: false, kind: 'replay' });
+    });
+
+    it('rejects a nonce the laptop ledger saw on another comment', () => {
+      const ledger = new NonceLedger(join(tempDir(), 'nonces.log'));
+      const comment = post(VALID.approved, owner, 0);
+      expect(gate([comment], approvedLabel, { ledger }).ok).toBe(true);
+      expect(gate([comment], approvedLabel, { ledger }).ok).toBe(true);
+      const elsewhere = { ...comment, id: 'reposted' };
+      expect(gate([elsewhere], approvedLabel, { ledger })).toMatchObject({
+        ok: false,
+        kind: 'replay',
+        reason: expect.stringMatching(/nonces\.log/) as unknown,
+      });
+    });
+
+    it('keeps only the first use of each nonce for resume and deployed records', () => {
+      const resume = { record: VALID['line resume'] };
+      const later = { record: { ...VALID['station resume'], nonce: newNonce() } };
+      const { first, replays } = firstUses([resume, later, { record: VALID['line resume'] }]);
+      expect(first).toEqual([resume, later]);
+      expect(replays).toHaveLength(1);
+    });
   });
 });

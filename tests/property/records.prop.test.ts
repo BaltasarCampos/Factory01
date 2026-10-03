@@ -2,6 +2,7 @@ import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { parse, serialise } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
+import { matchFields, type Expected } from '../../src/approvals/verify.js';
 import { STATIONS, type ApprovalRecord, type Tier } from '../../src/model/types.js';
 import { makeKeys, sshVerifies, writeKeyFiles } from '../helpers/keys.js';
 
@@ -26,27 +27,30 @@ const common = fc.record({
   nonce: hex(32),
 });
 
+const approved: fc.Arbitrary<ApprovalRecord> = fc
+  .record({ c: common, issue, tier, slug })
+  .map(({ c, issue, tier, slug }) => ({
+    ...c,
+    issue,
+    gate: 'approved' as const,
+    tier,
+    branch: `claude/${String(issue)}-${slug}`,
+  }));
+const specApproved: fc.Arbitrary<ApprovalRecord> = fc
+  .record({ c: common, issue, tier, slug, spec: hex(40) })
+  .map(({ c, issue, tier, slug, spec }) => ({
+    ...c,
+    issue,
+    gate: 'spec-approved' as const,
+    tier,
+    branch: `claude/${String(issue)}-${slug}`,
+    spec_sha: spec,
+  }));
+
 /** Any valid record: every gate, every waiver-target form. */
 const record: fc.Arbitrary<ApprovalRecord> = fc.oneof(
-  fc
-    .record({ c: common, issue, tier, slug, gate: fc.constantFrom('approved' as const) })
-    .map(({ c, issue, tier, slug, gate }) => ({
-      ...c,
-      issue,
-      gate,
-      tier,
-      branch: `claude/${String(issue)}-${slug}`,
-    })),
-  fc
-    .record({ c: common, issue, tier, slug, spec: hex(40) })
-    .map(({ c, issue, tier, slug, spec }) => ({
-      ...c,
-      issue,
-      gate: 'spec-approved' as const,
-      tier,
-      branch: `claude/${String(issue)}-${slug}`,
-      spec_sha: spec,
-    })),
+  approved,
+  specApproved,
   fc
     .record({
       c: common,
@@ -121,4 +125,46 @@ describe('approval records (properties)', () => {
       { numRuns: 40 },
     );
   }, 60_000);
+
+  it('a record matches exactly one (repo, issue, gate, tier, branch, spec_sha) tuple (AC-070, AC-079)', () => {
+    const TUPLE = ['repo', 'issue', 'gate', 'tier', 'branch', 'spec_sha'] as const;
+    /** A different valid value for one field of the tuple. */
+    const other = (r: ApprovalRecord, field: (typeof TUPLE)[number]) => {
+      switch (field) {
+        case 'repo':
+          return { repo: `${r.repo}x` };
+        case 'issue':
+          return { issue: r.issue + 1 };
+        case 'gate':
+          return {
+            gate: r.gate === 'approved' ? ('spec-approved' as const) : ('approved' as const),
+          };
+        case 'tier':
+          return { tier: (((r.tier ?? 1) % 3) + 1) as Tier };
+        case 'branch':
+          return { branch: `${r.branch ?? 'claude/1-x'}-x` };
+        case 'spec_sha':
+          return {
+            specSha: `${r.spec_sha?.startsWith('0') ? '1' : '0'}${(r.spec_sha ?? '').slice(1)}`,
+          };
+      }
+    };
+    fc.assert(
+      fc.property(fc.oneof(approved, specApproved), fc.subarray([...TUPLE]), (r, changed) => {
+        // spec_sha is part of the tuple only for spec approvals.
+        const fields = changed.filter((f) => f !== 'spec_sha' || r.spec_sha !== undefined);
+        const expected: Expected = {
+          repo: r.repo,
+          issue: r.issue,
+          gate: r.gate,
+          ...(r.tier === undefined ? {} : { tier: r.tier }),
+          ...(r.branch === undefined ? {} : { branch: r.branch }),
+          specSha: r.spec_sha ?? '0'.repeat(40),
+        };
+        for (const field of fields) Object.assign(expected, other(r, field));
+        expect(matchFields(r, expected) === undefined).toBe(fields.length === 0);
+      }),
+      { numRuns: 500 },
+    );
+  });
 });
