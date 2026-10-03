@@ -62,8 +62,10 @@ probes are tasks in Phase 0 and their results amend this file.
   by the key holder, so they order records but prove nothing against a stolen key; that case
   is handled by revocation. A
   second use of the same nonce fails. The laptop additionally keeps
-  `~/.factory/nonces.log` of nonces it has issued and seen, so `factory merge` rejects a
-  replay even if GitHub history were edited.
+  `~/.factory/nonces.log` of nonces it has issued and seen, each bound to the comment it was
+  first seen on, so `factory merge` rejects a replay even if GitHub history were edited
+  (a record deleted and reposted is on a new comment) while still re-verifying the Owner's
+  own records.
 - **Spec binding (AC-071)**: spec approval binds the blob hash of `spec.md`
   (`git rev-parse <branch>:specs/<feature>/spec.md`), which changes whenever the file changes;
   this is stricter and simpler than a commit hash and is what "commit hash of spec.md" is
