@@ -73,6 +73,47 @@ export function makeOtherKeys(): TestKeys {
 }
 
 /**
+ * A real `ssh-agent` holding `keys`, stopped when the current test ends; returns its socket.
+ * Used to prove the signing helpers never reach an agent.
+ */
+export function startAgent(keys: TestKeys): string {
+  // Short path: Unix socket paths are limited to about 100 bytes.
+  const socket = join(tempDir('fa-'), 'agent.sock');
+  const out = execFileSync('ssh-agent', ['-s', '-a', socket], { encoding: 'utf8' });
+  const pid = Number(/SSH_AGENT_PID=(\d+)/.exec(out)?.[1]);
+  onTestFinished(() => {
+    try {
+      process.kill(pid);
+    } catch {
+      // already gone
+    }
+  });
+  execFileSync('ssh-add', ['-q', keys.privateKey], {
+    env: { ...process.env, SSH_AUTH_SOCK: socket },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  return socket;
+}
+
+/** `ssh-keygen -Y verify` of `data` against an `allowed_signers` file, decided by exit code. */
+export function sshVerifies(
+  data: string | Buffer,
+  signature: string,
+  allowedSigners: string,
+  namespace = 'factory-approve',
+): boolean {
+  const sig = join(tempDir('factory-sig-'), 'data.sig');
+  writeFileSync(sig, signature);
+  const args = ['-Y', 'verify', '-n', namespace, '-I', 'owner', '-f', allowedSigners, '-s', sig];
+  try {
+    execFileSync('ssh-keygen', args, { input: data, stdio: ['pipe', 'ignore', 'ignore'] });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Write `allowed_signers` (keys in the given order, oldest first) and `revoked_keys` (public
  * keys, one per line; empty file when none) into a fresh temp directory.
  */

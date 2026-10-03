@@ -1,5 +1,6 @@
 // Sub-command table and dispatch for the `factory` CLI (contracts/cli.md).
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
+import { keygen } from '../commands/keygen.js';
 import type { Alert } from '../model/types.js';
 import {
   assertLaptop,
@@ -181,6 +182,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: ['ssh-keygen', 'git'],
     options: { rotate: { type: 'boolean' }, finish: { type: 'boolean' } },
     positionals: { min: 0, max: 0 },
+    run: keygen,
   },
   config: {
     summary: 'Change one .factory/config field as a signed commit on main',
