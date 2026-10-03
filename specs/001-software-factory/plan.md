@@ -62,7 +62,8 @@ session it starts; hooks add < 300 ms per tool call (they run on every call)
 protection on private repos); fail closed on every guard
 
 **Scale/Scope**: One active project, 3–5 items/week, 12 roles, 9 stations, 90 acceptance
-criteria; factory code estimated 8–11k lines over ~36 work items
+criteria; factory code re-estimated 2026-10-03 at ~30k changed lines including tests
+(slices 1–2 measured; [reports/slice-estimates.md](reports/slice-estimates.md)) over ~44 work items
 
 ## Plan Usage Budget
 
@@ -72,7 +73,7 @@ criteria; factory code estimated 8–11k lines over ~36 work items
 | Estimated share of weekly plan limit | ~20–30% per week during Phase 0 build-out; re-measured in shadow mode |
 | Models | Sonnet main, Opus advisor; no Fable |
 | Parallel sessions | None |
-| Estimated changed lines | 8–11k total → split into ~36 work items of < 400 lines (see Delivery slices) |
+| Estimated changed lines | ~30k total including tests → split into ~44 work items of < 1,000 lines during bootstrapping (see Delivery slices, Complexity Tracking #3) |
 
 ## New Dependencies
 
@@ -99,7 +100,7 @@ gitleaks, license-checker (profile CI only).
 | # | Principle | Check | Status |
 |---|-----------|-------|--------|
 | I | Owner Holds Intent and the Keys | No scope beyond spec v1.6 (source v1.5 + clarifications of 2026-10-01 and 2026-10-02); every merge is an Owner-signed commit made on the laptop; open points (R5, R8, R9, R10, R4 spec-hash interpretation) raised as Phase 0 probes, not assumed; spec approved by the Owner on 2026-10-01 | ✅ |
-| II | Spec-Driven Assembly Line | Spec exists; the whole factory is far above one slice → delivered as ~36 work items | ⚠️ deviation (Complexity Tracking #1) |
+| II | Spec-Driven Assembly Line | Spec exists; the whole factory is far above one slice → delivered as ~44 work items of < 1,000 lines | ⚠️ deviation (Complexity Tracking #1, #3) |
 | III | Test-Gated Delivery | Every AC mapped below; ≥ 90% changed-line coverage enforced by `factory ci coverage`; property tests for guards and transitions; TLA+ model of critical property | ✅ |
 | IV | Independent Agent Review | Each slice reviewed by a fresh session; two reviews (tier 3) | ✅ |
 | V | Frugal by Design | No paid service; deps minimal; stdlib first (parseArgs, crypto, child_process, node:sqlite); one session at a time | ✅ |
@@ -247,21 +248,28 @@ tests/
 installable material that becomes guardrail files in projects. Keeping both in one repo
 lets one release tag pin code and guardrails together, which the integrity check relies on.
 
-### Delivery slices (each one work item, < 400 changed lines, own PR)
+### Delivery slices (each one work item, < 1,000 changed lines during bootstrapping, own PR)
 
-Phase 0 (P1, Gate A), 29 slices; the task-level mapping is in tasks.md § Incremental Delivery:
-1 repo skeleton + CI · 2 types, config, CLI shell · 3 approval records (sign/verify/nonces/keys) ·
-4 pause derivation · 5 transitions table + TLA+ model · 6 gh wrapper + notify · 7 events + hook
-entry · 8 dispatcher core · 9 `approve`/`pause`/`resume` · 10 `factory release` + tag
-verification · 11 install (`new`/`adopt`, manifest, labels, inbox) · 12 Define · 13 factory
-copies + profile skeleton · 14 station checks · 15 summary, trace, edge rules · 16 item
-branch, draft PR, launchers · 17 MCP server · 18 safe diff + CI checks · 19 red-green +
-release-shipped CI + workflows · 20 signed main history + `config set` · 21–22
-`factory merge` · 23 `factory deploy` + backups · 24 role files + station prompts · 25–26
-guards · 27 `guardrail-change` · 28 session-start · 29 Gate A e2e + injection + attack suite.
-Phase 1–2 (P2): 30 lanes/tiers/batch · 31 security flow + new-deps gate · 32 routine +
-review trigger. Phase 3 (P3): 33 ops/metrics · 34 coach + benchmark · 35 upgrade · 36 key
-rotation.
+Re-cut 2026-10-03 for the 1,000-line bootstrapping limit (Complexity Tracking #3); slice
+numbers are kept and split slices take a letter, so earlier references stay valid. The
+task-level mapping is in tasks.md § Incremental Delivery; size estimates are in
+[reports/slice-estimates.md](reports/slice-estimates.md).
+
+Phase 0 (P1, Gate A), 35 slices (2 done): 1 repo skeleton + CI (done) · 2 types, config, CLI shell
+(done) · 3a record format + signing · 3b record verification · 4 pause derivation + TLA+
+model · 5 transition table · 6a `gh` wrapper + GitHub helpers · 6b Owner inbox · 7 events +
+hook entry · 8 dispatcher core · 9 `approve`/`pause`/`resume` · 10 `factory release` + tag
+verification · 11a install steps (manifest, render, labels, inbox) · 11b `new`/`adopt` ·
+12 Define + profile skeleton · 13 factory copies · 14 station checks · 15 summary, trace, edge
+rules · 16 item branch, draft PR, launchers · 17 MCP server · 18a safe diff + append-only ·
+18b coverage, size, ac-map · 19a red-green · 19b release-shipped CI + workflows · 20 signed
+main history + `config set` · 21 merge rules · 22 `factory merge` · 23 `factory deploy` +
+backups · 24 role files + station prompts · 25a role policy + settings · 25b tokenizer ·
+25c guards · 27 `guardrail-change` · 28 session-start + guard hooks · 29 Gate A e2e +
+injection + attack suite. Phase 1–2 (P2): 30 lanes/tiers/batch · 31a findings + gates ·
+31b new-deps gate + security workflows · 32a retry, limits, pause enforcement · 32b launcher
+fallback, review trigger. Phase 3 (P3): 33 ops/metrics · 34 coach + benchmark · 35 upgrade ·
+36 key rotation.
 
 ## Complexity Tracking
 
@@ -269,3 +277,4 @@ rotation.
 |-----------|-----------|------------|-------------------------------------|----------------|
 | One spec covers the whole factory (8–11k lines), above the 400-line slice | II | The spec is the v1 system definition; it is delivered as ~36 slices, each its own PR under the limit | Re-specifying each slice as a separate spec now would duplicate the cross-cutting requirements (signatures, pause, guards) that must stay consistent | Approved by the Owner, 2026-10-01 (chat) |
 | The factory is built outside its own line: no issue, no `claude/<issue>-<slug>` branch, no signed approvals, work currently on `master`; guardrail files are authored here by an agent session | VII, II | Bootstrapping: the guards, dispatcher and signing do not exist until Phase 0 ships. Mitigation: every slice is a PR the Owner merges locally with a signed merge commit (`git merge --no-ff -S`) until `factory merge` exists, so main's history is signed from the start; guardrail sources live under `factory/` (not this repo's live `.claude/`); once Gate A passes, the factory repo adopts itself (`factory adopt`) and further work goes through the line | Waiting for a line that cannot exist yet is impossible; hand-writing everything without agents defeats the goal | Approved by the Owner, 2026-10-01 (chat) |
+| Bootstrapping slices of the factory repository may change up to 1,000 lines, above the 400-line target of FR-038 / SC-007. Slices 1 (1,346 lines) and 2 (1,446 lines) were merged before this limit and are recorded here as accepted over-limit slices | II | Slices 1–2 measured 2.4× the plan's estimate: the tasks require one test per rule and tests count toward size, so the factory is ~30k changed lines, not 8–11k. At 400 lines Phase 0 needs ~65 slices (13–22 weeks); at 1,000 it needs ~33. Applies only to this repository until it adopts itself after Gate A; projects keep the release's 400-line limit, which `factory ci size` enforces and this deviation does not change | Keeping 400 roughly doubles review sessions and plan usage; counting test lines at a discount is not allowed by the spec; a slice near 1,000 lines may exceed the 30-minute review target, so the Owner may ask for any slice to be split | Approved by the Owner, 2026-10-03 (chat) |

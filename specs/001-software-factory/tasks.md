@@ -506,41 +506,66 @@ Task: "Contract tests for guardrail-change (AC-020) · Files: tests/contract/gua
 
 ### Incremental Delivery
 
-Each delivery slice from plan.md is one PR under ~400 changed lines. Every P1 task belongs to
-exactly one Phase 0 slice:
+Each delivery slice from plan.md is one PR under 1,000 changed lines while the factory is
+bootstrapping (plan.md Complexity Tracking #3; estimates in
+[reports/slice-estimates.md](reports/slice-estimates.md)). Slice numbers are kept; split
+slices take a letter. Every P1 task belongs to exactly one Phase 0 slice. When a test task is
+split across slices, each slice writes the cases named here, and the task is marked `[X]` only
+when its last part lands.
 
-| Slice | Tasks | Content |
-|-------|-------|---------|
-| 1 | T001–T010 | Repo skeleton, test helpers, CI source |
-| 2 | T011–T012, T024–T026 | Types, config loader, CLI shell |
-| 3 | T016–T017, T031–T033, T147–T148 | Approval records (format, signing, verification, keys) + git signing helpers |
-| 4 | T018, T034 | Pause derivation |
-| 5 | T019–T021, T035 | Transition table + TLA+ model |
-| 6 | T013, T015, T027–T028, T030 | `gh` wrapper, GitHub helpers, Owner inbox |
-| 7 | T014, T029, T064 | Events + hook entry |
-| 8 | T022, T037 | Dispatcher core |
-| 9 | T023, T036 | `approve`, `pause`, `resume` |
-| 10 | T131–T132 | `factory release` + tag verification |
-| 11 | T038, T040–T041, T043–T044 | Install: `new`, `adopt`, manifest, labels, inbox |
-| 12 | T039, T045–T046 | Define station |
-| 13 | T042, T047 | Factory copies + TypeScript skeleton |
-| 14 | T048–T049, T057 | Station output checks |
-| 15 | T054–T055, T058, T067 | Summary, trace, station edge rules |
-| 16 | T050, T059–T062 | Item branch, draft PR, launchers, `dispatch`/`run` |
-| 17 | T056, T063 | MCP server |
-| 18 | T133, T138, T051–T052, T065 | Safe diff + CI checks |
-| 19 | T135–T136, T140–T141, T066 | Red-green, release-shipped CI, workflows |
-| 20 | T134, T137, T139, T142 | Signed main history + `config set` |
-| 21–22 | T053, T068, T143 | `factory merge` (the Planner splits the per-branch rules from the command) |
-| 23 | T069, T129–T130 | `factory deploy` + backups |
-| 24 | T070–T072 | Role files + station prompts |
-| 25–26 | T074–T076, T081–T085 | Role policy, tokenizer, guards |
-| 27 | T077, T087 | `guardrail-change` |
-| 28 | T078, T086 | Session-start + guard hooks |
-| 29 | T073, T079–T080, T088 | Gate A e2e, injection, attack suite |
+| Slice | Tasks | Content | Est. lines |
+|-------|-------|---------|------------|
+| 1 | T001–T010 | Repo skeleton, test helpers, CI source (done, 1,346) | — |
+| 2 | T011–T012, T024–T026 | Types, config loader, CLI shell (done, 1,446) | — |
+| 3a | T031, T032, T148, T147, T017; T016 cases for the canonical format and signing | Record format, `sign`, `keygen`, git signing helpers | ~850 |
+| 3b | T033; T016 verification cases (AC-068, AC-070–AC-072, AC-079, AC-084, AC-085, AC-089) | Record verification, key lists, nonces | ~650 |
+| 4 | T018, T034, T021 | Pause derivation + TLA+ model | ~530 |
+| 5 | T019, T020, T035 | Transition table + property tests | ~880 |
+| 6a | T013, T027, T028 | `gh` wrapper, GitHub helpers | ~600 |
+| 6b | T015, T030 | Owner inbox and alerts | ~400 |
+| 7 | T014, T029, T064 | Events + hook entry (see slice-estimates.md note B on the `stop` hook) | ~800 |
+| 8 | T022, T037 | Dispatcher core | ~700 |
+| 9 | T023, T036 | `approve`, `pause`, `resume` | ~750 |
+| 10 | T131–T132 | `factory release` + tag verification | ~500 |
+| 11a | T040, T041, T043; T038 cases for guardrails, labels, inbox, `claude/define` | Install steps: manifest, render, labels, inbox | ~650 |
+| 11b | T044; remaining T038 cases (AC-001, AC-007, AC-083, empty repo, signed root) | `new`, `adopt` | ~620 |
+| 12 | T039, T045–T047 | Define station + TypeScript skeleton | ~840 |
+| 13 | T042 | Factory copies (constitution, Spec Kit templates) | ~960 |
+| 14 | T048–T049, T057 | Station output checks | ~700 |
+| 15 | T054–T055, T058, T067 | Summary, trace, station edge rules | ~700 |
+| 16 | T050, T059–T062 | Item branch, draft PR, launchers, `dispatch`/`run` | ~900 |
+| 17 | T056, T063 | MCP server | ~500 |
+| 18a | T133, T138, T052; the append-only part of T065 | Safe diff + `factory ci append-only` | ~600 |
+| 18b | T051; the coverage, size, ac-map and command parts of T065 | `factory ci coverage`, `size`, `ac-map` | ~650 |
+| 19a | T135, T140 | `factory ci red-green` | ~600 |
+| 19b | T136, T141, T066 | Release-shipped CI configs, `test`/`lint`/`scan`, workflows | ~750 |
+| 20 | T134, T137, T139, T142 | Signed main history + `config set` | ~650 |
+| 21 | T143; T053 cases for per-branch rules (AC-081–AC-083, AC-086, FR-016g) | Merge rules | ~700 |
+| 22 | T068; T053 merge cases (AC-014, AC-073, AC-078, AC-088) | `factory merge` | ~750 |
+| 23 | T069, T129–T130; T053 deploy cases (AC-015, AC-073, AC-087) | `factory deploy` + backups | ~700 |
+| 24 | T070–T072 | Role files + station prompts | ~870 |
+| 25a | T074, T081, T082 | Role policy + settings generator | ~650 |
+| 25b | T076, T083 | Command tokenizer | ~600 |
+| 25c | T075, T084, T085 | Command, path and read guards | ~850 |
+| 27 | T077, T087 | `guardrail-change` | ~350 |
+| 28 | T078, T086 | Session-start + guard hooks | ~650 |
+| 29 | T073, T079–T080, T088 | Gate A e2e, injection, attack suite | ~800 |
 
-Then US4 (30), US6 (31), US5 (32), US7 (33), US8 (34), US9 upgrade (35), key rotation
-T144–T145 (36). Polish tasks ride with the slice they verify; probes are not slices.
+Then:
+
+| Slice | Tasks | Content | Est. lines |
+|-------|-------|---------|------------|
+| 30 | T089–T093 | Lanes, tiers, batch (US4) | ~750 |
+| 31a | T102, T104, T105 | Security findings and gates (US6) | ~650 |
+| 31b | T103, T106, T107 | New-dependency gate + security workflows (US6) | ~450 |
+| 32a | T095–T099; T094 cases AC-032–AC-037 | Retry, blocked, caps, usage, pause enforcement (US5) | ~600 |
+| 32b | T100, T101; T094 cases AC-030, AC-031, AC-038, AC-039, AC-059 | Launcher fallback, parallel limit, review trigger (US5) | ~450 |
+| 33 | T108–T110 | Ops and metrics (US7) | ~700 |
+| 34 | T111–T113, T149–T150 | Coach and benchmark (US8) | ~950 |
+| 35 | T114–T115 | Upgrade (US9) | ~550 |
+| 36 | T144–T145 | Key rotation | ~550 |
+
+Polish tasks ride with the slice they verify; probes are not slices.
 
 ---
 
