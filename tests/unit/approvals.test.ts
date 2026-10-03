@@ -1,3 +1,4 @@
+import { renameSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import {
   extractFromComment,
@@ -10,7 +11,15 @@ import {
   renderComment,
   serialise,
 } from '../../src/approvals/record.js';
+import { sign, SigningError } from '../../src/approvals/sign.js';
 import type { ApprovalRecord } from '../../src/model/types.js';
+import {
+  makeKeys,
+  makeOtherKeys,
+  sshVerifies,
+  startAgent,
+  writeKeyFiles,
+} from '../helpers/keys.js';
 
 const SPEC_SHA = '3b18e512dba79e4c8300dd08aeb37f8e728b8dad';
 const HEAD = '1c9d0e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3';
@@ -311,6 +320,52 @@ describe('record comment envelope (contracts/approval-record.md, step 1)', () =>
   ])('rejects a comment with %s', (_name, mangle) => {
     expect(() => extractFromComment(mangle(renderComment(SPEC_APPROVED, signed)))).toThrow(
       RecordError,
+    );
+  });
+});
+
+describe('signing records with ssh-keygen (T032)', () => {
+  it('signs the canonical bytes under namespace factory-approve only', () => {
+    const owner = makeKeys();
+    const { allowedSigners } = writeKeyFiles([owner]);
+    const signed = sign(SPEC_APPROVED, owner.privateKey, { stdinIsTTY: true });
+    expect(signed.text).toBe(SPEC_APPROVED_TEXT);
+    expect(signed.signature).toMatch(
+      /^-----BEGIN SSH SIGNATURE-----\n[\s\S]+-----END SSH SIGNATURE-----\n$/,
+    );
+    expect(sshVerifies(signed.text, signed.signature, allowedSigners)).toBe(true);
+    expect(sshVerifies(signed.text, signed.signature, allowedSigners, 'git')).toBe(false);
+    expect(
+      sshVerifies(signed.text, signed.signature, writeKeyFiles([makeOtherKeys()]).allowedSigners),
+    ).toBe(false);
+    expect(extractFromComment(renderComment(SPEC_APPROVED, signed))).toEqual(signed);
+  });
+
+  it('refuses without a terminal for the passphrase', () => {
+    const owner = makeKeys();
+    expect(() => sign(SPEC_APPROVED, owner.privateKey, { stdinIsTTY: false })).toThrow(/terminal/);
+  });
+
+  it('refuses an invalid record before signing', () => {
+    const owner = makeKeys();
+    expect(() =>
+      sign({ ...SPEC_APPROVED, nonce: 'x' }, owner.privateKey, { stdinIsTTY: true }),
+    ).toThrow(RecordError);
+  });
+
+  it('never signs through an ssh-agent, even one holding the key', () => {
+    const owner = makeKeys();
+    const socket = startAgent(owner);
+    renameSync(owner.privateKey, `${owner.privateKey}.moved`);
+    const env = { ...process.env, SSH_AUTH_SOCK: socket };
+    expect(() => sign(SPEC_APPROVED, owner.privateKey, { stdinIsTTY: true, env })).toThrow(
+      SigningError,
+    );
+  });
+
+  it('reports a missing key file', () => {
+    expect(() => sign(SPEC_APPROVED, '/nonexistent/approve_ed25519', { stdinIsTTY: true })).toThrow(
+      /\/nonexistent\/approve_ed25519/,
     );
   });
 });

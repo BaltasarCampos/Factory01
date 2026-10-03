@@ -1,7 +1,9 @@
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import { parse, serialise } from '../../src/approvals/record.js';
+import { sign } from '../../src/approvals/sign.js';
 import { STATIONS, type ApprovalRecord, type Tier } from '../../src/model/types.js';
+import { makeKeys, sshVerifies, writeKeyFiles } from '../helpers/keys.js';
 
 const hex = (length: number) => fc.stringMatching(new RegExp(`^[0-9a-f]{${String(length)}}$`));
 const slug = fc
@@ -93,4 +95,30 @@ describe('approval records (properties)', () => {
       { numRuns: 500 },
     );
   });
+
+  it('any single-byte change to a signed record fails verification (AC-070, AC-079)', () => {
+    const owner = makeKeys();
+    const { allowedSigners } = writeKeyFiles([owner]);
+    /** Verification as far as this slice goes: canonical parse + ssh-keygen -Y verify. */
+    const verifies = (bytes: Buffer, signature: string): boolean => {
+      try {
+        parse(bytes.toString('utf8'));
+      } catch {
+        return false;
+      }
+      return sshVerifies(bytes, signature, allowedSigners);
+    };
+
+    fc.assert(
+      fc.property(record, fc.nat(), fc.integer({ min: 1, max: 255 }), (r, at, delta) => {
+        const { text, signature } = sign(r, owner.privateKey, { stdinIsTTY: true });
+        const bytes = Buffer.from(text, 'utf8');
+        expect(verifies(bytes, signature)).toBe(true);
+        const i = at % bytes.length;
+        bytes.writeUInt8((bytes.readUInt8(i) + delta) % 256, i);
+        expect(verifies(bytes, signature)).toBe(false);
+      }),
+      { numRuns: 40 },
+    );
+  }, 60_000);
 });
