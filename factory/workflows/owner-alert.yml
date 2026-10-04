@@ -1,0 +1,28 @@
+# Owner alert (FR-034a, AC-075). `factory` dispatches this for every urgent alert. It fails on
+# purpose: GitHub emails the Owner about failed runs, and comments or @mentions alone notify no
+# one, because agents act as the Owner's account. The alert itself is on the pinned Owner inbox
+# issue.
+name: owner-alert
+
+on:
+  workflow_dispatch:
+    inputs:
+      alert_id:
+        description: Id of the alert on the Owner inbox issue
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fail so GitHub emails the Owner
+        # The input reaches the script only through the environment, never spliced into it.
+        env:
+          ALERT_ID: ${{ inputs.alert_id }}
+        run: |
+          printf 'Owner alert %s: see the pinned Owner inbox issue at %s/%s/issues\n' \
+            "$ALERT_ID" "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY"
+          exit 1

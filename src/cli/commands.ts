@@ -1,6 +1,8 @@
 // Sub-command table and dispatch for the `factory` CLI (contracts/cli.md).
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
+import { inbox } from '../commands/inbox.js';
 import { keygen } from '../commands/keygen.js';
+import { alertLines } from '../notify/inbox.js';
 import type { Alert } from '../model/types.js';
 import {
   assertLaptop,
@@ -25,6 +27,8 @@ export interface CommandContext {
   io: { stdout: Output; stderr: Output };
   env: NodeJS.ProcessEnv;
   stdinIsTTY: boolean;
+  /** The directory the command runs in (the project clone, if any). */
+  cwd: string;
 }
 
 export interface CommandSpec {
@@ -50,7 +54,9 @@ export interface CliDeps {
   stderr: Output;
   env: NodeJS.ProcessEnv;
   stdinIsTTY: boolean;
-  /** Unread Owner-inbox alerts (wired to src/notify/inbox.ts by T030). */
+  /** Default: process.cwd(). */
+  cwd?: string;
+  /** Unread Owner-inbox alerts (src/notify/inbox.ts `projectUnreadAlerts` in main.ts). */
   unreadAlerts: () => Promise<readonly Alert[]>;
   /** Override the command table (tests). */
   commands?: Readonly<Record<string, CommandSpec>>;
@@ -147,6 +153,9 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: ['gh'],
     options: { all: { type: 'boolean' } },
     positionals: { min: 0, max: 0 },
+    // It prints the alerts itself, then marks them read.
+    showsAlerts: false,
+    run: inbox,
   },
   mcp: {
     summary: 'Factory MCP server over stdio (sessions)',
@@ -217,12 +226,8 @@ function usageText(commands: Readonly<Record<string, CommandSpec>>): string {
 }
 
 function alertText(alerts: readonly Alert[]): string {
-  const lines = alerts.map((a) => {
-    const level = a.urgency === 'urgent' ? 'URGENT' : 'info  ';
-    return `  ${level}  ${a.kind}: ${a.text}${a.url === undefined ? '' : `  ${a.url}`}`;
-  });
   const noun = alerts.length === 1 ? 'alert' : 'alerts';
-  return `Owner inbox: ${String(alerts.length)} unread ${noun}\n${lines.join('\n')}\nRun \`factory inbox\` to mark them read.\n\n`;
+  return `Owner inbox: ${String(alerts.length)} unread ${noun}\n${alertLines(alerts)}Run \`factory inbox\` to mark them read.\n\n`;
 }
 
 /** Run one `factory` invocation; returns the exit code. Never throws. */
@@ -285,6 +290,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       io: { stdout: deps.stdout, stderr: deps.stderr },
       env: deps.env,
       stdinIsTTY: deps.stdinIsTTY,
+      cwd: deps.cwd ?? process.cwd(),
     });
   } catch (err) {
     if (err instanceof UsageError) {

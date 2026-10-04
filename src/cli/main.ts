@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 // `factory` entry point: wires the real process to runCli.
+import { projectUnreadAlerts } from '../notify/inbox.js';
 import { runCli } from './commands.js';
 
 process.exitCode = await runCli(process.argv.slice(2), {
@@ -7,6 +8,5 @@ process.exitCode = await runCli(process.argv.slice(2), {
   stderr: process.stderr,
   env: process.env,
   stdinIsTTY: process.stdin.isTTY,
-  // Replaced by the Owner-inbox reader in T030 (slice 6).
-  unreadAlerts: () => Promise.resolve([]),
+  unreadAlerts: () => projectUnreadAlerts(process.cwd(), process.env),
 });
