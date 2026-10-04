@@ -1,8 +1,11 @@
 // Sub-command table and dispatch for the `factory` CLI (contracts/cli.md).
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
+import { approve } from '../commands/approve.js';
 import { hook } from '../commands/hook.js';
 import { inbox } from '../commands/inbox.js';
 import { keygen } from '../commands/keygen.js';
+import { pause } from '../commands/pause.js';
+import { resume } from '../commands/resume.js';
 import { alertLines } from '../notify/inbox.js';
 import type { Alert } from '../model/types.js';
 import {
@@ -32,6 +35,8 @@ export interface CommandContext {
   cwd: string;
   /** All of stdin (hook input JSON). */
   readStdin: () => Promise<string>;
+  /** The laptop's clock. */
+  now: () => Date;
 }
 
 export interface CommandSpec {
@@ -61,6 +66,8 @@ export interface CliDeps {
   cwd?: string;
   /** Default: read process.stdin to the end. */
   readStdin?: () => Promise<string>;
+  /** Default: the system clock. */
+  now?: () => Date;
   /** Unread Owner-inbox alerts (src/notify/inbox.ts `projectUnreadAlerts` in main.ts). */
   unreadAlerts: () => Promise<readonly Alert[]>;
   /** Override the command table (tests). */
@@ -105,11 +112,12 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   },
   approve: {
     summary: 'Sign an approval record and apply its owner: label',
-    usage: 'factory approve <issue|pr> [spec|waiver <waives>]',
+    usage: 'factory approve <issue|pr> [spec|waiver <waives>] [--tier <1|2|3>]',
     laptopOnly: true,
-    requires: ['gh', 'ssh-keygen'],
-    options: {},
+    requires: ['gh', 'ssh-keygen', 'git'],
+    options: { tier: { type: 'string' } },
     positionals: { min: 1, max: 3 },
+    run: approve,
   },
   merge: {
     summary: 'Check a pull request on the laptop and merge it with a signed commit',
@@ -134,6 +142,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: ['gh'],
     options: {},
     positionals: { min: 0, max: 1 },
+    run: pause,
   },
   resume: {
     summary: 'Sign a resume record and lift a pause',
@@ -142,6 +151,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: ['gh', 'ssh-keygen'],
     options: {},
     positionals: { min: 0, max: 1 },
+    run: resume,
   },
   upgrade: {
     summary: 'Open a pull request moving the project to a signed factory release',
@@ -304,6 +314,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       stdinIsTTY: deps.stdinIsTTY,
       cwd: deps.cwd ?? process.cwd(),
       readStdin: deps.readStdin ?? readProcessStdin,
+      now: deps.now ?? (() => new Date()),
     });
   } catch (err) {
     if (err instanceof UsageError) {
