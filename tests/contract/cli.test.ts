@@ -79,6 +79,7 @@ async function cli(
     env: { PATH: process.env.PATH ?? '' },
     stdinIsTTY: true,
     unreadAlerts: () => Promise.resolve([]),
+    readStdin: () => Promise.resolve(''),
     ...overrides,
   });
   return { code, stdout: out.join(''), stderr: err.join(''), all: all.join('') };

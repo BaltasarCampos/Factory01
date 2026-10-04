@@ -1,5 +1,6 @@
 // Sub-command table and dispatch for the `factory` CLI (contracts/cli.md).
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
+import { hook } from '../commands/hook.js';
 import { inbox } from '../commands/inbox.js';
 import { keygen } from '../commands/keygen.js';
 import { alertLines } from '../notify/inbox.js';
@@ -29,6 +30,8 @@ export interface CommandContext {
   stdinIsTTY: boolean;
   /** The directory the command runs in (the project clone, if any). */
   cwd: string;
+  /** All of stdin (hook input JSON). */
+  readStdin: () => Promise<string>;
 }
 
 export interface CommandSpec {
@@ -56,6 +59,8 @@ export interface CliDeps {
   stdinIsTTY: boolean;
   /** Default: process.cwd(). */
   cwd?: string;
+  /** Default: read process.stdin to the end. */
+  readStdin?: () => Promise<string>;
   /** Unread Owner-inbox alerts (src/notify/inbox.ts `projectUnreadAlerts` in main.ts). */
   unreadAlerts: () => Promise<readonly Alert[]>;
   /** Override the command table (tests). */
@@ -174,6 +179,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     options: {},
     positionals: { min: 1, max: 1 },
     showsAlerts: false,
+    run: hook,
   },
   ci: {
     summary: 'CI checks built from the pinned release (GitHub Actions)',
@@ -228,6 +234,12 @@ function usageText(commands: Readonly<Record<string, CommandSpec>>): string {
 function alertText(alerts: readonly Alert[]): string {
   const noun = alerts.length === 1 ? 'alert' : 'alerts';
   return `Owner inbox: ${String(alerts.length)} unread ${noun}\n${alertLines(alerts)}Run \`factory inbox\` to mark them read.\n\n`;
+}
+
+async function readProcessStdin(): Promise<string> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+  return Buffer.concat(chunks).toString('utf8');
 }
 
 /** Run one `factory` invocation; returns the exit code. Never throws. */
@@ -291,6 +303,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       env: deps.env,
       stdinIsTTY: deps.stdinIsTTY,
       cwd: deps.cwd ?? process.cwd(),
+      readStdin: deps.readStdin ?? readProcessStdin,
     });
   } catch (err) {
     if (err instanceof UsageError) {

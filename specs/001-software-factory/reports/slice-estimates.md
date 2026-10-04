@@ -11,7 +11,7 @@ The Owner approved a **1,000-line limit** for this repository's bootstrapping sl
 re-cut to fit (plan.md § Delivery slices, tasks.md § Incremental Delivery): **44 work items in
 total, 42 remaining** (33 to Gate A, 9 in Phases 1–3), against 82 at 400 lines and 34 in the
 original plan. Note A is resolved by giving the verbatim copies a slice of their own (13) and
-moving the skeleton to slice 12. Note B stays open for slice 7's planning. The tables below are
+moving the skeleton to slice 12. Note B is resolved (2026-10-04): the `stop` hook ships in slice 7 and fails closed. The tables below are
 the 400-line analysis that led to the decision.
 
 ## What the first two slices measured
@@ -98,6 +98,8 @@ Polish tasks (T116–T123, ~500 lines) ride with the slices they verify, as plan
 - **B. A dependency to fix in planning.** T064 (slice 7) builds the `stop` hook, which runs the
   station output checkers that only arrive in slice 14 (T045, T057). Either move the `stop`
   hook to slice 14 or ship it with an empty checker registry in slice 7.
+  **Resolved 2026-10-04 (Owner):** ship it in slice 7 with an empty registry; a station without
+  a checker blocks stop (fail closed) until slice 14 registers its checker.
 - **C. Budget impact.** About 82 slices instead of 34 means about two and a half times the review sessions
   and plan usage in plan.md § Plan Usage Budget; at 3–5 slices a week, Gate A (65 slices) moves from about
   6–9 weeks to about 13–22 weeks.
