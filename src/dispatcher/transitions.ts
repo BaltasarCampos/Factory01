@@ -124,7 +124,7 @@ function specMissing(e: Evidence): string | undefined {
  * Owner evidence every item in `state` must have. A `state:` label is only the dispatcher's
  * bookkeeping, so a state past a gate never stands in for the gate itself.
  */
-function ownerBasisMissing(state: State, e: Evidence): string | undefined {
+export function ownerBasisMissing(state: State, e: Evidence): string | undefined {
   const i = at(state);
   if (i >= at('triaged')) {
     const missing = approvedMissing(e);
