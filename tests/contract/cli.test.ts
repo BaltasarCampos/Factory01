@@ -165,7 +165,7 @@ describe('factory CLI contract (contracts/cli.md)', () => {
     });
 
     it('for a command not built yet', async () => {
-      const r = await cli(['pause']);
+      const r = await cli(['upgrade', 'v1.0.0']);
       expect(r.code).toBe(1);
       expect(r.stderr).toContain('not implemented');
     });
