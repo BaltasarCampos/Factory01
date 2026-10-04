@@ -1,10 +1,12 @@
 // Sub-command table and dispatch for the `factory` CLI (contracts/cli.md).
+import { createInterface } from 'node:readline/promises';
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 import { approve } from '../commands/approve.js';
 import { hook } from '../commands/hook.js';
 import { inbox } from '../commands/inbox.js';
 import { keygen } from '../commands/keygen.js';
 import { pause } from '../commands/pause.js';
+import { release } from '../commands/release.js';
 import { resume } from '../commands/resume.js';
 import { alertLines } from '../notify/inbox.js';
 import type { Alert } from '../model/types.js';
@@ -37,6 +39,8 @@ export interface CommandContext {
   readStdin: () => Promise<string>;
   /** The laptop's clock. */
   now: () => Date;
+  /** Ask the Owner a question on the terminal; resolves to the typed line. */
+  ask: (question: string) => Promise<string>;
 }
 
 export interface CommandSpec {
@@ -68,6 +72,8 @@ export interface CliDeps {
   readStdin?: () => Promise<string>;
   /** Default: the system clock. */
   now?: () => Date;
+  /** Default: a prompt on the process's terminal. */
+  ask?: (question: string) => Promise<string>;
   /** Unread Owner-inbox alerts (src/notify/inbox.ts `projectUnreadAlerts` in main.ts). */
   unreadAlerts: () => Promise<readonly Alert[]>;
   /** Override the command table (tests). */
@@ -224,6 +230,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: ['git', 'ssh-keygen'],
     options: {},
     positionals: { min: 1, max: 1 },
+    run: release,
   },
   benchmark: {
     summary: 'Create the benchmark repo or add a merged item to it',
@@ -250,6 +257,15 @@ async function readProcessStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
   return Buffer.concat(chunks).toString('utf8');
+}
+
+async function askTerminal(question: string): Promise<string> {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    return await rl.question(question);
+  } finally {
+    rl.close();
+  }
 }
 
 /** Run one `factory` invocation; returns the exit code. Never throws. */
@@ -315,6 +331,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       cwd: deps.cwd ?? process.cwd(),
       readStdin: deps.readStdin ?? readProcessStdin,
       now: deps.now ?? (() => new Date()),
+      ask: deps.ask ?? askTerminal,
     });
   } catch (err) {
     if (err instanceof UsageError) {
