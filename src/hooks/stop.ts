@@ -1,11 +1,13 @@
 // `factory hook stop` (AC-063): a session may end only when its station's output exists and
 // passes the station's completeness check. Checkers register here as their stations ship
-// (slice 14: T045, T057); a station without one fails closed (Owner decision, slice 7 note B).
+// (Define in slice 12, T045; the others in slice 14, T057); a station without one fails closed
+// (Owner decision, slice 7 note B).
 //
 // After one forced continuation (`stop_hook_active`) the session may end: the dispatcher reads
 // the station output from the branch, so a session that stops early still advances nothing.
 import { appendEvent } from '../events/append.js';
 import { STATIONS, type Station } from '../model/types.js';
+import { defineStopCheck } from '../stations/checks/define.js';
 import {
   eventInput,
   resolveSession,
@@ -26,8 +28,10 @@ export type StationChecker = (
   ctx: HookContext,
 ) => CheckResult | Promise<CheckResult>;
 
-/** Output checkers by station; empty until slice 14. */
-export const CHECKERS: Partial<Record<Station, StationChecker>> = {};
+/** Output checkers by station. */
+export const CHECKERS: Partial<Record<Station, StationChecker>> = {
+  0: (_session, ctx) => defineStopCheck(ctx.cwd),
+};
 
 export async function runStop(
   input: HookInput,
