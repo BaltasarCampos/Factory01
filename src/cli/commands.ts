@@ -1,13 +1,16 @@
 // Sub-command table and dispatch for the `factory` CLI (contracts/cli.md).
 import { createInterface } from 'node:readline/promises';
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
+import { adopt } from '../commands/adopt.js';
 import { approve } from '../commands/approve.js';
 import { hook } from '../commands/hook.js';
 import { inbox } from '../commands/inbox.js';
 import { keygen } from '../commands/keygen.js';
+import { newProject } from '../commands/new.js';
 import { pause } from '../commands/pause.js';
 import { release } from '../commands/release.js';
 import { resume } from '../commands/resume.js';
+import type { Launchers } from '../dispatcher/launcher/types.js';
 import { alertLines } from '../notify/inbox.js';
 import type { Alert } from '../model/types.js';
 import {
@@ -41,6 +44,8 @@ export interface CommandContext {
   now: () => Date;
   /** Ask the Owner a question on the terminal; resolves to the typed line. */
   ask: (question: string) => Promise<string>;
+  /** Session launchers by `agents:` mode. */
+  launchers: Launchers;
 }
 
 export interface CommandSpec {
@@ -74,6 +79,8 @@ export interface CliDeps {
   now?: () => Date;
   /** Default: a prompt on the process's terminal. */
   ask?: (question: string) => Promise<string>;
+  /** Default: none until the local and cloud launchers ship (T061). */
+  launchers?: Launchers;
   /** Unread Owner-inbox alerts (src/notify/inbox.ts `projectUnreadAlerts` in main.ts). */
   unreadAlerts: () => Promise<readonly Alert[]>;
   /** Override the command table (tests). */
@@ -91,6 +98,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: OWNER,
     options: { name: { type: 'string' } },
     positionals: { min: 1, max: 1 },
+    run: newProject,
   },
   adopt: {
     summary: 'Attach the factory to an existing private repo',
@@ -99,6 +107,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: OWNER,
     options: {},
     positionals: { min: 1, max: 1 },
+    run: adopt,
   },
   run: {
     summary: 'Run the dispatcher loop until an Owner gate, limit, cap or pause',
@@ -332,6 +341,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       readStdin: deps.readStdin ?? readProcessStdin,
       now: deps.now ?? (() => new Date()),
       ask: deps.ask ?? askTerminal,
+      launchers: deps.launchers ?? {},
     });
   } catch (err) {
     if (err instanceof UsageError) {

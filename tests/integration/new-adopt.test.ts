@@ -1,13 +1,26 @@
-// Install steps behind `factory new` / `factory adopt` (slice 11a): guardrails rendered from the
-// pinned release and checked against its manifest, labels, the pinned inbox, `.factory/config`
-// and the `claude/define` branch. The commands themselves, consent and signed commits ship in
-// slice 11b.
+// `factory new` / `factory adopt` (T038) with fake `gh`, temp repos and real `ssh-keygen`. The
+// install steps (slice 11a): guardrails rendered from the pinned release and checked against its
+// manifest, labels, the pinned inbox, `.factory/config` and the `claude/define` branch. The
+// commands (slice 11b): consent first, the release tag verified with the laptop's key list, an
+// Owner-signed root or adopt commit, then Define started through the launcher.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
+import { ownerKeyPath } from '../../src/approvals/sign.js';
+import { runCli } from '../../src/cli/commands.js';
 import { EnvironmentError, RefusedError } from '../../src/cli/env.js';
+import { signedTag } from '../../src/git/sign.js';
 import { createRepo } from '../../src/github/repo.js';
+import { render } from '../../src/install/render.js';
 import {
   buildManifest,
   fetchPinnedManifest,
@@ -19,9 +32,10 @@ import { installLabels } from '../../src/install/labels.js';
 import { createDefineBranch, installProject, runSpecifyInit } from '../../src/install/project.js';
 import { parseConfig } from '../../src/model/config.js';
 import { STATES, STATIONS, type GuardrailManifest } from '../../src/model/types.js';
-import { readState, seedState } from '../helpers/fake-gh.js';
-import { runGit } from '../helpers/git-repo.js';
-import { tempDir } from '../helpers/keys.js';
+import { calls, readState, seedState } from '../helpers/fake-gh.js';
+import { FakeLauncher } from '../helpers/fake-launcher.js';
+import { gitEnv, makeRepo, runGit } from '../helpers/git-repo.js';
+import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
 const FACTORY = 'owner/factory';
 const PROJECT = 'owner/project';
@@ -309,5 +323,293 @@ describe('guardrail manifest (AC-003)', { timeout: 30_000 }, () => {
       seedState({ repos: { [FACTORY]: { visibility: 'public', api } } });
       await expect(fetchPinnedManifest(FACTORY, PIN), what).rejects.toBeInstanceOf(ManifestError);
     }
+  });
+});
+
+// ---------------------------------------------------------------- the commands (slice 11b)
+
+let ownerKeys: TestKeys;
+beforeAll(() => {
+  ownerKeys = makeKeys();
+});
+
+/** Stands in for `specify init` on PATH. */
+const SPECIFY = `#!/bin/sh
+mkdir -p .specify/templates .specify/memory
+printf '# Plan\\n' > .specify/templates/plan-template.md
+printf '# Spec Kit default\\n' > .specify/memory/constitution.md
+`;
+
+/**
+ * The Owner's laptop: a factory clone whose release v1.0.0 is tagged with `tagKey` (`null`: an
+ * unsigned annotated tag), the Owner key and key list in `~/.factory`, a fake `specify`, and the
+ * public factory repo on the fake GitHub serving the same tag.
+ */
+function laptop({ tagKey }: { tagKey?: TestKeys | null } = {}) {
+  const factory = makeRepo({
+    files: {
+      ...Object.fromEntries(Object.entries(SOURCES).map(([p, text]) => [`factory/${p}`, text])),
+      allowed_signers: `${ownerKeys.allowedSignersLine}\n`,
+      revoked_keys: '',
+    },
+  });
+  const sha = factory.revParse('HEAD');
+  const tree = tempDir('factory-tree-');
+  render(join(factory.path, 'factory'), tree, {});
+  const message = serialiseManifest(buildManifest(tree, { tag: 'v1.0.0', sha }));
+  const key = tagKey === undefined ? ownerKeys : tagKey;
+  if (key === null) factory.git(['tag', '-a', '-m', message, 'v1.0.0', sha]);
+  else
+    signedTag(
+      { repo: factory.path, keyPath: key.privateKey, stdinIsTTY: true, env: gitEnv },
+      'v1.0.0',
+      sha,
+      message,
+    );
+  factory.git(['remote', 'set-url', 'origin', `https://github.com/${FACTORY}.git`]);
+  const tagObject = factory.revParse('refs/tags/v1.0.0');
+  const body = factory.git(['cat-file', 'tag', tagObject]).split('\n\n').slice(1).join('\n\n');
+
+  const root = tempDir('factory-laptop-');
+  seedState({
+    user: 'owner',
+    gitRoot: join(root, 'github'),
+    repos: {
+      [FACTORY]: {
+        visibility: 'public',
+        api: {
+          [`repos/${FACTORY}/git/ref/tags/v1.0.0`]: {
+            ref: 'refs/tags/v1.0.0',
+            object: { type: 'tag', sha: tagObject },
+          },
+          [`repos/${FACTORY}/git/tags/${tagObject}`]: {
+            tag: 'v1.0.0',
+            message: `${body}\n`,
+            object: { type: 'commit', sha },
+          },
+        },
+      },
+    },
+  });
+  const home = join(root, 'home');
+  mkdirSync(dirname(ownerKeyPath(home)), { recursive: true });
+  copyFileSync(ownerKeys.privateKey, ownerKeyPath(home));
+  chmodSync(ownerKeyPath(home), 0o600);
+  writeFileSync(join(home, '.factory', 'allowed_signers'), `${ownerKeys.allowedSignersLine}\n`);
+  const bin = join(root, 'bin');
+  writeTree(bin, { specify: SPECIFY });
+  chmodSync(join(bin, 'specify'), 0o755);
+  const cwd = join(root, 'projects');
+  mkdirSync(cwd);
+
+  const launchers = { local: new FakeLauncher('local'), cloud: new FakeLauncher('cloud') };
+  const env: NodeJS.ProcessEnv = {
+    ...gitEnv,
+    HOME: home,
+    PATH: `${bin}:${process.env.PATH ?? ''}`,
+    FAKE_GH_STATE: process.env.FAKE_GH_STATE,
+    FACTORY_SOURCE: factory.path,
+  };
+  const cli = async (argv: string[], answer = 'local') => {
+    const out: string[] = [];
+    const err: string[] = [];
+    const asked: { question: string; printed: string; ghCalls: string[][] }[] = [];
+    const code = await runCli(argv, {
+      stdout: { write: (s: string) => void out.push(s) },
+      stderr: { write: (s: string) => void err.push(s) },
+      env,
+      stdinIsTTY: true,
+      cwd,
+      launchers,
+      unreadAlerts: () => Promise.resolve([]),
+      ask: (question) => {
+        asked.push({ question, printed: out.join(''), ghCalls: calls() });
+        return Promise.resolve(answer);
+      },
+    });
+    return { code, stdout: out.join(''), stderr: err.join(''), asked };
+  };
+  return { cli, cwd, sha, launchers };
+}
+
+function signedBy(dir: string, commit: string, keys: TestKeys): boolean {
+  const { allowedSigners } = writeKeyFiles([keys]);
+  try {
+    runGit(dir, ['-c', `gpg.ssh.allowedSignersFile=${allowedSigners}`, 'verify-commit', commit]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const touchesRepo = (ghCalls: string[][]) => ghCalls.some((c) => c[0] === 'repo');
+
+type Laptop = ReturnType<typeof laptop>;
+type CliResult = Awaited<ReturnType<Laptop['cli']>>;
+
+describe('factory new (AC-001, AC-003)', { timeout: 120_000 }, () => {
+  let made: Laptop;
+  let result: CliResult;
+  let work = '';
+  beforeAll(async () => {
+    made = laptop();
+    const pitch = 'A tiny bookmark list I use from my laptop browser.';
+    result = await made.cli(['new', pitch, '--name', 'sample']);
+    work = join(made.cwd, 'sample');
+  }, 120_000);
+
+  it('AC-001: names the cloud VMs and asks cloud or local before any repo is created', () => {
+    expect(result.stderr).toBe('');
+    expect(result.code).toBe(0);
+    expect(result.asked).toHaveLength(1);
+    const [consent] = result.asked;
+    expect(consent?.printed).toMatch(/provider-managed cloud VMs/);
+    expect(consent?.question).toMatch(/cloud.*local/);
+    expect(touchesRepo(consent?.ghCalls ?? [])).toBe(false);
+    expect(parseConfig(read(work, '.factory/config')).agents).toBe('local');
+  });
+
+  it('AC-003: a private repo pinned to the verified release, with inbox, labels and laptop clone', () => {
+    const config = parseConfig(read(work, '.factory/config'));
+    expect(config).toMatchObject({
+      repo: 'owner/sample',
+      factory_release: { tag: 'v1.0.0', sha: made.sha },
+    });
+    expect(config.baseline).toBeUndefined();
+    const project = readState().repos['owner/sample'];
+    expect(project?.visibility).toBe('private');
+    expect(project?.issues.find((i) => i.number === config.inbox_issue)?.isPinned).toBe(true);
+    expect(project?.labels.map((l) => l.name)).toContain('pause:line');
+    for (const [rel, text] of Object.entries(INSTALLED)) expect(read(work, rel)).toBe(text);
+    expect(runGit(work, ['status', '--porcelain'])).toBe('');
+  });
+
+  it('AC-003: main starts with one Owner-signed root commit; claude/define is pushed from it', () => {
+    const head = runGit(work, ['rev-parse', 'origin/main']);
+    expect(runGit(work, ['rev-list', '--parents', '-n', '1', head])).toBe(head);
+    expect(runGit(work, ['rev-list', '--count', head])).toBe('1');
+    expect(signedBy(work, head, ownerKeys)).toBe(true);
+    expect(signedBy(work, head, makeOtherKeys())).toBe(false);
+    const define = runGit(work, ['ls-remote', 'origin', 'refs/heads/claude/define']);
+    expect(define.split(/\s/)[0]).toBe(head);
+    expect(runGit(work, ['show', `${head}:.factory/define/pitch.md`])).toContain('bookmark list');
+  });
+
+  it('AC-003: starts Station 0 (Define) on claude/define with the chosen launcher', () => {
+    expect(made.launchers.cloud.launches).toEqual([]);
+    expect(made.launchers.local.launches).toMatchObject([
+      { role: 'define', station: 0, branch: 'claude/define' },
+    ]);
+    expect(made.launchers.local.launches[0]?.prompt).toContain('.factory/define/pitch.md');
+  });
+});
+
+describe('factory new refusals (AC-001, AC-083)', { timeout: 60_000 }, () => {
+  it('AC-001: any answer but cloud or local creates nothing', async () => {
+    const { cli, cwd, launchers } = laptop();
+    const r = await cli(['new', 'A pitch', '--name', 'sample'], 'yes');
+    expect(r.code).toBe(1);
+    expect(r.stdout).toMatch(/nothing was created/i);
+    expect(readState().repos['owner/sample']).toBeUndefined();
+    expect(touchesRepo(calls())).toBe(false);
+    expect(existsSync(join(cwd, 'sample'))).toBe(false);
+    expect(launchers.local.launches).toEqual([]);
+  });
+
+  it('AC-083: refuses a release tag unsigned or signed by a key not in the laptop key list', async () => {
+    for (const tagKey of [null, makeOtherKeys()]) {
+      const { cli, cwd } = laptop({ tagKey });
+      const r = await cli(['new', 'A pitch', '--name', 'sample']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/v1\.0\.0/);
+      expect(touchesRepo(calls())).toBe(false);
+      expect(existsSync(join(cwd, 'sample'))).toBe(false);
+    }
+  });
+});
+
+describe('factory adopt (AC-007, AC-064)', { timeout: 120_000 }, () => {
+  const APP = 'export const app = 1;\n';
+  const ATTRIBUTES = '*.ts text eol=lf\n';
+  let made: Laptop;
+  let first: CliResult;
+  let baseline = '';
+  let work = '';
+  beforeAll(async () => {
+    made = laptop();
+    await createRepo('owner/legacy');
+    const legacy = join(made.cwd, '..', 'legacy-src');
+    runGit(made.cwd, ['clone', '-q', readState().repos['owner/legacy']?.origin ?? '', legacy]);
+    runGit(legacy, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
+    writeTree(legacy, { 'src/app.ts': APP, '.gitattributes': ATTRIBUTES });
+    runGit(legacy, ['add', '-A']);
+    runGit(legacy, ['commit', '-q', '--no-gpg-sign', '-m', 'existing code']);
+    runGit(legacy, ['push', '-q', 'origin', 'main']);
+    baseline = runGit(legacy, ['rev-parse', 'HEAD']);
+    await createRepo('owner/public-app');
+    const state = readState();
+    const open = state.repos['owner/public-app'];
+    if (open) open.visibility = 'public';
+    writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
+
+    first = await made.cli(['adopt', 'owner/legacy'], 'cloud');
+    work = join(made.cwd, 'legacy');
+  }, 120_000);
+
+  it("AC-007: records baseline = main's last unsigned commit and signs an adopt commit after it", () => {
+    expect(first.stderr).toBe('');
+    expect(first.code).toBe(0);
+    expect(first.asked).toHaveLength(1);
+    expect(first.asked[0]?.printed).toMatch(/provider-managed cloud VMs/);
+    const config = parseConfig(read(work, '.factory/config'));
+    expect(config).toMatchObject({ repo: 'owner/legacy', agents: 'cloud', baseline });
+    const head = runGit(work, ['rev-parse', 'origin/main']);
+    expect(runGit(work, ['rev-parse', `${head}^`])).toBe(baseline);
+    expect(signedBy(work, head, ownerKeys)).toBe(true);
+  });
+
+  it('AC-007: keeps the existing code and .gitattributes, and hands the code to Define', () => {
+    expect(read(work, 'src/app.ts')).toBe(APP);
+    expect(read(work, '.gitattributes')).toBe(ATTRIBUTES);
+    for (const [rel, text] of Object.entries(INSTALLED)) expect(read(work, rel)).toBe(text);
+    expect(made.launchers.local.launches).toEqual([]);
+    expect(made.launchers.cloud.launches).toMatchObject([
+      { role: 'define', station: 0, branch: 'claude/define' },
+    ]);
+    expect(made.launchers.cloud.launches[0]?.prompt).toMatch(/existing code/);
+  });
+
+  it('AC-064: adopting an adopted repo re-runs Define without reinstalling or asking', async () => {
+    const head = runGit(work, ['rev-parse', 'origin/main']);
+    const before = calls().length;
+    const again = await made.cli(['adopt', 'owner/legacy'], 'local');
+    expect(again.stderr).toBe('');
+    expect(again.code).toBe(0);
+    expect(again.asked).toEqual([]);
+    const installs = calls()
+      .slice(before)
+      .filter((c) => c[0] === 'label' || (c[0] === 'issue' && c[1] === 'create'));
+    expect(installs).toEqual([]);
+    runGit(work, ['fetch', '-q', 'origin']);
+    expect(runGit(work, ['rev-parse', 'origin/main'])).toBe(head);
+    expect(made.launchers.cloud.launches).toHaveLength(2);
+    expect(made.launchers.local.launches).toEqual([]);
+  });
+
+  it('AC-064: when no session can start, says so and how to start Define later', async () => {
+    made.launchers.cloud.setUnavailable();
+    const r = await made.cli(['adopt', 'owner/legacy']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/Define was not started: the cloud launcher is not available/);
+    expect(r.stderr).toContain('factory adopt owner/legacy');
+    expect(made.launchers.cloud.launches).toHaveLength(2);
+  });
+
+  it('AC-007: refuses a public repository before cloning or asking', async () => {
+    const r = await made.cli(['adopt', 'owner/public-app']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/public/);
+    expect(r.asked).toEqual([]);
+    expect(existsSync(join(made.cwd, 'public-app'))).toBe(false);
   });
 });
