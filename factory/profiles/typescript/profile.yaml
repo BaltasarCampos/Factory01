@@ -1,0 +1,17 @@
+# TypeScript stack profile (FR-008): the only approved profile. Define copies `skeleton/` into
+# a new project; the release's CI configs for it ship in `ci/` (T141).
+name: typescript
+node: '>=24'
+skeleton: skeleton
+commands:
+  install: npm ci --ignore-scripts
+  build: npm run build
+  test: npm test
+  start: npm start
+storage: node:sqlite
+# Tool settings for the project; CI runs the release's own configs (T141), never the project's.
+tools:
+  typescript: { strict: true, module: NodeNext, target: ES2023 }
+  eslint: { preset: typescript-eslint/strictTypeChecked }
+  prettier: { printWidth: 100, singleQuote: true }
+  test: { runner: vitest, files: 'tests/**/*.test.ts' }

@@ -29,6 +29,7 @@ import {
 } from '../model/types.js';
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
+import { seedLists } from '../stations/checks/define.js';
 import { listOpenIssues, notAdmitted, ownerLogin, type IssueSummary } from './admission.js';
 import { selectLauncher } from './launcher/select.js';
 import type { Launchers } from './launcher/types.js';
@@ -188,6 +189,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   if (pause.line) return { ...result, halted: 'pause:line in effect' };
 
   const owner = ownerLogin(repo);
+  const seeds = seedLists(ctx.projectDir, ctx.mainRef);
   let target: { item: Candidate; station: Station; branch: string } | undefined;
   for (const issue of await listOpenIssues(repo, options)) {
     if (issue.number === config.inbox_issue) continue;
@@ -212,7 +214,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
 
     const status = itemStatus(issue.labels, events);
     const approved = verdict('approved');
-    const why = notAdmitted(issue, owner, approved);
+    const why = notAdmitted(issue, owner, approved, seeds);
     const item: Candidate = {
       issue,
       state: status.state,
