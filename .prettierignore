@@ -6,3 +6,5 @@ package-lock.json
 specs/
 .specify/
 .claude/
+factory/constitution.md
+factory/speckit/
