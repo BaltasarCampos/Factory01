@@ -32,13 +32,31 @@
 
 <!--
   Tier 1 (copy changes, dependency patch bumps, test-only changes): a one-line spec is enough.
-  Fill in the summary line below, at least one acceptance scenario with an AC-### ID, and delete
-  the other sections. Once committed on the branch, a tier 1 AC stays checked by CI even if it
+  Fill in the summary line below, one line each for `**Problem**:`, `**Non-goals**:` and
+  `**Affected areas**:`, at least one acceptance scenario with an AC-### ID, and delete the
+  other sections. Once committed on the branch, a tier 1 AC stays checked by CI even if it
   is later deleted here; removing one needs an Owner waiver (`gate:ac-<id>`).
   Tier 2–3: fill in every mandatory section. Tier 3 also fills in "Risks".
 -->
 
 **Summary (tier 1 one-line spec)**: [What changes and how it is verified]
+
+<!--
+  Problem, Non-goals and Affected areas are checked by the Specify station (AC-010): the spec
+  is not complete until each has content.
+-->
+
+## Problem *(mandatory)*
+
+[What is wrong or missing today, for whom, and why it matters now]
+
+## Non-goals *(mandatory)*
+
+- [What this item deliberately does not do]
+
+## Affected areas *(mandatory)*
+
+- [Modules, files, screens or data this item changes]
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -116,8 +134,8 @@
   acceptance criterion and gets an AC-### ID.
 -->
 
-- **AC-0xx** — What happens when [boundary condition]?
-- **AC-0xx** — How does system handle [error scenario]?
+- **AC-0xx** — **Given** [boundary condition], **When** [action], **Then** [defined behaviour]
+- **AC-0xx** — **Given** [error scenario], **When** [action], **Then** [how the system handles it]
 
 ## Requirements *(mandatory)*
 
