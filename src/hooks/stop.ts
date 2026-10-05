@@ -8,6 +8,9 @@
 import { appendEvent } from '../events/append.js';
 import { STATIONS, type Station } from '../model/types.js';
 import { defineStopCheck } from '../stations/checks/define.js';
+import { planStopCheck } from '../stations/checks/plan.js';
+import { specStopCheck } from '../stations/checks/spec.js';
+import { verifyStopCheck } from '../stations/checks/verify.js';
 import {
   eventInput,
   resolveSession,
@@ -28,9 +31,15 @@ export type StationChecker = (
   ctx: HookContext,
 ) => CheckResult | Promise<CheckResult>;
 
-/** Output checkers by station. */
+/**
+ * Output checkers by station. Intake (1) has none yet: its session carries no item number until
+ * the launcher passes one (slice 16), so it still fails closed.
+ */
 export const CHECKERS: Partial<Record<Station, StationChecker>> = {
   0: (_session, ctx) => defineStopCheck(ctx.cwd),
+  2: (_session, ctx) => specStopCheck(ctx.cwd),
+  3: (_session, ctx) => planStopCheck(ctx.cwd),
+  5: (_session, ctx) => verifyStopCheck(ctx.cwd),
 };
 
 export async function runStop(

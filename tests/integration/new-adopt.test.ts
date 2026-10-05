@@ -31,7 +31,7 @@ import {
 import { installLabels } from '../../src/install/labels.js';
 import { createDefineBranch, installProject, runSpecifyInit } from '../../src/install/project.js';
 import { parseConfig } from '../../src/model/config.js';
-import { STATES, STATIONS, type GuardrailManifest } from '../../src/model/types.js';
+import { ITEM_TYPES, STATES, STATIONS, type GuardrailManifest } from '../../src/model/types.js';
 import { calls, readState, seedState } from '../helpers/fake-gh.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { gitEnv, makeRepo, runGit } from '../helpers/git-repo.js';
@@ -190,7 +190,7 @@ describe('install steps (AC-003)', { timeout: 60_000 }, () => {
     expect(inbox).toMatchObject({ isPinned: true, state: 'OPEN', title: 'Factory inbox' });
   });
 
-  it('AC-003: creates every owner:, state:, tier: and pause: label, and none twice', async () => {
+  it('AC-003: creates every owner:, state:, tier:, pause:, type: and priority: label, and none twice', async () => {
     const names = readState().repos[PROJECT]?.labels.map((l) => l.name) ?? [];
     expect(new Set(names)).toEqual(
       new Set([
@@ -204,6 +204,8 @@ describe('install steps (AC-003)', { timeout: 60_000 }, () => {
         'pause:line',
         ...STATIONS.map((s) => `pause:${s}`),
         'security',
+        ...ITEM_TYPES.map((t) => `type:${t}`),
+        ...['p0', 'p1', 'p2', 'p3'].map((p) => `priority:${p}`),
       ]),
     );
     expect(await installLabels(PROJECT)).toEqual([]);
