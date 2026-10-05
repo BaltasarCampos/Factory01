@@ -35,14 +35,14 @@ function planProblems(plan: string, sizeLimit: number): string[] {
   return missing;
 }
 
-interface Task {
+export interface Task {
   id: string;
   text: string;
   test: boolean;
   phase: number;
 }
 
-function parseTasks(tasks: string): Task[] {
+export function parseTasks(tasks: string): Task[] {
   const parsed: Task[] = [];
   let phase = 0;
   let test = false;

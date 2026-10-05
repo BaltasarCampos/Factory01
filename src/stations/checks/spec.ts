@@ -16,13 +16,13 @@ export interface SpecResult extends CheckResult {
 const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /** A line that says something: not blank and not a `[placeholder]`. */
-const meaningful = (line: string) => {
+export const meaningful = (line: string) => {
   const text = line.replace(/^\s*(?:[-*]|\d+\.)\s+/, '').trim();
   return text !== '' && !/^\[[^\]]*\]$/.test(text);
 };
 
 /** The section's content lines, or undefined when the spec has no such section. */
-function section(lines: readonly string[], name: string): string[] | undefined {
+export function section(lines: readonly string[], name: string): string[] | undefined {
   const heading = new RegExp(`^(#{2,})\\s+${escape(name)}\\b`, 'i');
   const labelled = new RegExp(`^\\*\\*${escape(name)}:?\\*\\*:?(.*)$`, 'i');
   for (const [i, line] of lines.entries()) {

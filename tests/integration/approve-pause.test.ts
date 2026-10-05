@@ -37,6 +37,22 @@ const LABELS = [
   'pause:line',
   ...STATIONS.map((s) => `pause:${s}`),
 ].map((name) => ({ name, color: 'ededed', description: '' }));
+const SPEC = `# Add login
+
+## Problem
+
+Visitors cannot sign in.
+
+## Non-goals
+
+- Social login.
+
+## Affected areas
+
+- \`src/auth/\`
+
+1. **AC-001** — **Given** a registered user, **When** they sign in, **Then** they see their links.
+`;
 const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: ${REPO}\ninbox_issue: 1\nagents: cloud\n`;
 
 let owner: TestKeys;
@@ -147,6 +163,17 @@ describe('factory approve (AC-068)', () => {
     expect(r.stderr).toBe('');
     expect(r.code).toBe(0);
     expect(r.stdout).toContain('tier: 2');
+    // The approval summary comes first, so the Owner reads it before the passphrase (AC-016).
+    const parts = [
+      'What changed',
+      'Spec mapping',
+      'Tests and review',
+      'Usage spent',
+      'Known risks',
+    ];
+    for (const part of parts) expect(r.stdout).toMatch(new RegExp(`^${part}$`, 'm'));
+    expect(r.stdout.indexOf('Known risks')).toBeLessThan(r.stdout.indexOf('Signing for'));
+    expect(r.stdout).toMatch(/#7: Add login/);
     const body = t.issue(ITEM).comments.at(-1)?.body ?? '';
     expect(body.startsWith('<!-- factory-record v1 -->\n')).toBe(true);
     expect(t.posted(ITEM)).toEqual({
@@ -187,7 +214,7 @@ describe('factory approve (AC-068)', () => {
       issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
       project: (repo) => {
         repo.checkout(BRANCH, { create: true });
-        repo.commit({ 'specs/7-add-login/spec.md': '# Add login\n' }, 'spec');
+        repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
         repo.push();
         specSha = repo.revParse(`${BRANCH}:specs/7-add-login/spec.md`);
         repo.checkout('main');
@@ -204,6 +231,28 @@ describe('factory approve (AC-068)', () => {
       spec_sha: specSha,
     });
     expect(t.issue(ITEM).labels).toContain('owner:spec-approved');
+    expect(r.stdout).toMatch(/AC-001 → no test task yet/);
+  });
+
+  it('approve <issue> spec refuses to sign while a summary part is missing (AC-016)', async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      project: (repo) => {
+        repo.checkout(BRANCH, { create: true });
+        repo.commit({ 'specs/7-add-login/spec.md': '# Add login\n' }, 'spec');
+        repo.push();
+        repo.checkout('main');
+      },
+    });
+    const before = t.issue(ITEM).comments.length;
+
+    const r = await t.cli(['approve', String(ITEM), 'spec']);
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/Spec mapping: spec.md defines no acceptance criteria/);
+    expect(r.stdout).not.toMatch(/Signing for/);
+    expect(t.issue(ITEM).comments).toHaveLength(before);
+    expect(t.issue(ITEM).labels).not.toContain('owner:spec-approved');
   });
 
   it('approve <issue> spec refuses when the item has no verified owner:approved', async () => {
