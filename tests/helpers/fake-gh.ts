@@ -637,6 +637,10 @@ function apiCommand(state: FakeGhState, p: Parsed, out: string[]): void {
     out.push((paginate ? pages : pages.slice(0, 1)).map((page) => JSON.stringify(page)).join(''));
     return;
   }
+  if (path === 'user') {
+    out.push(JSON.stringify({ login: actor(state) }));
+    return;
+  }
   const repoMatch = /^repos\/([^/]+\/[^/]+)$/.exec(path);
   if (repoMatch) {
     const full = repoMatch[1] ?? '';
