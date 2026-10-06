@@ -47,6 +47,11 @@ irrelevant reason, and still count. The independent review is the control for te
 `spec.md` whose blob hash the verified `spec-approved` record names. Tier 1 (no spec approval):
 every `AC-###` ID that ever appeared in `spec.md` in any commit on the branch, so an agent
 cannot pass the checks by deleting criteria; removing one needs a `gate:ac-<id>` waiver.
+An empty checked set fails both checks, and so does a criterion line without an ID (FR-042,
+AC-097). Criterion lines are found by the one parser in `src/stations/checks/spec.ts`, which
+the Specify check, ac-map and red-green share: every list item under Acceptance Scenarios or
+Edge Cases, and elsewhere each line with two or more of Given/When/Then or any one in bold.
+`factory merge` repeats both checks.
 
 `guardrail-change` and `append-only` give early feedback only; `factory merge` repeats both
 checks on the laptop and trusts only its own result.

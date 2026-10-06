@@ -49,12 +49,12 @@ Stored as one GitHub issue plus its labels, comments and feature folder.
 | `feature_dir` | `specs/<issue>-<slug>/` | On `branch` |
 | `type` | `feature` \| `bug` \| `debt` \| `security` \| `dependency` \| `copy` | Set by Intake |
 | `priority` | `p0`–`p3` | Set by Intake; security critical/high → `p0` |
-| `tier` | `1` \| `2` \| `3` | From `tier:` label; confirmed only by the `owner:approved` record |
+| `tier` | `1` \| `2` \| `3` | Proposed by the filing agent's `tier:` label or given with `factory approve --tier`; confirmed only by the `owner:approved` record; Intake may only propose raising it |
 | `state` | one `state:` label | See state machine below |
 | `owner_labels` | set of `owner:approved` / `owner:spec-approved` / `owner:waiver` | Valid only with a verifying record |
 | `attempts` | map station → count | From gate-result events (telemetry; affects only escalation timing, never a merge); ≥ `retry_limit` → `escalated` |
 | `pr` | number | One draft PR, opened at Specify (FR-016a) |
-| `author` | GitHub login | Item admitted only if Owner-authored or `owner:approved` |
+| `author` | GitHub login | Informational only: agents act through the Owner's account, so authorship never admits an item |
 
 ### State machine (FR-011)
 
@@ -66,19 +66,24 @@ new ─▶ triaged ─▶ specified ─▶ spec-approved ─▶ planned ─▶ b
 
 | Transition | Guard (checked by dispatcher code) |
 |------------|------------------------------------|
-| new → triaged | `owner:approved` with verifying record (gate `approved`, tier) |
+| new → triaged | `owner:approved` with verifying record (gate `approved`, tier); Intake's output check passes; no proposed `tier:` above the confirmed tier (a raise waits for a new `factory approve --tier`) |
 | triaged → specified | `spec.md` exists with problem, ACs, non-goals, affected areas; draft PR open |
 | specified → spec-approved | `owner:spec-approved` record verifying against current `spec.md` hash; **or** Owner-confirmed `tier:1` (skim path, AC-010/AC-069) |
 | spec-approved → planned | `plan.md`, `tasks.md` present; Constitution Check passes; every AC mapped; test tasks first |
 | planned → building | always (dispatcher assigns the next task) |
 | building → verifying | all tasks done; `ci / red-green` green on the branch head (never event evidence) |
 | verifying → integrating | `reports/verify.md` all checks pass; blocking review findings resolved |
-| integrating → releasing | branch rebased, CI green, **merged by the Owner**: an Owner-signed merge commit of the item's checked head on main's first-parent history |
+| integrating → releasing | branch rebased, CI green, **merged by the Owner**: an Owner-signed merge of the item (`Factory-Merge: #<issue>`, § Merge trailers) of its checked head on main's first-parent history |
 | releasing → done | release notes and rollback path on `claude/factory-log`; Owner ran `factory deploy` |
-| X → earlier station | gate failed; target = earliest station able to fix (from failure report) |
+| X → earlier station | gate failed; target = earliest station able to fix (from failure report); never once main has an Owner-signed merge of the item (`Factory-Merge: #<issue>`, § Merge trailers): a later failure moves it on to, or keeps it in, `releasing` with an alert, and the dispatcher files a follow-up issue |
 
-Global guards: no transition while `pause:line` is in effect; no entry to a paused station;
-no transition on an item with an unverified `owner:` label (→ `escalated`, tampering alert);
+Global guards: no item is admitted, and none moves, until main's first-parent history has an
+Owner-signed merge of `claude/define` (`Factory-Merge: define`, § Signed main history); if that
+signature, or main's pinned `allowed_signers` or `revoked_keys`, cannot be checked, the brief
+counts as not merged and nothing is admitted; a `Factory-Merge:` trailer whose signature or key
+list cannot be checked moves no item and raises an alert, as with an unsigned first-parent
+commit; no transition while `pause:line` is in effect; no entry to a paused station; no
+transition on an item with an unverified `owner:` label (→ `escalated`, tampering alert);
 no transition at all while main has an unsigned first-parent commit or a key rotation is
 pending (§ Keys and rotation).
 
@@ -138,6 +143,10 @@ For `deployed` records, `repo` names the project and `issue` is the Owner inbox 
 shows the diff between a code-gate waiver's head and the current head and asks the Owner to
 sign a new waiver in the same step.
 
+Waivers for weakened tests (`test:<path>#<title>`, AC-061) are not yet a target form:
+`factory approve` refuses `test:` targets, and a diff that weakens a test blocks until the form
+exists (T151, which also replaces the re-sign diff above with a range-diff).
+
 ## Pull request merge checks
 
 `factory merge` merges every pull request on the laptop, after checks it computes itself. CI
@@ -151,22 +160,56 @@ a deletion plus an addition and no filter hides content.
 
 | Head branch | Checks (all computed on the laptop) | Effect |
 |-------------|-------------------------------------|--------|
-| `claude/<issue>-<slug>` (work item) | Full approval chain verifies; no protected path, `.gitattributes`, `.gitmodules` or `.factory/config` touched; required CI checks green on the checked commit | Item merged |
-| `claude/define` | Same path rule as items; CI green; Define output check passes | Brief approval: seed issues become admissible (each still needs `owner:approved`) |
+| `claude/<issue>-<slug>` (work item) | Full approval chain verifies; no earlier Owner-signed merge with `Factory-Merge: #<issue>` on main; checked set of acceptance criteria not empty and every criterion line has an ID (FR-042); no weakened test without a covering waiver (AC-061); no protected path, `.gitattributes`, `.gitmodules` or `.factory/config` touched; required CI checks green on the checked commit | Item merged, once |
+| `claude/define` | Same path rule as items; CI green; Define output check passes | Brief merged (`Factory-Merge: define`): from now on the dispatcher admits items, each still needing its own `owner:approved` |
 | `factory/upgrade-<tag>` | Tag carries a valid Owner signature (verified with main's pinned `allowed_signers`) and still resolves to `<sha>`; a verified `check:guardrail-change@<tag>@<sha>` waiver; the full protected set at the PR head equals the manifest of `<tag>@<sha>` (every file present with its hash, no extra protected file); `.factory/config` differs from main only in the `factory_release` line, set to `<tag>@<sha>` | New factory release pinned |
 | `claude/factory-log` | Only additions; in an existing file, new lines only after the old ones; every touched path under `.factory/events/`, `.factory/ops/`, `.factory/lessons/` or `.factory/releases/`; regular text files only (no binary, symlink, executable bit, gitlink or `.git*` file); no protected path (no waiver can allow one) | Weekly log merge |
 
 A pull request from any other branch with no work item is refused. For every merge,
-`factory merge` also refuses while a session for that item is still running (from dispatcher
-state; telemetry is acceptable here because this only prevents false alarms), then:
+`factory merge` warns while the dispatcher shows a session for that item running and continues
+only after the Owner confirms (the signal is telemetry, so it must never block a merge), shows
+the approval summary (§ Approval summary), then:
 
 1. fetches the checked commit and makes the merge commit locally with
-   `git merge --no-ff -S <checked sha>` (Owner-signed, passphrase prompted);
+   `git merge --no-ff -S <checked sha>` (Owner-signed, passphrase prompted), whose message ends
+   with the trailer `Factory-Merge: #<issue>` (item), `define`, `upgrade <tag>` or
+   `factory-log`;
 2. pushes main; the push is rejected if main moved, so exactly the checked commit is merged;
 3. if the PR head moved after the check, closes the PR with a comment naming the merged commit;
 4. deletes the head branch (except `claude/factory-log` and `claude/define`, which persist).
 
 Any later push that recreates a deleted item branch raises a tampering alert.
+
+**Once only.** An item is merged at most once: `factory merge` refuses a work-item pull request
+whose issue already has a `Factory-Merge: #<issue>` merge on main. Only trailers on Owner-signed
+first-parent commits after `baseline` count (§ Signed main history), so no agent-written text
+can fake or hide a merge. This makes `ownerMerge` final for the dispatcher and stops a recreated
+branch from replaying old approvals into a second merge.
+
+## Approval summary (FR-043)
+
+Every signing command shows a summary before it asks for the passphrase. The command builds each
+part itself from signed records, git and GitHub, never from an agent's summary; quoted text
+(issue, spec, reports) has every Unicode `Cc`, `Cf`, `Zl` and `Zp` character removed except
+newline and tab. `approve` reads the item branch once, at one resolved commit, and refuses a
+code-gate waiver when the PR head is another commit. The list below is the constant in
+`src/notify/summary.ts`, pinned with the release.
+
+**R** required (missing → the command refuses) · **—** not applicable · **S** shown when
+available, never required: usage comes from `events.jsonl`, which is telemetry, so when it is
+missing the summary says "unavailable (telemetry missing)" and goes on.
+
+| Gate | What changed | Spec mapping | Tests and review | Usage spent | Known risks |
+|------|--------------|--------------|------------------|-------------|-------------|
+| Item approval (`approve <issue>`) | R: the request (issue title and body) | — | — | S: estimate for the proposed lane and weekly headroom left | R: the tier (the proposed `tier:` label or `--tier`); other labels shown only if present |
+| Spec approval (`approve <issue> spec`) | R: first approval — Problem and Affected areas; re-approval — `spec.md` diff from the previously approved blob to the one signed | R: each `AC-###` listed; none → refuse | — | S | R: tier; at tier 3 the spec's Risks section (none → refuse) |
+| Waiver, pre-build `gate:` | R: target | — | — | S | R: tier |
+| Waiver, code `gate:` | R: target; PR head (= the commit read); diffstat since the merge base; after a rebase, the range-diff since the waived head (T151) | R: each `AC-###` → its test tasks | R: the waived gate's result | S | R: tier; what the waiver lets through, computed from the waived check (for `red-green`, the criteria whose tests do not go from failing to passing) |
+| Waiver, other targets (`finding:`, `dep:`, `check:`) | R: target | — | — | — | R: what stays unfixed or accepted |
+| Merge, item | R: diffstat of the checked head; every removed, skipped, focused or retried test, removed assertion and changed setup or helper file (AC-061), each with the `test:` waiver that covers it, or "none" | R: each `AC-###` → its tagged tests | R: CI on the checked head; verify report | S | R: tier; open findings; waivers in force |
+| Merge, Define / upgrade / log | R: diffstat of the checked head | — | R: the branch's own check: Define output check, manifest equality, append-only | — | R: upgrade — the keys it revokes and the in-flight items whose approvals used them; Define and log — the per-branch check results |
+| Deploy | R: items merged since the last deploy | — | R: CI on main's head | S | R: rollback step from the release notes |
+| Resume | R: items whose state changed since the pause | — | — | — | R: what was paused, when and by whom (label history), and the alerts raised during the pause |
 
 ## Keys and rotation
 
@@ -218,6 +261,17 @@ commit). The factory repository follows the same rule: its merges go through `fa
 (laptop check refusing changes to its own live `.github/workflows/`, `.gitattributes` and
 `.gitmodules`, CI green on the checked commit, signed local merge; sources under
 `factory/self/` are ordinary reviewed files the Owner copies into place), and its releases are tags signed by `factory release`.
+
+**Merge trailers.** Every merge commit `factory merge` makes ends with `Factory-Merge: <what>`:
+`#<issue>` for an item, `define`, `upgrade <tag>` or `factory-log`. Read only from Owner-signed
+first-parent commits after `baseline`, they answer two questions without agent-written markers:
+whether the brief is merged (admission, § State machine) and whether an item was already merged
+(once-only rule, § Pull request merge checks). If a signature, or main's pinned
+`allowed_signers` or `revoked_keys`, cannot be checked, the trailer does not count: the brief
+counts as not merged, and an item counts as already merged, so `factory merge` refuses. Both
+directions fail toward refusing. For the dispatcher, a trailer whose signature or key list
+cannot be checked moves no item and raises an alert, as with an unsigned first-parent commit,
+so an unverifiable "already merged" never moves an item to `releasing`.
 
 ## Pause state (FR-029, FR-029a)
 

@@ -42,7 +42,9 @@ nonce: 9f2c1e0a7b4d4e8f8a1b2c3d4e5f6a7b
    -s <sig>` with the record on stdin; reject on non-zero exit (AC-085).
 5. Check fields against the item: repo, issue, gate, tier, branch, and for `spec-approved`
    the current `spec.md` blob hash (AC-070, AC-071). For code-gate waivers, `head` must equal
-   the PR's current head commit (AC-089); pre-build gate waivers carry no `head`. For `check:guardrail-change@<tag>@<sha>` waivers, the
+   the PR's current head commit (AC-089); pre-build gate waivers carry no `head`. A code-gate
+   waiver without `head` is malformed, so it is tampering, not missing (the parser already
+   rejects it at step 1). For `check:guardrail-change@<tag>@<sha>` waivers, the
    PR must be the upgrade PR for that release.
 6. Check single use and freshness:
    - `approved`, `spec-approved`, `waiver`: the nonce backs exactly one label-add event — the
@@ -71,7 +73,11 @@ Each failure has a kind, and the kind decides what happens:
 
 `factory merge` makes the merge commit itself, on the laptop, signed with the Owner key under
 git's SSH signing (namespace `git`), and pushes it to main. The signed commit is the merge
-approval; there is no separate record. Verification: `git verify-commit` with
+approval; there is no separate record. Its message ends with the trailer
+`Factory-Merge: <what>` (`#<issue>`, `define`, `upgrade <tag>` or `factory-log`), covered by the
+signature; the dispatcher and `factory merge` read it only from Owner-signed first-parent
+commits after `baseline`, to know whether the brief is merged and to merge each item once.
+Verification: `git verify-commit` with
 `gpg.ssh.allowedSignersFile` = main's pinned `allowed_signers`, revoked keys excluded. Rules
 for main's first-parent history: [data-model.md § Signed main history](../data-model.md#signed-main-history).
 
