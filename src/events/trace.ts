@@ -3,6 +3,10 @@
 // item itself, so a lookup can start at any of them: the feature folder is `specs/<feature>`,
 // commits carry `Factory-Role:` and `Factory-Item:` trailers, test titles carry the spec's
 // `AC-###` IDs and the release notes name `#<issue>`. Pure: the caller reads git and GitHub.
+//
+// For review and alerts only, never a gate input: trailers, titles and notes are agent-written,
+// so a well-formed trail is not an authentic one. Merges and deploys rely on signed records and
+// Owner-signed commits alone.
 import { ROLES } from '../model/types.js';
 import { checkSpec } from '../stations/checks/spec.js';
 
@@ -49,7 +53,7 @@ export interface Trace {
   links: TraceLink[];
   /** Each break in the chain, as `<step>: <what is missing>`. */
   gaps: string[];
-  /** Agent commits without valid trailers, as `<sha12> <subject>: <problem>`. */
+  /** Agent commits without well-formed trailers, as `<sha12> <subject>: <problem>`. */
   untrailered: string[];
 }
 
@@ -88,7 +92,7 @@ function commitProblems(commit: TraceCommit, feature: string): string[] {
   return problems.map((p) => `${commit.sha.slice(0, 12)} ${subject}: ${p}`);
 }
 
-/** Agent commits (not merges) lacking a valid `Factory-Role:` or `Factory-Item:` trailer. */
+/** Agent commits (not merges) lacking a well-formed `Factory-Role:` or `Factory-Item:` trailer. */
 export function untrailered(commits: readonly TraceCommit[], feature: string): string[] {
   return commits.flatMap((c) => commitProblems(c, feature));
 }

@@ -52,7 +52,10 @@ export interface Evidence {
   deployed?: boolean;
 }
 
-export type Decision = { ok: true; to: State; reason: string } | { ok: false; reason: string };
+/** `alert`: the dispatcher tells the Owner, e.g. a gate failed after the Owner's merge. */
+export type Decision =
+  | { ok: true; to: State; reason: string; alert?: string }
+  | { ok: false; reason: string; alert?: string };
 
 /** The station that works on an item in each state; it is entered when the item arrives. */
 export const STATION_OF: Readonly<Record<State, Station | undefined>> = {
@@ -186,6 +189,13 @@ function decide(item: ItemStatus, e: Evidence): Decision {
     return move(back, 'question answered');
   }
   if (e.questionOpen) return move('blocked', 'question to the Owner');
+  if (e.failure !== undefined && e.ownerMerge) {
+    // Main is the item now (AC-058, FR-012): a later problem is new work, never a route back.
+    const alert = `failed a gate after the Owner's merge: ${e.failure.reason}; file a follow-up issue`;
+    return at(item.state) < at('releasing')
+      ? { ok: true, to: 'releasing', reason: 'merged by the Owner; failure after the merge', alert }
+      : { ok: false, reason: "failure after the Owner's merge", alert };
+  }
   if (e.failure !== undefined) {
     const to = REDO_AT[e.failure.station];
     if (to === undefined || at(to) >= at(item.state))

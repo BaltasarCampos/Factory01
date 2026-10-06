@@ -2,23 +2,25 @@
 // sign a record on the laptop, post it on the issue, then apply its `owner:` label. The record
 // comment is also the approval event: the dispatcher copies the issue's records into the item's
 // `events.jsonl` when it creates the branch (T059). The approval summary (FR-043, AC-016) is shown
-// first, and nothing is signed while one of its parts is missing. Nothing is posted or labelled
-// unless signing succeeds.
+// first, read at the one commit the record signs, and nothing is signed while a required part is
+// missing. Nothing is posted or labelled unless signing succeeds.
 import { spawnSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { secondCopy, type ReleaseKeys } from '../approvals/keys.js';
 import { NonceLedger, nonceLedgerPath } from '../approvals/nonces.js';
 import {
+  extractFromComment,
   isCodeGateWaiver,
   newNonce,
+  parse,
   RecordError,
   recordTimestamp,
   renderComment,
   serialise,
 } from '../approvals/record.js';
 import { ownerKeyPath, sign } from '../approvals/sign.js';
-import { specBlobSha, verifyGate } from '../approvals/verify.js';
+import { specBlobSha, verifyGate, verifySignature } from '../approvals/verify.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { listComments, postComment } from '../github/comments.js';
@@ -137,33 +139,75 @@ function fetchBranch(project: Project, branch: string): string | undefined {
   return fetched.status === 0 ? undefined : fetched.stderr.trim() || 'git fetch failed';
 }
 
-function specSha(project: Project, branch: string): string {
-  const failed = fetchBranch(project, branch);
-  if (failed !== undefined) throw new RefusedError(`cannot fetch ${branch}: ${failed}`);
-  try {
-    return specBlobSha(project.cwd, `origin/${branch}`, `specs/${branch.slice('claude/'.length)}`);
-  } catch (err) {
-    throw new RefusedError(err instanceof Error ? err.message : String(err));
-  }
+/** The item branch as read once: the commit it resolved to, and the feature files at it. */
+interface BranchView {
+  commit: string;
+  files: NonNullable<SummaryFacts['files']>;
 }
 
-/** The feature files the summary reads, as committed on the item branch at origin. */
-function branchFiles(project: Project, branch: string): SummaryFacts['files'] {
-  if (fetchBranch(project, branch) !== undefined) return undefined;
+const git = (project: Project, args: readonly string[]) =>
+  spawnSync('git', ['-C', project.cwd, ...args], { env: project.env, encoding: 'utf8' });
+
+/**
+ * Fetch the item branch once, resolve it to one commit, and read every summary file at that
+ * commit, so what the Owner sees is what the record signs. The error text when it cannot.
+ */
+function readBranch(project: Project, branch: string): BranchView | string {
+  const failed = fetchBranch(project, branch);
+  if (failed !== undefined) return `cannot fetch ${branch}: ${failed}`;
+  const rev = git(project, ['rev-parse', '--verify', `origin/${branch}^{commit}`]);
+  if (rev.status !== 0) return `cannot resolve origin/${branch}`;
+  const commit = rev.stdout.trim();
   const dir = `specs/${branch.slice('claude/'.length)}`;
   const show = (name: string) => {
-    const r = spawnSync('git', ['-C', project.cwd, 'show', `origin/${branch}:${dir}/${name}`], {
-      env: project.env,
-      encoding: 'utf8',
-    });
+    const r = git(project, ['show', `${commit}:${dir}/${name}`]);
     return r.status === 0 ? r.stdout : undefined;
   };
   return {
-    spec: show('spec.md'),
-    tasks: show('tasks.md'),
-    verify: show('reports/verify.md'),
-    events: show('events.jsonl'),
+    commit,
+    files: {
+      spec: show('spec.md'),
+      tasks: show('tasks.md'),
+      verify: show('reports/verify.md'),
+      events: show('events.jsonl'),
+    },
   };
+}
+
+/**
+ * The diff from the spec the Owner last approved for this item (a signed `spec-approved` record,
+ * checked by signature alone since a changed spec makes it stale) to the one about to be signed.
+ */
+async function previousSpec(
+  project: Project,
+  issue: number,
+  blob: string,
+): Promise<SummaryFacts['previousSpec']> {
+  const keys = laptopKeys(project.home);
+  const comments = await listComments(project.repo, issue, project);
+  for (const comment of [...comments].reverse()) {
+    let record: ApprovalRecord;
+    try {
+      const signed = extractFromComment(comment.body);
+      record = parse(signed.text);
+      if (record.gate !== 'spec-approved' || record.repo !== project.repo) continue;
+      if (record.issue !== issue || !verifySignature(signed, keys, project.env)) continue;
+    } catch {
+      continue;
+    }
+    const old = record.spec_sha ?? '';
+    if (old === blob) return { blob: old, diff: '' };
+    const diff = git(project, ['diff', '--no-ext-diff', '--no-textconv', old, blob]);
+    return { blob: old, diff: diff.status === 0 ? diff.stdout.replace(/\n$/, '') : undefined };
+  }
+  return undefined;
+}
+
+interface Gathered {
+  fields: RecordFields;
+  info: Issue;
+  view?: BranchView;
+  previous?: SummaryFacts['previousSpec'];
 }
 
 async function fieldsFor(
@@ -172,7 +216,7 @@ async function fieldsFor(
   issue: number,
   gate: ApprovalGate,
   waives: string | undefined,
-): Promise<{ fields: RecordFields; info: Issue }> {
+): Promise<Gathered> {
   const info = await viewIssue(project, issue);
   if (gate === 'approved') {
     const tier = confirmedTier(ctx.options.tier, info.labels, issue);
@@ -180,19 +224,40 @@ async function fieldsFor(
   }
   if (gate === 'spec-approved') {
     const { tier, branch } = await approvedRecord(project, issue);
-    return { fields: { tier, branch, spec_sha: specSha(project, branch) }, info };
+    const view = readBranch(project, branch);
+    if (typeof view === 'string') throw new RefusedError(view);
+    let spec_sha: string;
+    try {
+      spec_sha = specBlobSha(project.cwd, view.commit, `specs/${branch.slice('claude/'.length)}`);
+    } catch (err) {
+      throw new RefusedError(err instanceof Error ? err.message : String(err));
+    }
+    const previous = await previousSpec(project, issue, spec_sha);
+    return { fields: { tier, branch, spec_sha }, info, view, previous };
   }
   const target = waives ?? '';
+  if (target.startsWith('test:'))
+    throw new RefusedError(
+      'test: waiver targets are not supported yet (T151); a weakened test blocks until then',
+    );
   if (target.startsWith('check:') || target.startsWith('dep:'))
     throw new RefusedError(
       `waivers on pull requests (${target.split(':')[0] ?? ''}:) are not supported in this build yet`,
     );
   if (!target.startsWith('gate:')) return { fields: { waives: target }, info };
   const { tier, branch } = await approvedRecord(project, issue);
-  const head = isCodeGateWaiver(target)
-    ? { head: (await viewPr(project.repo, branch, project)).headRefOid }
-    : {};
-  return { fields: { tier, branch, waives: target, ...head }, info };
+  const view = readBranch(project, branch);
+  if (!isCodeGateWaiver(target)) {
+    const read = typeof view === 'string' ? {} : { view };
+    return { fields: { tier, branch, waives: target }, info, ...read };
+  }
+  // A code-gate waiver binds the PR head; it must be the very commit the summary was read at.
+  const head = (await viewPr(project.repo, branch, project)).headRefOid;
+  if (typeof view === 'string' || view.commit !== head)
+    throw new RefusedError(
+      `PR head ${head.slice(0, 12)} is not the commit read from origin/${branch} (${typeof view === 'string' ? view : view.commit.slice(0, 12)}); fetch again and retry`,
+    );
+  return { fields: { tier, branch, waives: target, head }, info, view };
 }
 
 const GATE_OF: Record<string, SummaryFacts['gate'] | undefined> = {
@@ -214,13 +279,15 @@ export async function approve(ctx: CommandContext): Promise<number> {
     throw new UsageError('--tier is confirmed only when approving the item itself');
 
   const project = await projectHere(ctx);
-  const { fields, info } = await fieldsFor(ctx, project, issue, gate, waives);
-  // Before Specify there is no item branch to read.
-  const files =
-    gate !== 'approved' && fields.branch !== undefined
-      ? branchFiles(project, fields.branch)
-      : undefined;
-  const summary = buildSummary({ gate, issue: info, ...fields, files });
+  const { fields, info, view, previous } = await fieldsFor(ctx, project, issue, gate, waives);
+  const summary = buildSummary({
+    gate,
+    issue: info,
+    ...fields,
+    commit: view?.commit,
+    files: view?.files,
+    previousSpec: previous,
+  });
   if (!summary.ok)
     throw new RefusedError(
       `not signing: the approval summary is incomplete:\n  ${summary.missing.join('\n  ')}`,
