@@ -5,8 +5,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
+import { factorySource, laptopKeys } from '../approvals/keys.js';
 import { assertPassphraseTerminal, ownerKeyPath } from '../approvals/sign.js';
 import type { CommandContext } from '../cli/commands.js';
 import { EnvironmentError, ExitCode, RefusedError, UsageError } from '../cli/env.js';
@@ -18,7 +18,6 @@ import { createDefineBranch, DEFINE_BRANCH, installProject } from '../install/pr
 import { formatReleasePin, slugify } from '../model/naming.js';
 import type { AgentsMode, ProjectConfig, ReleasePin } from '../model/types.js';
 import { RELEASE_TAG, verifyReleaseTag } from '../release/tag.js';
-import { laptopKeys } from './approve.js';
 
 export const CONSENT = `Before anything is created, choose where agents may run:
 
@@ -52,11 +51,6 @@ export function ownerHome(ctx: CommandContext): string {
   if (!existsSync(ownerKeyPath(home)))
     throw new RefusedError(`${ownerKeyPath(home)} not found; run factory keygen first`);
   return home;
-}
-
-/** The factory clone this CLI was built from; `FACTORY_SOURCE` names another one. */
-export function factorySource(env: NodeJS.ProcessEnv): string {
-  return env.FACTORY_SOURCE ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 }
 
 export interface Release {

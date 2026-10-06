@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import type { Verdict } from '../../src/approvals/verify.js';
 import { nextTransition, type Evidence } from '../../src/dispatcher/transitions.js';
@@ -5,7 +8,9 @@ import { runStop } from '../../src/hooks/stop.js';
 import {
   checkSplit,
   conflictFailure,
+  LOCAL_TEST_CONFIG,
   splitFailure,
+  testHelpers,
   weakenedTests,
   type DiffFile,
 } from '../../src/stations/edges.js';
@@ -91,7 +96,7 @@ describe('Builder split (AC-057)', () => {
 describe('Integrate conflicts (AC-058)', () => {
   const REPORT = `# Integrate report\n\n## Conflicts\n\n- src/auth/login.ts: main renamed the session helper the handler calls\n- tests/unit/login.test.ts: fixture format changed\n\n## Rebase\n\n- onto 1c9d0e5\n`;
 
-  it('AC-058: a conflict report sends the item back to Build, never on to releasing', () => {
+  it("AC-058: before the Owner's merge, a conflict report sends the item back to Build", () => {
     const failure = conflictFailure(REPORT);
     expect(failure).toEqual({
       station: 4,
@@ -99,13 +104,26 @@ describe('Integrate conflicts (AC-058)', () => {
         'rebase conflicts need a behaviour change: src/auth/login.ts: main renamed the session helper the handler calls; tests/unit/login.test.ts: fixture format changed',
     });
     if (failure === undefined) throw new Error('no failure');
-    // Even with a signed merge on main, a conflict report never moves the item forward.
-    const decision = nextTransition(
-      { state: 'integrating' },
-      { ...GATED, failure, ownerMerge: true },
-      RUNNING,
+    // Before the Owner's merge, the item goes back to Build.
+    expect(nextTransition({ state: 'integrating' }, { ...GATED, failure }, RUNNING)).toMatchObject({
+      ok: true,
+      to: 'building',
+    });
+  });
+
+  it('AC-058: after the Owner-signed merge, a conflict moves the item on to releasing with an alert', () => {
+    const failure = conflictFailure(REPORT);
+    if (failure === undefined) throw new Error('no failure');
+    const merged = { ...GATED, failure, ownerMerge: true };
+    const decision = nextTransition({ state: 'integrating' }, merged, RUNNING);
+    expect(decision).toMatchObject({ ok: true, to: 'releasing' });
+    expect(decision.alert).toMatch(
+      /^failed a gate after the Owner's merge: rebase conflicts .*; file a follow-up issue$/,
     );
-    expect(decision).toMatchObject({ ok: true, to: 'building' });
+    // Found while already releasing: it stays there, still with the alert.
+    const there = nextTransition({ state: 'releasing' }, merged, RUNNING);
+    expect(there).toMatchObject({ ok: false });
+    expect(there.alert).toMatch(/after the Owner's merge/);
   });
 
   it('AC-058: a report with no conflicts, or "none", routes nowhere', () => {
@@ -122,6 +140,12 @@ const file = (path: string, added: string[], removed: string[] = []): DiffFile =
   removed,
 });
 const TEST = 'tests/unit/login.test.ts';
+const NONE = {
+  waivers: new Set<string>(),
+  openIssues: new Set<number>(),
+  helpers: new Set<string>(),
+};
+const messages = (r: { findings: { message: string }[] }) => r.findings.map((f) => f.message);
 
 describe('flaky, skipped and weakened tests (AC-061)', () => {
   it('AC-061: a fix that keeps every test and assertion passes', () => {
@@ -133,7 +157,7 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
       ),
       file('src/auth/login.ts', [], ['  expect(x);', '  it.skip(']),
     ];
-    expect(weakenedTests(diff, { waived: false, openIssues: new Set() })).toEqual({
+    expect(weakenedTests(diff, NONE)).toEqual({
       ok: true,
       findings: [],
       problems: [],
@@ -141,7 +165,7 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
     });
   });
 
-  it('AC-061: skipping, focusing, retrying or deleting tests fails without an Owner waiver', () => {
+  it('AC-061: each skipped, focused, retried or deleted test names the waiver target that covers it', () => {
     const diff: DiffFile[] = [
       file(
         TEST,
@@ -166,20 +190,54 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
         ["  it('drops', () => {", '    expect(a).toBe(1);', '  });'],
       ),
     ];
-    const result = weakenedTests(diff, { waived: false, openIssues: new Set() });
+    const result = weakenedTests(diff, NONE);
     expect(result.ok).toBe(false);
-    expect(result.findings).toEqual([
-      `${TEST}: skips a test: it.skip('locks out', () => {`,
-      `${TEST}: skips a test: test.todo('remember me');`,
-      "tests/unit/a.test.ts: focuses a test, skipping the others: it.only('runs alone', () => {",
-      "tests/unit/b.test.ts: retries a test: it('retries', { retry: 3 }, () => {",
-      'tests/unit/gone.test.ts: deletes the test file',
-      'tests/unit/c.test.ts: removes 1 test block',
-      'tests/unit/c.test.ts: removes 1 assertion',
+    expect(result.findings.map((f) => [f.message, f.target, f.covered])).toEqual([
+      [`${TEST}: skips a test: it.skip('locks out', () => {`, `test:${TEST}#locks out`, false],
+      [`${TEST}: skips a test: test.todo('remember me');`, `test:${TEST}#remember me`, false],
+      [
+        "tests/unit/a.test.ts: focuses a test, skipping the others: it.only('runs alone', () => {",
+        'test:tests/unit/a.test.ts#runs alone',
+        false,
+      ],
+      [
+        "tests/unit/b.test.ts: retries a test: it('retries', { retry: 3 }, () => {",
+        'test:tests/unit/b.test.ts#retries',
+        false,
+      ],
+      ['tests/unit/gone.test.ts: deletes the test file', 'test:tests/unit/gone.test.ts', false],
+      [
+        "tests/unit/c.test.ts: removes test block 'drops'",
+        'test:tests/unit/c.test.ts#drops',
+        false,
+      ],
+      ['tests/unit/c.test.ts: removes 1 assertion', 'test:tests/unit/c.test.ts', false],
     ]);
   });
 
-  it('AC-061: a quarantined flaky test needs both the Owner waiver and an open issue', () => {
+  it('AC-061: one waiver covers only its own test; a file-wide target covers the whole file', () => {
+    const diff = [
+      file(TEST, ["  it.only('locks out', () => {", "  it('remember me', { retry: 2 }, () => {"]),
+      file('tests/unit/c.test.ts', [], ['    expect(a).toBe(1);']),
+    ];
+    const one = weakenedTests(diff, { ...NONE, waivers: new Set([`test:${TEST}#locks out`]) });
+    expect(one.ok).toBe(false);
+    expect(one.findings.map((f) => f.covered)).toEqual([true, false, false]);
+
+    const all = weakenedTests(diff, {
+      ...NONE,
+      waivers: new Set([`test:${TEST}`, 'test:tests/unit/c.test.ts']),
+    });
+    expect(all.ok).toBe(true);
+    // A removed assertion inside an unchanged test cannot name its test: only the file-wide target covers it.
+    const titled = weakenedTests([diff[1] as DiffFile], {
+      ...NONE,
+      waivers: new Set(['test:tests/unit/c.test.ts#drops']),
+    });
+    expect(titled.ok).toBe(false);
+  });
+
+  it('AC-061: a quarantined flaky test needs both its waiver and an open issue', () => {
     const quarantined = [
       file(
         TEST,
@@ -188,19 +246,23 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
       ),
     ];
     const open = new Set([61]);
-    expect(weakenedTests(quarantined, { waived: false, openIssues: open })).toMatchObject({
+    const waived = new Set([`test:${TEST}#locks out`]);
+    expect(weakenedTests(quarantined, { ...NONE, openIssues: open })).toMatchObject({
       ok: false,
       problems: [],
       quarantines: [61],
     });
-    expect(weakenedTests(quarantined, { waived: true, openIssues: open }).ok).toBe(true);
+    expect(weakenedTests(quarantined, { ...NONE, waivers: waived, openIssues: open }).ok).toBe(
+      true,
+    );
 
-    const closed = weakenedTests(quarantined, { waived: true, openIssues: new Set() });
+    const closed = weakenedTests(quarantined, { ...NONE, waivers: waived });
     expect(closed.ok).toBe(false);
     expect(closed.problems).toEqual([`${TEST}: quarantine names #61, which is not an open issue`]);
 
     const bare = weakenedTests([file(TEST, ["  it.skip('locks out', () => {"])], {
-      waived: true,
+      ...NONE,
+      waivers: waived,
       openIssues: open,
     });
     expect(bare.ok).toBe(false);
@@ -213,9 +275,154 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
     const diff = [
       file(TEST, ['  // quarantine #61: flaky on CI', "  it.skip('locks out', () => {"]),
     ];
-    expect(weakenedTests(diff, { waived: true, openIssues: new Set([61]) })).toMatchObject({
-      ok: true,
-      quarantines: [61],
+    const options = {
+      ...NONE,
+      waivers: new Set([`test:${TEST}#locks out`]),
+      openIssues: new Set([61]),
+    };
+    expect(weakenedTests(diff, options)).toMatchObject({ ok: true, quarantines: [61] });
+  });
+
+  const flagged = (line: string) => {
+    const result = weakenedTests([file(TEST, [line])], NONE);
+    return result.findings.map((f) => [f.message, f.target]);
+  };
+
+  it('AC-061: it.skipIf(...) is a skip', () => {
+    expect(flagged("  it.skipIf(isCI)('locks out', () => {")).toEqual([
+      [`${TEST}: skips a test: it.skipIf(isCI)('locks out', () => {`, `test:${TEST}`],
+    ]);
+  });
+
+  it('AC-061: describe.skipIf(...) is a skip', () => {
+    expect(flagged("  describe.skipIf(true)('login', () => {")[0]?.[0]).toBe(
+      `${TEST}: skips a test: describe.skipIf(true)('login', () => {`,
+    );
+  });
+
+  it('AC-061: it.runIf(false) is a skip', () => {
+    expect(flagged("  it.runIf(false)('locks out', () => {")[0]?.[0]).toBe(
+      `${TEST}: skips a test: it.runIf(false)('locks out', () => {`,
+    );
+  });
+
+  it('AC-061: ctx.skip() inside a test is a skip', () => {
+    expect(flagged('    ctx.skip();')).toEqual([
+      [`${TEST}: skips a test: ctx.skip();`, `test:${TEST}`],
+    ]);
+  });
+
+  it('AC-061: test.fails(...) inverts a test', () => {
+    expect(flagged("  test.fails('locks out', () => {")).toEqual([
+      [
+        `${TEST}: inverts a test (it passes when it fails): test.fails('locks out', () => {`,
+        `test:${TEST}#locks out`,
+      ],
+    ]);
+  });
+
+  it('AC-061: changed setup files and test helpers need a file-wide waiver', () => {
+    const setup = 'tests/setup.ts';
+    const config = { ...LOCAL_TEST_CONFIG, setupFiles: [setup], globalSetup: [] };
+    const diff = [
+      file(setup, ['process.env.TZ = "UTC";']),
+      file('tests/helpers/db.ts', ['export const seed = 2;'], ['export const seed = 1;']),
+      file('src/auth/login.ts', ['export const x = 1;']),
+    ];
+    const result = weakenedTests(diff, {
+      ...NONE,
+      helpers: new Set(['tests/helpers/db.ts']),
+      config,
+    });
+    expect(messages(result)).toEqual([
+      `${setup}: changes a test setup file`,
+      'tests/helpers/db.ts: changes a test helper',
+    ]);
+    expect(result.findings.map((f) => f.target)).toEqual([
+      `test:${setup}`,
+      'test:tests/helpers/db.ts',
+    ]);
+  });
+
+  it('AC-061: helpers are test-path files with no it/test call, and files only tests or helpers import', () => {
+    const head = new Map([
+      [
+        'tests/login.test.ts',
+        "import { seed } from './helpers/db.js';\nimport { login } from '../src/login.js';\nit('a', () => {});\n",
+      ],
+      ['tests/shared.test.ts', 'export const fixture = 1;\n'],
+      [
+        'tests/helpers/db.ts',
+        "import { fake } from '../../lib/fake-clock.js';\nexport const seed = 1;\n",
+      ],
+      ['lib/fake-clock.ts', 'export const fake = 1;\n'],
+      ['src/login.ts', 'export const login = 1;\n'],
+      ['src/server.ts', "import { login } from './login.js';\n"],
+    ]);
+    // src/login.ts is imported by a test but also by src/server.ts: production code, not a helper.
+    // lib/fake-clock.ts is imported only by a helper, so it is a helper too (second level).
+    expect([...testHelpers(new Map(), head)].sort()).toEqual([
+      'lib/fake-clock.ts',
+      'tests/helpers/db.ts',
+      'tests/shared.test.ts',
+    ]);
+  });
+
+  it('AC-061: moving assertion logic two levels deep still makes it a helper', () => {
+    const head = new Map([
+      ['tests/a.test.ts', "import { check } from '../lib/one.js';\nit('a', () => check());\n"],
+      ['lib/one.ts', "import { deep } from './two.js';\nexport const check = deep;\n"],
+      ['lib/two.ts', "import { leaf } from './three.js';\nexport const deep = leaf;\n"],
+      ['lib/three.ts', 'export const leaf = () => expect(1).toBe(1);\n'],
+    ]);
+    expect([...testHelpers(new Map(), head)].sort()).toEqual([
+      'lib/one.ts',
+      'lib/three.ts',
+      'lib/two.ts',
+    ]);
+  });
+
+  it('AC-061: helpers that import each other are still helpers', () => {
+    const head = new Map([
+      ['tests/a.test.ts', "import { one } from '../lib/one.js';\nit('a', () => one());\n"],
+      ['lib/one.ts', "import { two } from './two.js';\nexport const one = two;\n"],
+      ['lib/two.ts', "import { one } from './one.js';\nexport const two = () => one;\n"],
+      ['src/app.ts', "import { x } from './x.js';\n"],
+      ['src/x.ts', "import { y } from './y.js';\nexport const x = 1;\n"],
+      ['src/y.ts', "import { x } from './x.js';\nexport const y = 1;\n"],
+    ]);
+    expect([...testHelpers(new Map(), head)].sort()).toEqual(['lib/one.ts', 'lib/two.ts']);
+  });
+
+  it('AC-061: a helper deleted at head is still found from the base, and its deletion needs a waiver', () => {
+    const base = new Map([
+      ['tests/a.test.ts', "import { seed } from '../lib/seed.js';\nit('a', () => seed());\n"],
+      ['lib/seed.ts', 'export const seed = () => expect(1).toBe(1);\n'],
+    ]);
+    const head = new Map([['tests/a.test.ts', "it('a', () => {});\n"]]);
+    const helpers = testHelpers(base, head);
+    expect([...helpers]).toEqual(['lib/seed.ts']);
+    const gone: DiffFile = {
+      path: 'lib/seed.ts',
+      status: 'deleted',
+      added: [],
+      removed: ['export const seed = () => expect(1).toBe(1);'],
+    };
+    const result = weakenedTests([gone], { ...NONE, helpers });
+    expect(result.ok).toBe(false);
+    expect(messages(result)).toEqual(['lib/seed.ts: deletes a test helper']);
+  });
+
+  it('AC-061 (end date, T140): the local test-path constant stays only until the release ships test-paths.json', () => {
+    // When this fails, T140 has landed: switch src/stations/edges.ts to the release's patterns
+    // and setup files, then delete LOCAL_TEST_CONFIG and this test.
+    const root = fileURLToPath(new URL('../../', import.meta.url));
+    expect(existsSync(join(root, 'factory/profiles/typescript/ci/test-paths.json'))).toBe(false);
+    expect(LOCAL_TEST_CONFIG).toEqual({
+      include: ['tests/**/*.test.ts'],
+      exclude: [],
+      setupFiles: [],
+      globalSetup: [],
     });
   });
 });

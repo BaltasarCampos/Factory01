@@ -189,11 +189,14 @@ branch from replaying old approvals into a second merge.
 ## Approval summary (FR-043)
 
 Every signing command shows a summary before it asks for the passphrase. The command builds each
-part itself from signed records, git and GitHub, never from an agent's summary; quoted text
-(issue, spec, reports) has every Unicode `Cc`, `Cf`, `Zl` and `Zp` character removed except
-newline and tab. `approve` reads the item branch once, at one resolved commit, and refuses a
-code-gate waiver when the PR head is another commit. The list below is the constant in
-`src/notify/summary.ts`, pinned with the release.
+part itself from signed records, git and GitHub, never from an agent's summary; agent-written
+text (issue, spec, reports) is shown as "quoted from <file> at <commit>", and every line has each
+Unicode `Cc`, `Cf`, `Zl` and `Zp` character removed except newline (tab included). `approve`
+reads the item branch once, at one resolved commit, and refuses a code-gate waiver when the PR
+head is another commit. A spec re-approval finds the last approval with main's pinned
+`allowed_signers` and `revoked_keys`; when that spec.md blob is not available (after a rebase or
+force-push), it shows the full current spec instead of refusing. The list below is the constant
+in `src/notify/summary.ts`, pinned with the release.
 
 **R** required (missing → the command refuses) · **—** not applicable · **S** shown when
 available, never required: usage comes from `events.jsonl`, which is telemetry, so when it is
@@ -206,7 +209,7 @@ missing the summary says "unavailable (telemetry missing)" and goes on.
 | Waiver, pre-build `gate:` | R: target | — | — | S | R: tier |
 | Waiver, code `gate:` | R: target; PR head (= the commit read); diffstat since the merge base; after a rebase, the range-diff since the waived head (T151) | R: each `AC-###` → its test tasks | R: the waived gate's result | S | R: tier; what the waiver lets through, computed from the waived check (for `red-green`, the criteria whose tests do not go from failing to passing) |
 | Waiver, other targets (`finding:`, `dep:`, `check:`) | R: target | — | — | — | R: what stays unfixed or accepted |
-| Merge, item | R: diffstat of the checked head; every removed, skipped, focused or retried test, removed assertion and changed setup or helper file (AC-061), each with the `test:` waiver that covers it, or "none" | R: each `AC-###` → its tagged tests | R: CI on the checked head; verify report | S | R: tier; open findings; waivers in force |
+| Merge, item | R: diffstat of the checked head; every changed test file, even when its counts net to zero; every removed, skipped, focused or retried test, removed assertion and changed setup or helper file (AC-061), each with the `test:` waiver that covers it, or "none" | R: each `AC-###` → its tagged tests | R: CI on the checked head; verify report | S | R: tier; open findings; waivers in force |
 | Merge, Define / upgrade / log | R: diffstat of the checked head | — | R: the branch's own check: Define output check, manifest equality, append-only | — | R: upgrade — the keys it revokes and the in-flight items whose approvals used them; Define and log — the per-branch check results |
 | Deploy | R: items merged since the last deploy | — | R: CI on main's head | S | R: rollback step from the release notes |
 | Resume | R: items whose state changed since the pause | — | — | — | R: what was paused, when and by whom (label history), and the alerts raised during the pause |

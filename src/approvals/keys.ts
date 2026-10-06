@@ -5,8 +5,9 @@
 // agent can write it, must agree with that list; a mismatch right after an upgrade added a key
 // is a pending rotation rather than tampering.
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { CLOUD_MARKER, RefusedError } from '../cli/env.js';
 import { parseConfig } from '../model/config.js';
 import type { ReleasePin } from '../model/types.js';
@@ -134,4 +135,41 @@ export function pinOnMain(projectRepo: string, mainRef = 'origin/main'): Release
   const text = gitShow(projectRepo, `${mainRef}:.factory/config`);
   if (text === undefined) throw new KeyError(`${mainRef} has no .factory/config`);
   return parseConfig(text).factory_release;
+}
+
+/**
+ * The laptop's own key list (`~/.factory/allowed_signers`, written by `factory keygen`) and
+ * revocation list; an absent revocation list is created empty. Used only where no project pin
+ * exists yet (`factory new` verifying the release tag).
+ */
+export function laptopKeys(home: string): ReleaseKeys {
+  const dir = join(home, '.factory');
+  const keys = {
+    allowedSigners: join(dir, 'allowed_signers'),
+    revokedKeys: join(dir, 'revoked_keys'),
+  };
+  if (!existsSync(keys.allowedSigners))
+    throw new RefusedError(`${keys.allowedSigners} not found; run factory keygen first`);
+  if (!existsSync(keys.revokedKeys)) writeFileSync(keys.revokedKeys, '');
+  return keys;
+}
+
+/** The factory clone this CLI was built from; `FACTORY_SOURCE` names another one. */
+export function factorySource(env: NodeJS.ProcessEnv): string {
+  return env.FACTORY_SOURCE ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
+}
+
+/**
+ * The key lists of the factory release pinned on main, written into `dir`: the inputs every
+ * main-side check uses. Main is fetched first and a failed fetch refuses, so a stale pin never
+ * decides; a release whose lists cannot be read refuses too.
+ */
+export function mainKeys(projectRepo: string, env: NodeJS.ProcessEnv, dir: string): ReleaseKeys {
+  const fetched = spawnSync('git', ['-C', projectRepo, 'fetch', '-q', 'origin', 'main'], {
+    env,
+    encoding: 'utf8',
+  });
+  if (fetched.error !== undefined || fetched.status !== 0)
+    throw new KeyError(`cannot fetch main: ${fetched.stderr.trim() || 'git fetch failed'}`);
+  return releaseKeys(factorySource(env), pinOnMain(projectRepo).sha, dir);
 }

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { trace, traceBack, untrailered, type TraceInput } from '../../src/events/trace.js';
-import { buildSummary, type SummaryFacts } from '../../src/notify/summary.js';
+import {
+  buildSummary,
+  GATE_PARTS,
+  PART_TITLES,
+  type SummaryFacts,
+} from '../../src/notify/summary.js';
 
 const BRANCH = 'claude/42-add-login';
 
@@ -49,11 +54,13 @@ const ISSUE = {
   body: 'Let visitors sign in.\n\nOnly email and password.',
   labels: ['tier:2', 'type:feature', 'priority:p1'],
 };
+const COMMIT = '5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f';
 const facts = (over: Partial<SummaryFacts> = {}): SummaryFacts => ({
   gate: 'spec-approved',
   issue: ISSUE,
   tier: 2,
   branch: BRANCH,
+  commit: COMMIT,
   files: { spec: SPEC, tasks: TASKS, events: EVENTS },
   ...over,
 });
@@ -64,106 +71,230 @@ const text = (f: SummaryFacts) => {
   if (!s.ok) throw new Error(`refused: ${s.missing.join('; ')}`);
   return s.text;
 };
+/** The lines of one part of a summary, without their indent. */
+const part = (t: string, title: string) => {
+  const lines = t.split('\n');
+  const start = lines.indexOf(title) + 1;
+  const end = lines.findIndex((l, i) => i >= start && !l.startsWith('  '));
+  return lines.slice(start, end === -1 ? undefined : end).map((l) => l.trim());
+};
 
-describe('approval summary (AC-016)', () => {
-  it('AC-016: shows what changed, spec mapping, tests and review, usage spent and known risks', () => {
-    const t = text(facts({ files: { spec: SPEC, tasks: TASKS, verify: VERIFY, events: EVENTS } }));
-    for (const part of [
-      'What changed',
-      'Spec mapping',
-      'Tests and review',
-      'Usage spent',
-      'Known risks',
-    ])
-      expect(t).toMatch(new RegExp(`^${part}$`, 'm'));
-    expect(t).toMatch(/#42: Add login/);
-    expect(t).toMatch(/Visitors cannot sign in/);
-    expect(t).toMatch(/AC-001 → T002/);
-    expect(t).toMatch(/AC-002 → no test task/);
-    expect(t).toMatch(/all checks pass/);
-    expect(t).toMatch(/3 sessions, about 5% of the plan's usage/);
-    expect(t).toMatch(/Tier 2/);
+describe('the per-gate list (data-model § Approval summary)', () => {
+  it('AC-016: marks every part of every gate required, not applicable or shown; usage is never required', () => {
+    for (const [gate, parts] of Object.entries(GATE_PARTS)) {
+      expect(Object.keys(parts).sort(), gate).toEqual(Object.keys(PART_TITLES).sort());
+      expect(parts.usage, gate).not.toBe('required');
+      expect(parts.changed, gate).toBe('required');
+      expect(parts.risks, gate).toBe('required');
+    }
+    expect(GATE_PARTS.admission.mapping).toBe('n/a');
+    expect(GATE_PARTS.spec.mapping).toBe('required');
   });
 
-  it('AC-016: an item approval names the request and states that spec, tests and usage come later', () => {
-    const t = text(facts({ gate: 'approved', files: undefined }));
-    expect(t).toMatch(/Let visitors sign in\./);
-    expect(t).toMatch(/No spec yet: Specify writes it on claude\/42-add-login/);
-    expect(t).toMatch(/None yet: this gate comes before Build/);
-    expect(t).toMatch(/None logged yet/);
-    expect(t).toMatch(/type:feature, priority:p1/);
+  it('AC-016: a part the list marks not applicable shows —, and the summary prints the commit read', () => {
+    const t = text(facts());
+    expect(t).toMatch(new RegExp(`at ${COMMIT}`));
+    expect(part(t, 'Tests and review')).toEqual(['—']);
+  });
+});
+
+describe('item approval (AC-091)', () => {
+  const admission = (over: Partial<SummaryFacts> = {}) =>
+    facts({ gate: 'approved', files: undefined, commit: undefined, ...over });
+
+  it('AC-091: shows the request quoted from the issue, and the tier as the known risk', () => {
+    const t = text(admission());
+    expect(part(t, 'What changed')).toEqual([
+      'Request #42: Add login',
+      'quoted from issue #42:',
+      '> Let visitors sign in.',
+      '> Only email and password.',
+    ]);
+    expect(part(t, 'Spec mapping')).toEqual(['—']);
+    expect(part(t, 'Known risks')).toEqual(['Tier 2', 'Other labels: type:feature, priority:p1']);
   });
 
-  it('AC-016: a tier 1 item approval says the spec is not approved separately', () => {
-    expect(text(facts({ gate: 'approved', tier: 1, files: undefined }))).toMatch(
-      /tier 1: the spec is not approved separately/,
+  it('AC-091: other labels are shown only if present; Intake has not run yet', () => {
+    const t = text(admission({ issue: { ...ISSUE, labels: ['tier:2'] } }));
+    expect(part(t, 'Known risks')).toEqual(['Tier 2']);
+  });
+
+  it('AC-091: refuses without a tier', () => {
+    expect(buildSummary(admission({ tier: undefined }))).toEqual({
+      ok: false,
+      missing: ['Known risks: no tier (give one with --tier or a single proposed tier: label)'],
+    });
+  });
+
+  it('AC-091: usage is shown as unavailable rather than refusing', () => {
+    expect(part(text(admission()), 'Usage spent')).toEqual(['unavailable (telemetry missing)']);
+  });
+});
+
+describe('spec approval (AC-092)', () => {
+  it('AC-092: a first approval quotes Problem and Affected areas and lists every AC-###', () => {
+    const t = text(facts());
+    expect(part(t, 'What changed')).toEqual([
+      'Request #42: Add login',
+      `quoted from specs/42-add-login/spec.md at ${COMMIT.slice(0, 12)}:`,
+      '> Problem: Visitors cannot sign in, so every saved link is public.',
+      '> Affected areas: `src/auth/` and the login page.',
+    ]);
+    expect(part(t, 'Spec mapping')).toEqual([
+      `quoted from specs/42-add-login/spec.md at ${COMMIT.slice(0, 12)}:`,
+      '> AC-001: Given a registered user, When they sign in, Then they see their links.',
+      '> AC-002: Given a wrong password, When they sign in, Then they see an error.',
+    ]);
+  });
+
+  it('AC-092: a re-approval shows the spec.md diff from the last approved blob', () => {
+    const diff = '@@ -1 +1 @@\n-old line\n+new line';
+    const t = text(facts({ previousSpec: { blob: 'b'.repeat(40), diff } }));
+    expect(part(t, 'What changed')).toEqual([
+      'Request #42: Add login',
+      `spec.md changed since the approved blob bbbbbbbbbbbb (diff to ${COMMIT.slice(0, 12)}):`,
+      '> @@ -1 +1 @@',
+      '> -old line',
+      '> +new line',
+    ]);
+    const unchanged = text(facts({ previousSpec: { blob: 'b'.repeat(40), diff: '' } }));
+    expect(part(unchanged, 'What changed')).toContain(
+      'spec.md is unchanged since the approved blob bbbbbbbbbbbb',
     );
   });
 
-  it('AC-016: refuses when the spec defines no acceptance criteria to map', () => {
+  it('AC-092: when the previously approved spec cannot be read, shows the full spec instead of refusing', () => {
+    const t = text(facts({ previousSpec: { blob: 'b'.repeat(40), diff: undefined } }));
+    const lines = part(t, 'What changed');
+    expect(lines.slice(0, 3)).toEqual([
+      'Request #42: Add login',
+      'the previously approved spec.md bbbbbbbbbbbb is not available: showing the full spec',
+      `quoted from specs/42-add-login/spec.md at ${COMMIT.slice(0, 12)}:`,
+    ]);
+    expect(lines).toContain('> # Feature Specification: Add login');
+    expect(lines).toContain('> Visitors cannot sign in, so every saved link is public.');
+  });
+
+  it('AC-092: refuses when the spec defines no AC-###, or there is no spec.md', () => {
     expect(buildSummary(facts({ files: { spec: '# Add login\n', events: EVENTS } }))).toEqual({
       ok: false,
       missing: ['Spec mapping: spec.md defines no acceptance criteria'],
     });
-  });
-
-  it('AC-016: refuses the spec gate without a spec.md on the branch', () => {
     expect(buildSummary(facts({ files: { events: EVENTS } }))).toEqual({
       ok: false,
-      missing: ['Spec mapping: no spec.md on claude/42-add-login'],
+      missing: [
+        'What changed: no spec.md on claude/42-add-login',
+        'Spec mapping: no spec.md on claude/42-add-login',
+        'Known risks: no spec.md on claude/42-add-login',
+      ],
     });
   });
 
-  it('AC-016: refuses a tier 3 spec without a Risks section', () => {
-    const s = buildSummary(facts({ tier: 3 }));
-    expect(s).toEqual({
+  it('AC-092: refuses a tier 3 spec without a Risks section, and quotes it when present', () => {
+    expect(buildSummary(facts({ tier: 3 }))).toEqual({
       ok: false,
       missing: ['Known risks: tier 3 needs a Risks section in spec.md'],
     });
     const risky = `${SPEC}\n## Risks\n\n- Lockout logic could block real users.\n`;
-    expect(text(facts({ tier: 3, files: { spec: risky, events: EVENTS } }))).toMatch(
-      /Lockout logic could block real users/,
-    );
+    const t = text(facts({ tier: 3, files: { spec: risky, events: EVENTS } }));
+    expect(part(t, 'Known risks')).toEqual([
+      'Tier 3',
+      `quoted from specs/42-add-login/spec.md at ${COMMIT.slice(0, 12)}:`,
+      '> Lockout logic could block real users.',
+    ]);
+    expect(part(text(facts()), 'Known risks')).toEqual([
+      'Tier 2',
+      'none identified (spec.md has no Risks section; required only at tier 3)',
+    ]);
   });
 
-  it('AC-016: lists failing checks and open blocking findings from the verify report', () => {
-    const report = `${VERIFY.replace('| SCA | pass |', '| SCA | fail |')}\n- [ ] blocking: SQL built by concatenation\n`;
-    const t = text(facts({ gate: 'waiver', waives: 'gate:coverage', files: { verify: report } }));
-    expect(t).toMatch(/SCA: fail/);
-    expect(t).toMatch(/unresolved blocking finding: SQL built by concatenation/);
-    expect(t).toMatch(/Waives gate:coverage/);
+  it('AC-016: sums usage events, counts unreadable lines, and says so when telemetry is missing', () => {
+    expect(part(text(facts()), 'Usage spent')).toEqual([
+      "3 sessions, about 5% of the plan's usage, from 2 usage events in events.jsonl (telemetry, unverified)",
+    ]);
+    const odd = text(facts({ files: { spec: SPEC, events: `${usage(1, 0.5)}\nnot json\n` } }));
+    expect(part(odd, 'Usage spent')).toEqual([
+      "1 session, about 50% of the plan's usage, from 1 usage event in events.jsonl (telemetry, unverified)",
+      '1 unreadable line not counted',
+    ]);
+    expect(part(text(facts({ files: { spec: SPEC } })), 'Usage spent')).toEqual([
+      'unavailable (telemetry missing)',
+    ]);
+  });
+});
+
+describe('waivers (AC-093)', () => {
+  it('AC-093: a pre-build gate waiver names its target, with the tier as risk', () => {
+    const t = text(facts({ gate: 'waiver', waives: 'gate:plan', files: {} }));
+    expect(part(t, 'What changed')).toEqual(['Request #42: Add login', 'Waives gate:plan']);
+    expect(part(t, 'Known risks')).toEqual(['Tier 2']);
   });
 
-  it('AC-016: a waiver names its target and the PR head it is bound to', () => {
-    const head = '1c9d0e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3';
-    const t = text(facts({ gate: 'waiver', waives: 'gate:coverage', head, files: {} }));
-    expect(t).toMatch(/Waives gate:coverage for PR head 1c9d0e5f6a7b/);
-    expect(t).toMatch(/No spec.md on claude\/42-add-login yet/);
-    expect(t).toMatch(/No reports\/verify.md on claude\/42-add-login yet/);
-    expect(t).toMatch(/No events.jsonl on claude\/42-add-login yet/);
+  it('AC-093: a code-gate waiver refuses, naming the check this release does not have yet', () => {
+    const head = COMMIT;
+    const files = { spec: SPEC, tasks: TASKS };
+    const s = buildSummary(facts({ gate: 'waiver', waives: 'gate:coverage', head, files }));
+    expect(s).toEqual({
+      ok: false,
+      missing: [
+        'Tests and review: this release has no coverage check yet, so there is nothing to waive',
+        'Known risks: what the waiver lets through comes from the coverage check, which this release does not have yet',
+      ],
+    });
   });
 
-  it('AC-016: a waiver on an issue that is not a work item says no spec, tests or usage apply', () => {
+  it('AC-093: a waiver on an issue that is not a work item says what stays unfixed', () => {
     const t = text({
       gate: 'waiver',
       issue: { number: 9, title: 'Secret in log output', body: '', labels: ['security'] },
       waives: 'finding:secret-in-log@src/app.ts:12',
     });
-    expect(t).toMatch(/Not a work item/);
-    expect(t).toMatch(/the finding stays unfixed/);
+    expect(part(t, 'Spec mapping')).toEqual(['—']);
+    expect(part(t, 'Usage spent')).toEqual(['—']);
+    expect(part(t, 'Known risks')).toEqual([
+      'Waiver of finding:secret-in-log@src/app.ts:12 on #9: the finding stays unfixed',
+      'Other labels: security',
+    ]);
+  });
+});
+
+describe('gates built later (T053, T068)', () => {
+  it('AC-094: a merge summary is not refused by the code-gate check, and quotes the verify report', () => {
+    const report = `${VERIFY.replace('| SCA | pass |', '| SCA | fail |')}\n- [ ] blocking: SQL built by concatenation\n`;
+    const s = buildSummary(
+      facts({ kind: 'merge', files: { spec: SPEC, tasks: TASKS, verify: report } }),
+    );
+    if (!s.ok) throw new Error(`refused: ${s.missing.join('; ')}`);
+    expect(part(s.text, 'Tests and review')).toEqual([
+      `quoted from specs/42-add-login/reports/verify.md at ${COMMIT.slice(0, 12)}:`,
+      '> reports/verify.md: SCA: fail',
+      '> reports/verify.md: unresolved blocking finding: SQL built by concatenation',
+    ]);
+    expect(part(s.text, 'Spec mapping')).toEqual(['AC-001 → T002', 'AC-002 → no test task yet']);
+  });
+});
+
+describe('quoted text is cleaned by Unicode category (FR-043)', () => {
+  const shown = (body: string) =>
+    part(
+      text(facts({ gate: 'approved', issue: { ...ISSUE, body }, files: undefined })),
+      'What changed',
+    )[2];
+
+  it('AC-016: removes control characters (Cc), C0 and C1 alike', () => {
+    expect(shown('Fine\u001b[8m hidden\u0007 \u0085done')).toBe('> Fine[8m hidden done');
   });
 
-  it('AC-016: counts unreadable event lines instead of trusting them', () => {
-    const t = text(facts({ files: { spec: SPEC, events: `${usage(1, 0.5)}\nnot json\n` } }));
-    expect(t).toMatch(/1 session, about 50% of the plan's usage/);
-    expect(t).toMatch(/1 unreadable line/);
+  it('AC-016: removes format characters (Cf): bidi overrides and zero-width characters', () => {
+    expect(shown('pay ‮eulav‬ ​now⁦x⁩﻿')).toBe('> pay eulav nowx');
   });
 
-  it('AC-016: issue text cannot hide lines from the Owner with terminal control codes', () => {
-    const body = 'Fine change\u001b[8m hidden\u001b[0m\u0007';
-    const t = text(facts({ gate: 'approved', issue: { ...ISSUE, body }, files: undefined }));
-    expect(t).not.toMatch(/\u001b|\u0007/);
-    expect(t).toMatch(/Fine change\?\[8m hidden/);
+  it('AC-016: removes line separators (Zl), so no text can fake a line', () => {
+    expect(shown('one Known risks')).toBe('> oneKnown risks');
+  });
+
+  it('AC-016: removes paragraph separators (Zp)', () => {
+    expect(shown('one two')).toBe('> onetwo');
   });
 });
 

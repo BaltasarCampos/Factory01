@@ -53,11 +53,15 @@ Visitors cannot sign in.
 
 1. **AC-001** — **Given** a registered user, **When** they sign in, **Then** they see their links.
 `;
-const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: ${REPO}\ninbox_issue: 1\nagents: cloud\n`;
+const config = (sha: string) =>
+  `factory_release: v1.0.0@${sha}\nrepo: ${REPO}\ninbox_issue: 1\nagents: cloud\n`;
 
 let owner: TestKeys;
+/** An older Owner key, still listed in the release. */
+let old: TestKeys;
 beforeAll(() => {
   owner = makeKeys();
+  old = makeKeys();
 });
 
 const labeled = (name: string, at: string) => ({
@@ -66,6 +70,22 @@ const labeled = (name: string, at: string) => ({
   actor: { login: 'owner' },
   created_at: at,
 });
+
+/** A comment holding a `spec-approved` record for the item, signed with `keys`. */
+function specApprovedBy(keys: TestKeys, specSha: string) {
+  const record: ApprovalRecord = {
+    repo: REPO,
+    issue: ITEM,
+    gate: 'spec-approved',
+    tier: 2,
+    branch: BRANCH,
+    spec_sha: specSha,
+    timestamp: '2026-10-01T08:30:00Z',
+    nonce: newNonce(),
+  };
+  const body = renderComment(record, sign(record, keys.privateKey, { stdinIsTTY: true }));
+  return { id: 901, author: 'owner', body, createdAt: '2026-10-01T08:30:00Z' };
+}
 
 /** A comment holding an Owner-signed `approved` record for the item, and its label event. */
 function approvedItem(): Pick<FakeIssue, 'comments' | 'events' | 'labels'> {
@@ -86,6 +106,25 @@ function approvedItem(): Pick<FakeIssue, 'comments' | 'events' | 'labels'> {
   };
 }
 
+/** Add the item's draft PR once its head commit is known. */
+function seedPr(head: string) {
+  const state = readState();
+  state.repos[REPO]?.prs.push({
+    number: 8,
+    title: '#7 Add login',
+    body: '',
+    author: 'owner',
+    headRefName: BRANCH,
+    baseRefName: 'main',
+    headRefOid: head,
+    isDraft: true,
+    state: 'OPEN',
+    comments: [],
+    createdAt: '2026-10-02T08:00:00Z',
+  });
+  writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
+}
+
 interface Setup {
   issues?: (Partial<FakeIssue> & { number: number })[];
   prs?: (Partial<FakePr> & { number: number; headRefName: string })[];
@@ -94,6 +133,10 @@ interface Setup {
   clock?: string;
   /** Leave the Owner key out of ~/.factory/keys, so signing fails. */
   noKey?: boolean;
+  /** The pinned release revokes the Owner's current key, or the older one. */
+  revoke?: 'owner' | 'old';
+  /** Main pins a release the factory clone does not have. */
+  unknownRelease?: boolean;
   project?: (repo: TestRepo) => void;
 }
 
@@ -111,7 +154,17 @@ function setup(options: Setup = {}) {
       },
     },
   });
-  const project = makeRepo({ files: { '.factory/config': CONFIG } });
+  // The factory release pinned on main, whose key lists every check on main's side uses.
+  const factory = makeRepo({
+    files: {
+      allowed_signers: `${old.allowedSignersLine}\n${owner.allowedSignersLine}\n`,
+      revoked_keys: { owner: `${owner.publicKey}\n`, old: `${old.publicKey}\n`, none: '' }[
+        options.revoke ?? 'none'
+      ],
+    },
+  });
+  const pin = options.unknownRelease ? 'a'.repeat(40) : factory.revParse('HEAD');
+  const project = makeRepo({ files: { '.factory/config': config(pin) } });
   options.project?.(project);
   const home = tempDir('factory-home-');
   mkdirSync(join(home, '.factory', 'keys'), { recursive: true });
@@ -126,7 +179,7 @@ function setup(options: Setup = {}) {
   const cli = async (argv: string[], over: { remote?: boolean } = {}) => {
     const out: string[] = [];
     const err: string[] = [];
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, FACTORY_SOURCE: factory.path };
     delete env.CLAUDE_CODE_REMOTE;
     if (over.remote) env.CLAUDE_CODE_REMOTE = 'true';
     const code = await runCli(argv, {
@@ -154,7 +207,7 @@ function setup(options: Setup = {}) {
   return { cli, clock, home, project, issue, posted };
 }
 
-describe('factory approve (AC-068)', () => {
+describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
   it('approve <issue> signs gate approved with the confirmed tier, posts the record, then applies owner:approved', async () => {
     const t = setup();
 
@@ -210,11 +263,12 @@ describe('factory approve (AC-068)', () => {
 
   it('approve <issue> spec binds the spec.md blob on the item branch', async () => {
     let specSha = '';
+    let commit = '';
     const t = setup({
       issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
       project: (repo) => {
         repo.checkout(BRANCH, { create: true });
-        repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
+        commit = repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
         repo.push();
         specSha = repo.revParse(`${BRANCH}:specs/7-add-login/spec.md`);
         repo.checkout('main');
@@ -231,7 +285,34 @@ describe('factory approve (AC-068)', () => {
       spec_sha: specSha,
     });
     expect(t.issue(ITEM).labels).toContain('owner:spec-approved');
-    expect(r.stdout).toMatch(/AC-001 → no test task yet/);
+    // Every part is read at one commit, which the summary names (AC-092).
+    expect(r.stdout).toContain(`Approval summary for #7 (spec-approved) at ${commit}`);
+    expect(r.stdout).toMatch(/AC-001: Given a registered user/);
+  });
+
+  it('a spec re-approval shows the diff from the last approved spec.md (AC-092)', async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      project: (repo) => {
+        repo.checkout(BRANCH, { create: true });
+        repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
+        repo.push();
+        repo.checkout('main');
+      },
+    });
+    expect((await t.cli(['approve', String(ITEM), 'spec'])).code).toBe(0);
+    t.project.checkout(BRANCH);
+    const changed = SPEC.replace('Visitors cannot sign in.', 'Visitors cannot sign in or out.');
+    t.project.commit({ 'specs/7-add-login/spec.md': changed }, 'spec v2');
+    t.project.push();
+    t.project.checkout('main');
+
+    const r = await t.cli(['approve', String(ITEM), 'spec']);
+
+    expect(r.stderr).toBe('');
+    expect(r.stdout).toMatch(/spec\.md changed since the approved blob [0-9a-f]{12}/);
+    expect(r.stdout).toContain('> -Visitors cannot sign in.');
+    expect(r.stdout).toContain('> +Visitors cannot sign in or out.');
   });
 
   it('approve <issue> spec refuses to sign while a summary part is missing (AC-016)', async () => {
@@ -263,28 +344,133 @@ describe('factory approve (AC-068)', () => {
     expect(t.issue(ITEM).labels).not.toContain('owner:spec-approved');
   });
 
-  it('a code-gate waiver carries the PR head; a pre-build gate waiver does not', async () => {
+  it("a spec approval signed with a key main's release revokes never defines the last approval (AC-092)", async () => {
+    const item = approvedItem();
+    const t = setup({
+      issues: [
+        {
+          number: ITEM,
+          title: 'Add login',
+          ...item,
+          comments: [...item.comments, specApprovedBy(old, 'c'.repeat(40))],
+        },
+      ],
+      revoke: 'old',
+      project: (repo) => {
+        repo.checkout(BRANCH, { create: true });
+        repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
+        repo.push();
+        repo.checkout('main');
+      },
+    });
+
+    const r = await t.cli(['approve', String(ITEM), 'spec']);
+
+    expect(r.stderr).toBe('');
+    expect(r.stdout).not.toMatch(/changed since the approved blob|is not available/);
+    expect(r.stdout).toMatch(/> Problem: Visitors cannot sign in\./);
+  });
+
+  it("refuses when the item's approved record is signed with a key main's release revokes (AC-085)", async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      revoke: 'owner',
+      project: (repo) => {
+        repo.checkout(BRANCH, { create: true });
+        repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
+        repo.push();
+        repo.checkout('main');
+      },
+    });
+
+    const r = await t.cli(['approve', String(ITEM), 'spec']);
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/#7 has no verified owner:approved/);
+    expect(t.issue(ITEM).labels).not.toContain('owner:spec-approved');
+  });
+
+  it("refuses when main's pinned key lists cannot be read (AC-084)", async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      unknownRelease: true,
+    });
+    const r = await t.cli(['approve', String(ITEM), 'waiver', 'gate:plan']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/factory release a{40} has no allowed_signers/);
+    expect(t.issue(ITEM).labels).not.toContain('owner:waiver');
+  });
+
+  it('refuses when main cannot be fetched, so a stale pin never decides (AC-084)', async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      // origin/main is still in the clone (a stale pin), but origin cannot be fetched.
+      project: (repo) => repo.git(['remote', 'set-url', 'origin', join(repo.path, 'missing.git')]),
+    });
+    const r = await t.cli(['approve', String(ITEM), 'waiver', 'gate:plan']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/cannot fetch main/);
+    expect(t.issue(ITEM).labels).not.toContain('owner:waiver');
+  });
+
+  it('a code-gate waiver refuses while the release has no such check, naming it (AC-093)', async () => {
+    let head = '';
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      project: (repo) => {
+        repo.checkout(BRANCH, { create: true });
+        head = repo.commit({ 'src/login.ts': 'export {};\n' }, 'build');
+        repo.push();
+        repo.checkout('main');
+      },
+    });
+    seedPr(head);
+    const before = t.issue(ITEM).comments.length;
+
+    const r = await t.cli(['approve', String(ITEM), 'waiver', 'gate:coverage']);
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(
+      /this release has no coverage check yet, so there is nothing to waive/,
+    );
+    expect(t.issue(ITEM).comments).toHaveLength(before);
+    expect(t.issue(ITEM).labels).not.toContain('owner:waiver');
+  });
+
+  it('a code-gate waiver refuses when the PR head is not the commit it read (AC-093)', async () => {
     const t = setup({
       issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
       prs: [{ number: 8, headRefName: BRANCH, headRefOid: PR_HEAD, isDraft: true }],
+      project: (repo) => {
+        repo.checkout(BRANCH, { create: true });
+        repo.commit({ 'src/login.ts': 'export {};\n' }, 'build');
+        repo.push();
+        repo.checkout('main');
+      },
     });
+    const r = await t.cli(['approve', String(ITEM), 'waiver', 'gate:coverage']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(
+      /PR head 1c9d0e5f6a7b is not the commit read from origin\/claude\/7-add-login/,
+    );
+  });
 
-    expect((await t.cli(['approve', String(ITEM), 'waiver', 'gate:coverage'])).code).toBe(0);
-    expect(t.posted(ITEM)).toMatchObject({
-      gate: 'waiver',
-      waives: 'gate:coverage',
-      tier: 2,
-      branch: BRANCH,
-      head: PR_HEAD,
-    });
+  it('a pre-build gate waiver carries no head', async () => {
+    const t = setup({ issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }] });
 
     expect((await t.cli(['approve', String(ITEM), 'waiver', 'gate:plan'])).code).toBe(0);
     const prebuild = t.posted(ITEM);
     expect(prebuild).toMatchObject({ waives: 'gate:plan', tier: 2, branch: BRANCH });
     expect(prebuild.head).toBeUndefined();
-    // Each waiver gets its own label-add after its record.
-    const adds = t.issue(ITEM).events.filter((e) => e.label.name === 'owner:waiver');
-    expect(adds.filter((e) => e.event === 'labeled')).toHaveLength(2);
+    expect(t.issue(ITEM).labels).toContain('owner:waiver');
+  });
+
+  it('refuses test: waiver targets until that waiver form exists (AC-061, AC-093)', async () => {
+    const t = setup({ issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }] });
+    const r = await t.cli(['approve', String(ITEM), 'waiver', 'test:tests/a.test.ts#locks out']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/test: waiver targets are not supported yet/);
+    expect(t.issue(ITEM).labels).not.toContain('owner:waiver');
   });
 
   it('a waiver for a target that is not a work item omits tier and branch', async () => {
