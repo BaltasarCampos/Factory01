@@ -57,8 +57,11 @@ const config = (sha: string) =>
   `factory_release: v1.0.0@${sha}\nrepo: ${REPO}\ninbox_issue: 1\nagents: cloud\n`;
 
 let owner: TestKeys;
+/** An older Owner key, still listed in the release. */
+let old: TestKeys;
 beforeAll(() => {
   owner = makeKeys();
+  old = makeKeys();
 });
 
 const labeled = (name: string, at: string) => ({
@@ -67,6 +70,22 @@ const labeled = (name: string, at: string) => ({
   actor: { login: 'owner' },
   created_at: at,
 });
+
+/** A comment holding a `spec-approved` record for the item, signed with `keys`. */
+function specApprovedBy(keys: TestKeys, specSha: string) {
+  const record: ApprovalRecord = {
+    repo: REPO,
+    issue: ITEM,
+    gate: 'spec-approved',
+    tier: 2,
+    branch: BRANCH,
+    spec_sha: specSha,
+    timestamp: '2026-10-01T08:30:00Z',
+    nonce: newNonce(),
+  };
+  const body = renderComment(record, sign(record, keys.privateKey, { stdinIsTTY: true }));
+  return { id: 901, author: 'owner', body, createdAt: '2026-10-01T08:30:00Z' };
+}
 
 /** A comment holding an Owner-signed `approved` record for the item, and its label event. */
 function approvedItem(): Pick<FakeIssue, 'comments' | 'events' | 'labels'> {
@@ -114,8 +133,8 @@ interface Setup {
   clock?: string;
   /** Leave the Owner key out of ~/.factory/keys, so signing fails. */
   noKey?: boolean;
-  /** The pinned release revokes the Owner's key. */
-  revokedInRelease?: boolean;
+  /** The pinned release revokes the Owner's current key, or the older one. */
+  revoke?: 'owner' | 'old';
   /** Main pins a release the factory clone does not have. */
   unknownRelease?: boolean;
   project?: (repo: TestRepo) => void;
@@ -138,8 +157,10 @@ function setup(options: Setup = {}) {
   // The factory release pinned on main, whose key lists every check on main's side uses.
   const factory = makeRepo({
     files: {
-      allowed_signers: `${owner.allowedSignersLine}\n`,
-      revoked_keys: options.revokedInRelease ? `${owner.publicKey}\n` : '',
+      allowed_signers: `${old.allowedSignersLine}\n${owner.allowedSignersLine}\n`,
+      revoked_keys: { owner: `${owner.publicKey}\n`, old: `${old.publicKey}\n`, none: '' }[
+        options.revoke ?? 'none'
+      ],
     },
   });
   const pin = options.unknownRelease ? 'a'.repeat(40) : factory.revParse('HEAD');
@@ -324,9 +345,17 @@ describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
   });
 
   it("a spec approval signed with a key main's release revokes never defines the last approval (AC-092)", async () => {
+    const item = approvedItem();
     const t = setup({
-      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
-      revokedInRelease: true,
+      issues: [
+        {
+          number: ITEM,
+          title: 'Add login',
+          ...item,
+          comments: [...item.comments, specApprovedBy(old, 'c'.repeat(40))],
+        },
+      ],
+      revoke: 'old',
       project: (repo) => {
         repo.checkout(BRANCH, { create: true });
         repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
@@ -334,22 +363,18 @@ describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
         repo.checkout('main');
       },
     });
-    expect((await t.cli(['approve', String(ITEM), 'spec'])).code).toBe(0);
-    t.project.checkout(BRANCH);
-    t.project.commit({ 'specs/7-add-login/spec.md': `${SPEC}\nMore.\n` }, 'spec v2');
-    t.project.push();
-    t.project.checkout('main');
 
     const r = await t.cli(['approve', String(ITEM), 'spec']);
 
-    expect(r.stdout).not.toMatch(/changed since the approved blob/);
+    expect(r.stderr).toBe('');
+    expect(r.stdout).not.toMatch(/changed since the approved blob|is not available/);
     expect(r.stdout).toMatch(/> Problem: Visitors cannot sign in\./);
   });
 
-  it("shows the full spec, with a warning, when main's pinned key lists cannot be read (AC-092)", async () => {
+  it("refuses when the item's approved record is signed with a key main's release revokes (AC-085)", async () => {
     const t = setup({
       issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
-      unknownRelease: true,
+      revoke: 'owner',
       project: (repo) => {
         repo.checkout(BRANCH, { create: true });
         repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
@@ -360,12 +385,32 @@ describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
 
     const r = await t.cli(['approve', String(ITEM), 'spec']);
 
-    expect(r.code).toBe(0);
-    expect(r.stderr).toMatch(/main's pinned key lists cannot be read .*; showing the full spec/);
-    expect(r.stdout).toMatch(
-      /the previously approved spec\.md is not available: showing the full spec/,
-    );
-    expect(r.stdout).toContain('> ## Problem');
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/#7 has no verified owner:approved/);
+    expect(t.issue(ITEM).labels).not.toContain('owner:spec-approved');
+  });
+
+  it("refuses when main's pinned key lists cannot be read (AC-084)", async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      unknownRelease: true,
+    });
+    const r = await t.cli(['approve', String(ITEM), 'waiver', 'gate:plan']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/factory release a{40} has no allowed_signers/);
+    expect(t.issue(ITEM).labels).not.toContain('owner:waiver');
+  });
+
+  it('refuses when main cannot be fetched, so a stale pin never decides (AC-084)', async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      // origin/main is still in the clone (a stale pin), but origin cannot be fetched.
+      project: (repo) => repo.git(['remote', 'set-url', 'origin', join(repo.path, 'missing.git')]),
+    });
+    const r = await t.cli(['approve', String(ITEM), 'waiver', 'gate:plan']);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/cannot fetch main/);
+    expect(t.issue(ITEM).labels).not.toContain('owner:waiver');
   });
 
   it('a code-gate waiver refuses while the release has no such check, naming it (AC-093)', async () => {

@@ -5,10 +5,10 @@
 // first, read at the one commit the record signs, and nothing is signed while a required part is
 // missing. Nothing is posted or labelled unless signing succeeds.
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { pinOnMain, releaseKeys, secondCopy, type ReleaseKeys } from '../approvals/keys.js';
+import { mainKeys, secondCopy, type ReleaseKeys } from '../approvals/keys.js';
 import { NonceLedger, nonceLedgerPath } from '../approvals/nonces.js';
 import {
   extractFromComment,
@@ -32,28 +32,11 @@ import { timeline } from '../github/timeline.js';
 import { itemBranch, slugify } from '../model/naming.js';
 import type { ApprovalGate, ApprovalRecord, Tier } from '../model/types.js';
 import { buildSummary, type SummaryFacts } from '../notify/summary.js';
-import { factorySource } from './new.js';
 import { projectHere } from './pause.js';
 
 type Project = Awaited<ReturnType<typeof projectHere>>;
 type RecordFields = Pick<ApprovalRecord, 'tier' | 'branch' | 'spec_sha' | 'waives' | 'head'>;
 type Issue = SummaryFacts['issue'];
-
-/**
- * The laptop's own key list (`~/.factory/allowed_signers`, written by `factory keygen`) and
- * revocation list; an absent revocation list is created empty.
- */
-export function laptopKeys(home: string): ReleaseKeys {
-  const dir = join(home, '.factory');
-  const keys = {
-    allowedSigners: join(dir, 'allowed_signers'),
-    revokedKeys: join(dir, 'revoked_keys'),
-  };
-  if (!existsSync(keys.allowedSigners))
-    throw new RefusedError(`${keys.allowedSigners} not found; run factory keygen first`);
-  if (!existsSync(keys.revokedKeys)) writeFileSync(keys.revokedKeys, '');
-  return keys;
-}
 
 /** Sign a record, post it on its issue and claim its nonce in the laptop ledger. */
 export async function postSigned(
@@ -105,17 +88,18 @@ function confirmedTier(option: unknown, labels: readonly string[], issue: number
   return Number(only.slice('tier:'.length)) as Tier;
 }
 
-/** Tier and branch from the item's verified `approved` record, which fixes both. */
+/** Tier and branch from the item's `approved` record, verified with main's pinned key lists. */
 async function approvedRecord(
   project: Project,
   issue: number,
+  keys: ReleaseKeys,
 ): Promise<{ tier: Tier; branch: string }> {
   const comments = await listComments(project.repo, issue, project);
   const labelAdds = (await timeline(project.repo, issue, project)).filter(
     (e) => e.event === 'labeled',
   );
   const verdict = verifyGate({
-    keys: laptopKeys(project.home),
+    keys,
     secondCopy: secondCopy(project.env ?? {}, project.home),
     expected: { repo: project.repo, issue, gate: 'approved' },
     comments,
@@ -181,37 +165,6 @@ function readBranch(project: Project, branch: string): BranchView | string {
  * checked by signature alone since a changed spec makes it stale) to the one about to be signed.
  */
 async function previousSpec(
-  ctx: CommandContext,
-  project: Project,
-  issue: number,
-  blob: string,
-): Promise<SummaryFacts['previousSpec']> {
-  // Main's pinned key lists, as every main-side check uses: a record signed with a key the
-  // release revokes must not define what the Owner approved last time.
-  const dir = mkdtempSync(join(tmpdir(), 'factory-keys-'));
-  try {
-    let keys: ReleaseKeys;
-    try {
-      git(project, ['fetch', '-q', 'origin', 'main']);
-      keys = releaseKeys(
-        factorySource(project.env ?? process.env),
-        pinOnMain(project.cwd).sha,
-        dir,
-      );
-    } catch (err) {
-      const why = err instanceof Error ? err.message : String(err);
-      ctx.io.stderr.write(
-        `warning: main's pinned key lists cannot be read (${why}); showing the full spec\n`,
-      );
-      return { blob: '', diff: undefined };
-    }
-    return await lastApprovedSpec(project, issue, blob, keys);
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
-}
-
-async function lastApprovedSpec(
   project: Project,
   issue: number,
   blob: string,
@@ -249,6 +202,7 @@ async function fieldsFor(
   issue: number,
   gate: ApprovalGate,
   waives: string | undefined,
+  keys: () => ReleaseKeys,
 ): Promise<Gathered> {
   const info = await viewIssue(project, issue);
   if (gate === 'approved') {
@@ -256,7 +210,7 @@ async function fieldsFor(
     return { fields: { tier, branch: itemBranch(issue, slugify(info.title)) }, info };
   }
   if (gate === 'spec-approved') {
-    const { tier, branch } = await approvedRecord(project, issue);
+    const { tier, branch } = await approvedRecord(project, issue, keys());
     const view = readBranch(project, branch);
     if (typeof view === 'string') throw new RefusedError(view);
     let spec_sha: string;
@@ -265,7 +219,7 @@ async function fieldsFor(
     } catch (err) {
       throw new RefusedError(err instanceof Error ? err.message : String(err));
     }
-    const previous = await previousSpec(ctx, project, issue, spec_sha);
+    const previous = await previousSpec(project, issue, spec_sha, keys());
     return { fields: { tier, branch, spec_sha }, info, view, previous };
   }
   const target = waives ?? '';
@@ -278,7 +232,7 @@ async function fieldsFor(
       `waivers on pull requests (${target.split(':')[0] ?? ''}:) are not supported in this build yet`,
     );
   if (!target.startsWith('gate:')) return { fields: { waives: target }, info };
-  const { tier, branch } = await approvedRecord(project, issue);
+  const { tier, branch } = await approvedRecord(project, issue, keys());
   const view = readBranch(project, branch);
   if (!isCodeGateWaiver(target)) {
     const read = typeof view === 'string' ? {} : { view };
@@ -312,7 +266,17 @@ export async function approve(ctx: CommandContext): Promise<number> {
     throw new UsageError('--tier is confirmed only when approving the item itself');
 
   const project = await projectHere(ctx);
-  const { fields, info, view, previous } = await fieldsFor(ctx, project, issue, gate, waives);
+  // Main's pinned key lists, read once and only by the gates that verify a record.
+  const scratch = mkdtempSync(join(tmpdir(), 'factory-keys-'));
+  let keys: ReleaseKeys | undefined;
+  const mainKeyLists = () => (keys ??= mainKeys(project.cwd, project.env ?? process.env, scratch));
+  let gathered: Gathered;
+  try {
+    gathered = await fieldsFor(ctx, project, issue, gate, waives, mainKeyLists);
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+  const { fields, info, view, previous } = gathered;
   const summary = buildSummary({
     gate,
     issue: info,
