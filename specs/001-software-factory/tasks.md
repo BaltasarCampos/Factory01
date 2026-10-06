@@ -409,6 +409,7 @@ probes (FR-059)
 - [ ] T146 Phase 0 probe — key rotation dry-run on the sample project: rotate, release, upgrade, observe `rotation-pending` and its alert, update the routine variable, confirm the line resumes and old approvals still verify (quickstart Scenario 7) · Files: specs/001-software-factory/reports/phase0-probes.md
 - [ ] T127 Phase 0 probe — kill switch and alerts: pause read from label history, removed label restored (quickstart Scenario 5); a routine-triggered `owner-alert` failure emails the Owner (Scenario 6); telemetry export from cloud sessions works or not (R16) · Files: specs/001-software-factory/reports/phase0-probes.md, specs/001-software-factory/research.md
 - [ ] T128 Run quickstart.md validation (Scenarios 1–6) on a throwaway sample project and record results · Files: specs/001-software-factory/quickstart.md, specs/001-software-factory/reports/quickstart-run.md
+- [ ] T157 Rename this repository's default branch `master` to `main` after Gate A and before it adopts itself: the design, `factory adopt` (it refuses any default branch other than `main`), `factory merge`, the `Factory-Merge:` trailer checks and every `origin/main` reader assume `main`. Owner actions: rename on GitHub (`gh api -X POST repos/{owner}/{repo}/branches/master/rename -f new_name=main`, which keeps open PRs and branch settings), then in each clone `git branch -m master main`, `git fetch origin`, `git branch -u origin/main main`, `git remote set-head origin -a`, and copy the updated `factory/self/ci.yml` into `.github/workflows/ci.yml` (guardrail path). The rename moves no commit, so main's signed first-parent history and the future `baseline` are unchanged. Task: drop `master` from the CI trigger source and from the plan and task notes that say work is on `master` · Files: factory/self/ci.yml, specs/001-software-factory/plan.md, specs/001-software-factory/tasks.md (Owner decision 2026-10-06: one small slice of its own)
 
 ---
 
@@ -560,6 +561,7 @@ when its last part lands.
 | 27 | T077, T087 | `guardrail-change` | ~350 |
 | 28 | T078, T086 | Session-start + guard hooks | ~650 |
 | 29 | T073, T079–T080, T088 | Gate A e2e, injection, attack suite | ~800 |
+| 29b | T157 | Rename `master` to `main` (after Gate A, before the factory adopts itself) | ~10 |
 
 Then:
 
@@ -585,7 +587,7 @@ Polish tasks ride with the slice they verify; probes are not slices.
 - [Story] label and AC-### IDs map tasks to the spec for traceability
 - Verify tests fail before implementing
 - Commit after each task or logical group; commits carry `Factory-Role:` and `Factory-Item:`
-- Until the factory adopts itself, work happens on `master` with Owner-merged PRs (plan
+- Until the factory adopts itself, work happens on `master` (renamed to `main` by T157 before adoption) with Owner-merged PRs (plan
   Complexity Tracking #2); afterwards, push only to `claude/` branches
 - Owner-only actions in this plan (not tasks): approving dependencies (T002), copying
   `factory/self/*.yml` into `.github/workflows/`, running `factory keygen` and publishing
