@@ -1,8 +1,9 @@
 // `factory approve <issue|pr> [spec | waiver <waives>]` (contracts/cli.md, FR-016d, FR-016e):
 // sign a record on the laptop, post it on the issue, then apply its `owner:` label. The record
 // comment is also the approval event: the dispatcher copies the issue's records into the item's
-// `events.jsonl` when it creates the branch (T059). Nothing is posted or labelled unless signing
-// succeeds.
+// `events.jsonl` when it creates the branch (T059). The approval summary (FR-043, AC-016) is shown
+// first, and nothing is signed while one of its parts is missing. Nothing is posted or labelled
+// unless signing succeeds.
 import { spawnSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,10 +28,12 @@ import { viewPr } from '../github/prs.js';
 import { timeline } from '../github/timeline.js';
 import { itemBranch, slugify } from '../model/naming.js';
 import type { ApprovalGate, ApprovalRecord, Tier } from '../model/types.js';
+import { buildSummary, type SummaryFacts } from '../notify/summary.js';
 import { projectHere } from './pause.js';
 
 type Project = Awaited<ReturnType<typeof projectHere>>;
 type RecordFields = Pick<ApprovalRecord, 'tier' | 'branch' | 'spec_sha' | 'waives' | 'head'>;
+type Issue = SummaryFacts['issue'];
 
 /**
  * The laptop's own key list (`~/.factory/allowed_signers`, written by `factory keygen`) and
@@ -71,11 +74,13 @@ export async function postSigned(
 async function viewIssue(project: Project, issue: number) {
   const args = ['issue', 'view', numberArg(issue), '--repo', repoArg(project.repo)];
   const f = Fields.of(
-    await gh([...args, '--json', 'title,labels'], { ...project, json: true }),
+    await gh([...args, '--json', 'title,body,labels'], { ...project, json: true }),
     'issue',
   );
   return {
+    number: issue,
     title: f.str('title'),
+    body: f.str('body'),
     labels: f.list('labels').map((l) => Fields.of(l, 'label').str('name')),
   };
 }
@@ -123,18 +128,42 @@ async function approvedRecord(
   return { tier, branch };
 }
 
-function specSha(project: Project, branch: string): string {
+/** Fetch the item branch from origin; the error text, or undefined once fetched. */
+function fetchBranch(project: Project, branch: string): string | undefined {
   const fetched = spawnSync('git', ['-C', project.cwd, 'fetch', '-q', 'origin', branch], {
     env: project.env,
     encoding: 'utf8',
   });
-  if (fetched.status !== 0)
-    throw new RefusedError(`cannot fetch ${branch}: ${fetched.stderr.trim()}`);
+  return fetched.status === 0 ? undefined : fetched.stderr.trim() || 'git fetch failed';
+}
+
+function specSha(project: Project, branch: string): string {
+  const failed = fetchBranch(project, branch);
+  if (failed !== undefined) throw new RefusedError(`cannot fetch ${branch}: ${failed}`);
   try {
     return specBlobSha(project.cwd, `origin/${branch}`, `specs/${branch.slice('claude/'.length)}`);
   } catch (err) {
     throw new RefusedError(err instanceof Error ? err.message : String(err));
   }
+}
+
+/** The feature files the summary reads, as committed on the item branch at origin. */
+function branchFiles(project: Project, branch: string): SummaryFacts['files'] {
+  if (fetchBranch(project, branch) !== undefined) return undefined;
+  const dir = `specs/${branch.slice('claude/'.length)}`;
+  const show = (name: string) => {
+    const r = spawnSync('git', ['-C', project.cwd, 'show', `origin/${branch}:${dir}/${name}`], {
+      env: project.env,
+      encoding: 'utf8',
+    });
+    return r.status === 0 ? r.stdout : undefined;
+  };
+  return {
+    spec: show('spec.md'),
+    tasks: show('tasks.md'),
+    verify: show('reports/verify.md'),
+    events: show('events.jsonl'),
+  };
 }
 
 async function fieldsFor(
@@ -143,30 +172,30 @@ async function fieldsFor(
   issue: number,
   gate: ApprovalGate,
   waives: string | undefined,
-): Promise<{ fields: RecordFields; labels: string[] }> {
-  const { title, labels } = await viewIssue(project, issue);
+): Promise<{ fields: RecordFields; info: Issue }> {
+  const info = await viewIssue(project, issue);
   if (gate === 'approved') {
-    const tier = confirmedTier(ctx.options.tier, labels, issue);
-    return { fields: { tier, branch: itemBranch(issue, slugify(title)) }, labels };
+    const tier = confirmedTier(ctx.options.tier, info.labels, issue);
+    return { fields: { tier, branch: itemBranch(issue, slugify(info.title)) }, info };
   }
   if (gate === 'spec-approved') {
     const { tier, branch } = await approvedRecord(project, issue);
-    return { fields: { tier, branch, spec_sha: specSha(project, branch) }, labels };
+    return { fields: { tier, branch, spec_sha: specSha(project, branch) }, info };
   }
   const target = waives ?? '';
   if (target.startsWith('check:') || target.startsWith('dep:'))
     throw new RefusedError(
       `waivers on pull requests (${target.split(':')[0] ?? ''}:) are not supported in this build yet`,
     );
-  if (!target.startsWith('gate:')) return { fields: { waives: target }, labels };
+  if (!target.startsWith('gate:')) return { fields: { waives: target }, info };
   const { tier, branch } = await approvedRecord(project, issue);
   const head = isCodeGateWaiver(target)
     ? { head: (await viewPr(project.repo, branch, project)).headRefOid }
     : {};
-  return { fields: { tier, branch, waives: target, ...head }, labels };
+  return { fields: { tier, branch, waives: target, ...head }, info };
 }
 
-const GATE_OF: Record<string, ApprovalGate | undefined> = {
+const GATE_OF: Record<string, SummaryFacts['gate'] | undefined> = {
   spec: 'spec-approved',
   waiver: 'waiver',
 };
@@ -185,7 +214,18 @@ export async function approve(ctx: CommandContext): Promise<number> {
     throw new UsageError('--tier is confirmed only when approving the item itself');
 
   const project = await projectHere(ctx);
-  const { fields, labels } = await fieldsFor(ctx, project, issue, gate, waives);
+  const { fields, info } = await fieldsFor(ctx, project, issue, gate, waives);
+  // Before Specify there is no item branch to read.
+  const files =
+    gate !== 'approved' && fields.branch !== undefined
+      ? branchFiles(project, fields.branch)
+      : undefined;
+  const summary = buildSummary({ gate, issue: info, ...fields, files });
+  if (!summary.ok)
+    throw new RefusedError(
+      `not signing: the approval summary is incomplete:\n  ${summary.missing.join('\n  ')}`,
+    );
+  ctx.io.stdout.write(`${summary.text}\n`);
   const record: ApprovalRecord = {
     repo: project.repo,
     issue,
@@ -206,7 +246,7 @@ export async function approve(ctx: CommandContext): Promise<number> {
   await postSigned(ctx, project, record);
   // A fresh label-add after the record, so the new record is the one backing the label.
   const label = `owner:${gate}`;
-  if (labels.includes(label)) await removeLabel(project.repo, issue, label, project);
+  if (info.labels.includes(label)) await removeLabel(project.repo, issue, label, project);
   await addLabel(project.repo, issue, label, project);
   ctx.io.stdout.write(`Applied ${label} to #${String(issue)}.\n`);
   return ExitCode.Ok;

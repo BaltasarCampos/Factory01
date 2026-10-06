@@ -2,7 +2,7 @@
 
 **Branch**: `001-software-factory` (work is currently on `master`; see Complexity Tracking) | **Date**: 2026-10-01 | **Spec**: [spec.md](spec.md)
 
-**Work item**: none yet (source document `software-factory-spec-v1.5.txt`) | **Risk tier**: 3 | **Lane**: Full
+**Work item**: none yet (source documents: "Software Factory — Design v1.8" `.specify/memory/design.md`, the source of truth, and `software-factory-spec-v1.8.txt`) | **Risk tier**: 3 | **Lane**: Full
 
 **Input**: Feature specification from `specs/001-software-factory/spec.md`
 
@@ -99,7 +99,7 @@ gitleaks, license-checker (profile CI only).
 
 | # | Principle | Check | Status |
 |---|-----------|-------|--------|
-| I | Owner Holds Intent and the Keys | No scope beyond spec v1.6 (source v1.5 + clarifications of 2026-10-01 and 2026-10-02); every merge is an Owner-signed commit made on the laptop; open points (R5, R8, R9, R10, R4 spec-hash interpretation) raised as Phase 0 probes, not assumed; spec approved by the Owner on 2026-10-01 | ✅ |
+| I | Owner Holds Intent and the Keys | No scope beyond this spec (source design v1.8 / spec v1.8, with the clarifications of 2026-10-01, 2026-10-02 and 2026-10-05); every merge is an Owner-signed commit made on the laptop; open points (R5, R8, R9, R10, R4 spec-hash interpretation) raised as Phase 0 probes, not assumed; spec approved by the Owner on 2026-10-01 | ✅ |
 | II | Spec-Driven Assembly Line | Spec exists; the whole factory is far above one slice → delivered as ~44 work items of < 1,000 lines | ⚠️ deviation (Complexity Tracking #1, #3) |
 | III | Test-Gated Delivery | Every AC mapped below; ≥ 90% changed-line coverage enforced by `factory ci coverage`; property tests for guards and transitions; TLA+ model of critical property | ✅ |
 | IV | Independent Agent Review | Each slice reviewed by a fresh session; two reviews (tier 3) | ✅ |
@@ -120,6 +120,16 @@ in-session hooks are defence in depth, and the binding checks run on the laptop 
 revocation, rotation-pending exception and signed main history, so the design and the
 constitution agree.
 
+**Re-check against constitution v2.7.0 (2026-10-05, design v1.8)**: passes; no gate is relaxed.
+The spec now states admission by a signed `owner:approved` only and none before the brief is
+merged (FR-016), `Factory-Merge:` trailers and the once-only merge (FR-007b, AC-088), a running
+session as a warning (AC-088), per-gate approval summaries built by the CLI (FR-043,
+AC-091–AC-096), criterion lines and the empty checked set (FR-042, AC-097), and per-test
+waivers (AC-061, T151). Still to align, as tasks rather than deviations: test paths come from
+the `include` minus `exclude` of the release's Vitest config (T140, T136 and ci-checks.md still
+name `test-paths.json`); a test carrying several IDs counts for none (ac-map, red-green); changed
+setup and helper files need a test waiver at merge (T058's detector, T068).
+
 ### Acceptance Criteria → Tests
 
 Test files are under `tests/`; task IDs come from `tasks.md` (`/speckit-tasks`).
@@ -128,7 +138,7 @@ Test files are under `tests/`; task IDs come from `tasks.md` (`/speckit-tasks`).
 |-----------------|-----------|-----------|------|
 | AC-001, AC-002, AC-003, AC-007 | integration (fake `gh`, temp git repos) | tests/integration/new-adopt.test.ts | tasks.md |
 | AC-004, AC-005, AC-006, AC-056, AC-064 | integration + e2e on sample project | tests/integration/define.test.ts, tests/e2e/gate-a.test.ts | tasks.md |
-| AC-008, AC-009, AC-055 | unit (admission, dedup) | tests/unit/intake.test.ts | tasks.md |
+| AC-008, AC-009, AC-055 | unit + integration (admission by approval only, dedup, Intake tier rule) | tests/unit/intake.test.ts, tests/integration/dispatcher-core.test.ts | T152 |
 | AC-010, AC-011, AC-069 | unit + property (transitions) | tests/unit/transitions.test.ts, tests/property/transitions.prop.test.ts | tasks.md |
 | AC-012, AC-066, AC-080 | integration (branch creation, manifest, guard) | tests/integration/branch.test.ts | tasks.md |
 | AC-012, AC-089 | contract (red-green) | tests/contract/red-green.test.ts | T135 |
@@ -143,7 +153,8 @@ Test files are under `tests/`; task IDs come from `tasks.md` (`/speckit-tasks`).
 | FR-037 (CI minutes) | integration | tests/integration/ops.test.ts | T108 |
 | SC-009 (benchmark ≥ 5 items) | integration | tests/integration/benchmark.test.ts | T149 |
 | FR-034 (daily product backup) | integration | tests/integration/backup.test.ts | T129 |
-| AC-016, AC-017, AC-048 | unit (summary, trace, events) | tests/unit/summary.test.ts, tests/unit/events.test.ts | tasks.md |
+| AC-016, AC-017, AC-048, AC-091–AC-096 | unit + integration (per-gate summary, trace, events) | tests/unit/summary.test.ts, tests/unit/events.test.ts, tests/integration/approve-pause.test.ts, tests/integration/merge-deploy.test.ts | T054, T155, T053 |
+| AC-097 | unit + contract (criterion lines, empty checked set) | tests/unit/station-checks.test.ts, tests/contract/ci-checks.test.ts, tests/contract/red-green.test.ts | T152, T051, T135 |
 | AC-018, AC-019, AC-022, AC-067, AC-074 | unit + property (guards) + routine attack suite | tests/unit/guards.test.ts, tests/property/command-guard.prop.test.ts, tests/e2e/attack-suite.test.ts | tasks.md |
 | AC-020, AC-021 | contract + integration | tests/contract/guardrail-change.test.ts, tests/integration/session-start.test.ts | tasks.md |
 | AC-023 | e2e (injection fixtures) | tests/e2e/injection.test.ts | tasks.md |
@@ -261,9 +272,9 @@ model · 5 transition table · 6a `gh` wrapper + GitHub helpers · 6b Owner inbo
 hook entry · 8 dispatcher core · 9 `approve`/`pause`/`resume` · 10 `factory release` + tag
 verification · 11a install steps (manifest, render, labels, inbox) · 11b `new`/`adopt` ·
 12 Define + profile skeleton · 13 factory copies · 14 station checks · 15 summary, trace, edge
-rules · 16 item branch, draft PR, launchers · 17 MCP server · 18a safe diff + append-only ·
+rules · 15b admission by approval, criterion lines, `resume` summary · 16 item branch, draft PR, launchers · 17 MCP server · 18a safe diff + append-only ·
 18b coverage, size, ac-map · 19a red-green · 19b release-shipped CI + workflows · 20 signed
-main history + `config set` · 21 merge rules · 22 `factory merge` · 23 `factory deploy` +
+main history + `config set` · 21 merge rules · 21b `test:` waivers · 22 `factory merge` · 23 `factory deploy` +
 backups · 24 role files + station prompts · 25a role policy + settings · 25b tokenizer ·
 25c guards · 27 `guardrail-change` · 28 session-start + guard hooks · 29 Gate A e2e +
 injection + attack suite. Phase 1–2 (P2): 30 lanes/tiers/batch · 31a findings + gates ·
@@ -277,4 +288,4 @@ fallback, review trigger. Phase 3 (P3): 33 ops/metrics · 34 coach + benchmark �
 |-----------|-----------|------------|-------------------------------------|----------------|
 | One spec covers the whole factory (8–11k lines), above the 400-line slice | II | The spec is the v1 system definition; it is delivered as ~36 slices, each its own PR under the limit | Re-specifying each slice as a separate spec now would duplicate the cross-cutting requirements (signatures, pause, guards) that must stay consistent | Approved by the Owner, 2026-10-01 (chat) |
 | The factory is built outside its own line: no issue, no `claude/<issue>-<slug>` branch, no signed approvals, work currently on `master`; guardrail files are authored here by an agent session | VII, II | Bootstrapping: the guards, dispatcher and signing do not exist until Phase 0 ships. Mitigation: every slice is a PR the Owner merges locally with a signed merge commit (`git merge --no-ff -S`) until `factory merge` exists, so main's history is signed from the start; guardrail sources live under `factory/` (not this repo's live `.claude/`); once Gate A passes, the factory repo adopts itself (`factory adopt`) and further work goes through the line | Waiting for a line that cannot exist yet is impossible; hand-writing everything without agents defeats the goal | Approved by the Owner, 2026-10-01 (chat) |
-| Bootstrapping slices of the factory repository may change up to 1,000 lines, above the 400-line target of FR-038 / SC-007. Slices 1 (1,346 lines) and 2 (1,446 lines) were merged before this limit and are recorded here as accepted over-limit slices; slice 7 (1,116 lines: 516 source, 600 tests) was accepted over the limit by the Owner on 2026-10-04 | II | Slices 1–2 measured 2.4× the plan's estimate: the tasks require one test per rule and tests count toward size, so the factory is ~30k changed lines, not 8–11k. At 400 lines Phase 0 needs ~65 slices (13–22 weeks); at 1,000 it needs ~33. Applies only to this repository until it adopts itself after Gate A; projects keep the release's 400-line limit, which `factory ci size` enforces and this deviation does not change | Keeping 400 roughly doubles review sessions and plan usage; counting test lines at a discount is not allowed by the spec; a slice near 1,000 lines may exceed the 30-minute review target, so the Owner may ask for any slice to be split | Approved by the Owner, 2026-10-03 (chat) |
+| Bootstrapping slices of the factory repository may change up to 1,000 lines, above the 400-line target of FR-038 / SC-007. Slices 1 (1,346 lines) and 2 (1,446 lines) were merged before this limit and are recorded here as accepted over-limit slices; slice 7 (1,116 lines: 516 source, 600 tests) was accepted over the limit by the Owner on 2026-10-04, and slice 15 (1,146 lines: 558 source, 588 tests) on 2026-10-05; slice 15's fix-up from the Owner's review (estimated ~700 lines) is its own pull request stacked on slice 15, merged back to back with it, and its measured size is recorded here when it lands | II | Slices 1–2 measured 2.4× the plan's estimate: the tasks require one test per rule and tests count toward size, so the factory is ~30k changed lines, not 8–11k. At 400 lines Phase 0 needs ~65 slices (13–22 weeks); at 1,000 it needs ~33. Applies only to this repository until it adopts itself after Gate A; projects keep the release's 400-line limit, which `factory ci size` enforces and this deviation does not change | Keeping 400 roughly doubles review sessions and plan usage; counting test lines at a discount is not allowed by the spec; a slice near 1,000 lines may exceed the 30-minute review target, so the Owner may ask for any slice to be split | Approved by the Owner, 2026-10-03 (chat) |
