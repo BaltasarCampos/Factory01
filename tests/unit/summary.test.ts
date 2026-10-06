@@ -141,8 +141,9 @@ describe('spec approval (AC-092)', () => {
       '> Affected areas: `src/auth/` and the login page.',
     ]);
     expect(part(t, 'Spec mapping')).toEqual([
-      'AC-001: Given a registered user, When they sign in, Then they see their links.',
-      'AC-002: Given a wrong password, When they sign in, Then they see an error.',
+      `quoted from specs/42-add-login/spec.md at ${COMMIT.slice(0, 12)}:`,
+      '> AC-001: Given a registered user, When they sign in, Then they see their links.',
+      '> AC-002: Given a wrong password, When they sign in, Then they see an error.',
     ]);
   });
 
@@ -162,12 +163,16 @@ describe('spec approval (AC-092)', () => {
     );
   });
 
-  it('AC-092: refuses a re-approval whose previously approved spec cannot be read', () => {
-    const s = buildSummary(facts({ previousSpec: { blob: 'b'.repeat(40), diff: undefined } }));
-    expect(s).toEqual({
-      ok: false,
-      missing: ['What changed: the approved spec.md bbbbbbbbbbbb is not in this clone'],
-    });
+  it('AC-092: when the previously approved spec cannot be read, shows the full spec instead of refusing', () => {
+    const t = text(facts({ previousSpec: { blob: 'b'.repeat(40), diff: undefined } }));
+    const lines = part(t, 'What changed');
+    expect(lines.slice(0, 3)).toEqual([
+      'Request #42: Add login',
+      'the previously approved spec.md bbbbbbbbbbbb is not available: showing the full spec',
+      `quoted from specs/42-add-login/spec.md at ${COMMIT.slice(0, 12)}:`,
+    ]);
+    expect(lines).toContain('> # Feature Specification: Add login');
+    expect(lines).toContain('> Visitors cannot sign in, so every saved link is public.');
   });
 
   it('AC-092: refuses when the spec defines no AC-###, or there is no spec.md', () => {
@@ -250,6 +255,22 @@ describe('waivers (AC-093)', () => {
       'Waiver of finding:secret-in-log@src/app.ts:12 on #9: the finding stays unfixed',
       'Other labels: security',
     ]);
+  });
+});
+
+describe('gates built later (T053, T068)', () => {
+  it('AC-094: a merge summary is not refused by the code-gate check, and quotes the verify report', () => {
+    const report = `${VERIFY.replace('| SCA | pass |', '| SCA | fail |')}\n- [ ] blocking: SQL built by concatenation\n`;
+    const s = buildSummary(
+      facts({ kind: 'merge', files: { spec: SPEC, tasks: TASKS, verify: report } }),
+    );
+    if (!s.ok) throw new Error(`refused: ${s.missing.join('; ')}`);
+    expect(part(s.text, 'Tests and review')).toEqual([
+      `quoted from specs/42-add-login/reports/verify.md at ${COMMIT.slice(0, 12)}:`,
+      '> reports/verify.md: SCA: fail',
+      '> reports/verify.md: unresolved blocking finding: SQL built by concatenation',
+    ]);
+    expect(part(s.text, 'Spec mapping')).toEqual(['AC-001 → T002', 'AC-002 → no test task yet']);
   });
 });
 

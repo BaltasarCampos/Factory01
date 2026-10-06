@@ -5,9 +5,10 @@
 // first, read at the one commit the record signs, and nothing is signed while a required part is
 // missing. Nothing is posted or labelled unless signing succeeds.
 import { spawnSync } from 'node:child_process';
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { secondCopy, type ReleaseKeys } from '../approvals/keys.js';
+import { pinOnMain, releaseKeys, secondCopy, type ReleaseKeys } from '../approvals/keys.js';
 import { NonceLedger, nonceLedgerPath } from '../approvals/nonces.js';
 import {
   extractFromComment,
@@ -31,6 +32,7 @@ import { timeline } from '../github/timeline.js';
 import { itemBranch, slugify } from '../model/naming.js';
 import type { ApprovalGate, ApprovalRecord, Tier } from '../model/types.js';
 import { buildSummary, type SummaryFacts } from '../notify/summary.js';
+import { factorySource } from './new.js';
 import { projectHere } from './pause.js';
 
 type Project = Awaited<ReturnType<typeof projectHere>>;
@@ -179,11 +181,42 @@ function readBranch(project: Project, branch: string): BranchView | string {
  * checked by signature alone since a changed spec makes it stale) to the one about to be signed.
  */
 async function previousSpec(
+  ctx: CommandContext,
   project: Project,
   issue: number,
   blob: string,
 ): Promise<SummaryFacts['previousSpec']> {
-  const keys = laptopKeys(project.home);
+  // Main's pinned key lists, as every main-side check uses: a record signed with a key the
+  // release revokes must not define what the Owner approved last time.
+  const dir = mkdtempSync(join(tmpdir(), 'factory-keys-'));
+  try {
+    let keys: ReleaseKeys;
+    try {
+      git(project, ['fetch', '-q', 'origin', 'main']);
+      keys = releaseKeys(
+        factorySource(project.env ?? process.env),
+        pinOnMain(project.cwd).sha,
+        dir,
+      );
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      ctx.io.stderr.write(
+        `warning: main's pinned key lists cannot be read (${why}); showing the full spec\n`,
+      );
+      return { blob: '', diff: undefined };
+    }
+    return await lastApprovedSpec(project, issue, blob, keys);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+async function lastApprovedSpec(
+  project: Project,
+  issue: number,
+  blob: string,
+  keys: ReleaseKeys,
+): Promise<SummaryFacts['previousSpec']> {
   const comments = await listComments(project.repo, issue, project);
   for (const comment of [...comments].reverse()) {
     let record: ApprovalRecord;
@@ -232,7 +265,7 @@ async function fieldsFor(
     } catch (err) {
       throw new RefusedError(err instanceof Error ? err.message : String(err));
     }
-    const previous = await previousSpec(project, issue, spec_sha);
+    const previous = await previousSpec(ctx, project, issue, spec_sha);
     return { fields: { tier, branch, spec_sha }, info, view, previous };
   }
   const target = waives ?? '';

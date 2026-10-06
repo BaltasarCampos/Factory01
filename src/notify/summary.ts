@@ -58,6 +58,8 @@ export const CODE_CHECKS: ReadonlySet<string> = new Set();
 
 export interface SummaryFacts {
   gate: Extract<ApprovalGate, 'approved' | 'spec-approved' | 'waiver'>;
+  /** The row of the per-gate list; derived from `gate` when absent (merge and deploy set it). */
+  kind?: SummaryGate | undefined;
   issue: { number: number; title: string; body: string; labels: readonly string[] };
   tier?: Tier | undefined;
   /** The item branch; absent when the issue is not a work item. */
@@ -75,7 +77,7 @@ export interface SummaryFacts {
         events?: string | undefined;
       }
     | undefined;
-  /** Spec re-approval: the last approved blob, and the diff from it (undefined: unreadable). */
+  /** Spec re-approval: the last approved blob and the diff from it (undefined: not available). */
   previousSpec?: { blob: string; diff: string | undefined } | undefined;
 }
 
@@ -91,6 +93,7 @@ const short = (sha: string) => sha.slice(0, 12);
 const plural = (n: number, word: string) => `${String(n)} ${word}${n === 1 ? '' : 's'}`;
 
 export function summaryGate(f: SummaryFacts): SummaryGate {
+  if (f.kind !== undefined) return f.kind;
   if (f.gate === 'approved') return 'admission';
   if (f.gate === 'spec-approved') return 'spec';
   if (f.branch === undefined) return 'waiver-other';
@@ -102,9 +105,10 @@ function quoted(source: string, lines: readonly string[]): string[] {
   return lines.length === 0 ? [] : [`quoted from ${source}:`, ...lines.map((l) => `> ${l}`)];
 }
 
-function specSource(f: SummaryFacts): string {
+/** A feature file as a quoted source: `specs/<feature>/<name> at <commit>`. */
+function source(f: SummaryFacts, name = 'spec.md'): string {
   const dir = `specs/${(f.branch ?? '').slice('claude/'.length)}`;
-  return `${dir}/spec.md${f.commit ? ` at ${short(f.commit)}` : ''}`;
+  return `${dir}/${name}${f.commit ? ` at ${short(f.commit)}` : ''}`;
 }
 
 /** The meaningful lines of a spec section, without list markers. */
@@ -124,22 +128,26 @@ function changed(f: SummaryFacts, gate: SummaryGate): Part {
   }
   if (gate === 'spec') {
     const prev = f.previousSpec;
-    if (prev !== undefined) {
-      if (prev.diff === undefined)
-        return { missing: `the approved spec.md ${short(prev.blob)} is not in this clone` };
+    const spec = f.files?.spec;
+    if (prev?.diff !== undefined) {
       if (prev.diff.trim() === '')
         return [...lines, `spec.md is unchanged since the approved blob ${short(prev.blob)}`];
       const head = `spec.md changed since the approved blob ${short(prev.blob)} (diff to ${short(f.commit ?? '')}):`;
       return [...lines, head, ...prev.diff.split('\n').map((l) => `> ${l}`)];
     }
-    const spec = f.files?.spec;
     if (spec === undefined) return noSpec(f);
+    if (prev !== undefined) {
+      // Showing more is safe; refusing would block re-approval for good after a rebase.
+      const which = prev.blob === '' ? '' : ` ${short(prev.blob)}`;
+      const why = `the previously approved spec.md${which} is not available: showing the full spec`;
+      return [...lines, why, ...quoted(source(f), spec.replace(/\n$/, '').split('\n'))];
+    }
     const sections = ['Problem', 'Affected areas'].map(
       (name) => `${name}: ${specSection(spec, name).join('; ') || 'none given'}`,
     );
-    return [...lines, ...quoted(specSource(f), sections)];
+    return [...lines, ...quoted(source(f), sections)];
   }
-  lines.push(`Waives ${f.waives ?? ''}`);
+  if (gate.startsWith('waiver')) lines.push(`Waives ${f.waives ?? ''}`);
   if (f.head !== undefined) lines.push(`PR head ${f.head}`);
   return lines;
 }
@@ -155,7 +163,10 @@ function mapping(f: SummaryFacts, gate: SummaryGate): Part {
       const m = /\*\*(AC-\d+)\*\*\s*[—–-]?\s*(.*)$/.exec(line);
       if (m && !text.has(m[1] ?? '')) text.set(m[1] ?? '', (m[2] ?? '').replace(/\*\*/g, ''));
     }
-    return acs.map((ac) => `${ac}: ${text.get(ac) ?? ''}`.trim());
+    return quoted(
+      source(f),
+      acs.map((ac) => `${ac}: ${text.get(ac) ?? ''}`.trim()),
+    );
   }
   const testTasks = parseTasks(f.files?.tasks ?? '').filter((t) => t.test);
   return acs.map((ac) => {
@@ -164,15 +175,16 @@ function mapping(f: SummaryFacts, gate: SummaryGate): Part {
   });
 }
 
-function results(f: SummaryFacts): Part {
-  if (!CODE_CHECKS.has(checkName(f)))
+function results(f: SummaryFacts, gate: SummaryGate): Part {
+  if (gate === 'waiver-code' && !CODE_CHECKS.has(checkName(f)))
     return {
       missing: `this release has no ${checkName(f)} check yet, so there is nothing to waive`,
     };
   const report = f.files?.verify;
   if (report === undefined) return { missing: `no reports/verify.md on ${f.branch ?? ''}` };
   const r = checkVerifyReport(report);
-  return r.complete ? ['reports/verify.md: all checks pass'] : r.missing;
+  const lines = r.complete ? ['reports/verify.md: all checks pass'] : r.missing;
+  return quoted(source(f, 'reports/verify.md'), lines);
 }
 
 function usage(f: SummaryFacts): Part {
@@ -229,7 +241,7 @@ function risks(f: SummaryFacts, gate: SummaryGate): Part {
   const spec = f.files?.spec;
   if (spec === undefined) return noSpec(f);
   const listed = specSection(spec, 'Risks');
-  if (listed.length > 0) return [tier, ...quoted(specSource(f), listed)];
+  if (listed.length > 0) return [tier, ...quoted(source(f), listed)];
   if (f.tier === 3) return { missing: 'tier 3 needs a Risks section in spec.md' };
   return [tier, 'none identified (spec.md has no Risks section; required only at tier 3)'];
 }
@@ -237,7 +249,7 @@ function risks(f: SummaryFacts, gate: SummaryGate): Part {
 const PARTS: Readonly<Record<SummaryPart, (f: SummaryFacts, gate: SummaryGate) => Part>> = {
   changed,
   mapping,
-  results: (f) => results(f),
+  results,
   usage: (f) => usage(f),
   risks,
 };

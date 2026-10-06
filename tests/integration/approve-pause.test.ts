@@ -53,7 +53,8 @@ Visitors cannot sign in.
 
 1. **AC-001** — **Given** a registered user, **When** they sign in, **Then** they see their links.
 `;
-const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: ${REPO}\ninbox_issue: 1\nagents: cloud\n`;
+const config = (sha: string) =>
+  `factory_release: v1.0.0@${sha}\nrepo: ${REPO}\ninbox_issue: 1\nagents: cloud\n`;
 
 let owner: TestKeys;
 beforeAll(() => {
@@ -113,6 +114,10 @@ interface Setup {
   clock?: string;
   /** Leave the Owner key out of ~/.factory/keys, so signing fails. */
   noKey?: boolean;
+  /** The pinned release revokes the Owner's key. */
+  revokedInRelease?: boolean;
+  /** Main pins a release the factory clone does not have. */
+  unknownRelease?: boolean;
   project?: (repo: TestRepo) => void;
 }
 
@@ -130,7 +135,15 @@ function setup(options: Setup = {}) {
       },
     },
   });
-  const project = makeRepo({ files: { '.factory/config': CONFIG } });
+  // The factory release pinned on main, whose key lists every check on main's side uses.
+  const factory = makeRepo({
+    files: {
+      allowed_signers: `${owner.allowedSignersLine}\n`,
+      revoked_keys: options.revokedInRelease ? `${owner.publicKey}\n` : '',
+    },
+  });
+  const pin = options.unknownRelease ? 'a'.repeat(40) : factory.revParse('HEAD');
+  const project = makeRepo({ files: { '.factory/config': config(pin) } });
   options.project?.(project);
   const home = tempDir('factory-home-');
   mkdirSync(join(home, '.factory', 'keys'), { recursive: true });
@@ -145,7 +158,7 @@ function setup(options: Setup = {}) {
   const cli = async (argv: string[], over: { remote?: boolean } = {}) => {
     const out: string[] = [];
     const err: string[] = [];
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home };
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, FACTORY_SOURCE: factory.path };
     delete env.CLAUDE_CODE_REMOTE;
     if (over.remote) env.CLAUDE_CODE_REMOTE = 'true';
     const code = await runCli(argv, {
@@ -173,7 +186,7 @@ function setup(options: Setup = {}) {
   return { cli, clock, home, project, issue, posted };
 }
 
-describe('factory approve (AC-068)', () => {
+describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
   it('approve <issue> signs gate approved with the confirmed tier, posts the record, then applies owner:approved', async () => {
     const t = setup();
 
@@ -308,6 +321,51 @@ describe('factory approve (AC-068)', () => {
     expect(r.code).toBe(1);
     expect(r.stderr).toMatch(/owner:approved/);
     expect(t.issue(ITEM).labels).not.toContain('owner:spec-approved');
+  });
+
+  it("a spec approval signed with a key main's release revokes never defines the last approval (AC-092)", async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      revokedInRelease: true,
+      project: (repo) => {
+        repo.checkout(BRANCH, { create: true });
+        repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
+        repo.push();
+        repo.checkout('main');
+      },
+    });
+    expect((await t.cli(['approve', String(ITEM), 'spec'])).code).toBe(0);
+    t.project.checkout(BRANCH);
+    t.project.commit({ 'specs/7-add-login/spec.md': `${SPEC}\nMore.\n` }, 'spec v2');
+    t.project.push();
+    t.project.checkout('main');
+
+    const r = await t.cli(['approve', String(ITEM), 'spec']);
+
+    expect(r.stdout).not.toMatch(/changed since the approved blob/);
+    expect(r.stdout).toMatch(/> Problem: Visitors cannot sign in\./);
+  });
+
+  it("shows the full spec, with a warning, when main's pinned key lists cannot be read (AC-092)", async () => {
+    const t = setup({
+      issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
+      unknownRelease: true,
+      project: (repo) => {
+        repo.checkout(BRANCH, { create: true });
+        repo.commit({ 'specs/7-add-login/spec.md': SPEC }, 'spec');
+        repo.push();
+        repo.checkout('main');
+      },
+    });
+
+    const r = await t.cli(['approve', String(ITEM), 'spec']);
+
+    expect(r.code).toBe(0);
+    expect(r.stderr).toMatch(/main's pinned key lists cannot be read .*; showing the full spec/);
+    expect(r.stdout).toMatch(
+      /the previously approved spec\.md is not available: showing the full spec/,
+    );
+    expect(r.stdout).toContain('> ## Problem');
   });
 
   it('a code-gate waiver refuses while the release has no such check, naming it (AC-093)', async () => {

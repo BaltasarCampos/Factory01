@@ -128,8 +128,13 @@ const matches = (patterns: readonly string[], path: string) =>
 const inTestPaths = (config: TestConfig, path: string) =>
   matches(config.include, path) && !matches(config.exclude, path);
 
-const SKIP = /\b(?:it|test|describe)(?:\.\w+)*\.(?:skip|todo)\b|\bx(?:it|test|describe)\(/;
+// An early warning only: the check that decides, at merge, runs Vitest at base and head with
+// the JSON reporter and flags every test that passed at base but is skipped, todo or missing at
+// head (T140, T068). Any `.skip(` call counts, so `ctx.skip()` inside a test does too.
+const SKIP =
+  /\b(?:it|test|describe)(?:\.\w+)*\.(?:skipIf|runIf|todo)\b|\.skip\b|\bx(?:it|test|describe)\(/;
 const ONLY = /\b(?:it|test|describe)(?:\.\w+)*\.only\b|\bf(?:it|describe)\(/;
+const FAILS = /\b(?:it|test)(?:\.\w+)*\.fails\b/;
 const RETRY = /\bretry\s*:|\.retry\(/;
 const BLOCK = /\b(?:it|test|describe)(?:\.\w+)*\(|\bx(?:it|test|describe)\(/g;
 const CALL = /\b(?:it|test)(?:\.\w+)*\(/;
@@ -159,27 +164,46 @@ function resolveImport(from: string, spec: string, files: ReadonlyMap<string, st
 }
 
 /**
- * Test helpers: files in the test paths with no `it`/`test` call, plus files outside the test
- * paths that a test file imports and no other file does (a module the app also imports is
- * production code under test, not a helper).
+ * Test helpers, over base and head together so a helper deleted at head is still found: files in
+ * the test paths with no `it`/`test` call, and, as a fixed point, every file outside them whose
+ * importers are all tests or helpers (a module the app also imports is production code under
+ * test, not a helper).
  */
 export function testHelpers(
-  files: ReadonlyMap<string, string>,
+  base: ReadonlyMap<string, string>,
+  head: ReadonlyMap<string, string>,
   config: TestConfig = LOCAL_TEST_CONFIG,
 ): Set<string> {
   const helpers = new Set<string>();
-  const byTests = new Set<string>();
-  const byOthers = new Set<string>();
-  for (const [path, text] of files) {
-    const test = inTestPaths(config, path);
-    if (test && !CALL.test(text)) helpers.add(path);
-    for (const m of text.matchAll(IMPORT)) {
-      const target = resolveImport(path, m[1] ?? '', files);
-      if (target !== undefined) (test ? byTests : byOthers).add(target);
+  const tests = new Set<string>();
+  const importers = new Map<string, Set<string>>();
+  for (const files of [base, head])
+    for (const [path, text] of files) {
+      for (const m of text.matchAll(IMPORT)) {
+        const target = resolveImport(path, m[1] ?? '', files);
+        if (target !== undefined)
+          importers.set(target, (importers.get(target) ?? new Set()).add(path));
+      }
+    }
+  for (const path of new Set([...base.keys(), ...head.keys()])) {
+    if (!inTestPaths(config, path)) continue;
+    const text = head.get(path) ?? base.get(path) ?? '';
+    (CALL.test(text) ? tests : helpers).add(path);
+  }
+  // Greatest fixed point, so helpers that import each other count too: start from every
+  // imported file outside the test paths, then drop any with an importer that is neither.
+  const candidates = new Set([...importers.keys()].filter((p) => !tests.has(p) && !helpers.has(p)));
+  for (let shrank = true; shrank;) {
+    shrank = false;
+    for (const path of candidates) {
+      const by = importers.get(path) ?? new Set<string>();
+      if ([...by].some((i) => !tests.has(i) && !helpers.has(i) && !candidates.has(i))) {
+        candidates.delete(path);
+        shrank = true;
+      }
     }
   }
-  for (const path of byTests)
-    if (!inTestPaths(config, path) && !byOthers.has(path)) helpers.add(path);
+  for (const path of candidates) helpers.add(path);
   return helpers;
 }
 
@@ -213,7 +237,7 @@ export function weakenedTests(
       continue;
     }
     if (options.helpers.has(f.path)) {
-      find('changes a test helper');
+      find(f.status === 'deleted' ? 'deletes a test helper' : 'changes a test helper');
       continue;
     }
     if (!inTestPaths(config, f.path)) continue;
@@ -235,6 +259,7 @@ export function weakenedTests(
           problems.push(`${f.path}: quarantine names #${issue}, which is not an open issue`);
         else quarantines.push(Number(issue));
       } else if (ONLY.test(line)) find(`focuses a test, skipping the others: ${line}`, title);
+      else if (FAILS.test(line)) find(`inverts a test (it passes when it fails): ${line}`, title);
       else if (RETRY.test(line)) find(`retries a test: ${line}`, title);
     }
     const kept = titles(f.added);
