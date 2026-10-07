@@ -36,7 +36,7 @@ export async function hook(ctx: CommandContext): Promise<number> {
     }
     const fields = input as HookInput;
     const cwd = typeof fields.cwd === 'string' ? fields.cwd : ctx.cwd;
-    const result = await run(fields, { cwd, now: () => new Date() });
+    const result = await run(fields, { cwd, now: () => new Date(), env: ctx.env });
     return result.block ? block(result.reason ?? 'blocked') : ALLOW;
   } catch (err) {
     return block(err instanceof Error ? err.message : String(err));

@@ -13,6 +13,7 @@ import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/commands.js';
 import { roleVersion } from '../../src/events/schema.js';
 import { runStop, type StationChecker } from '../../src/hooks/stop.js';
+import { seedState } from '../helpers/fake-gh.js';
 import { tempDir } from '../helpers/keys.js';
 
 const SHA40 = '3f9a0c1d2e3f4a5b6c7d8e9f0011223344556677';
@@ -253,6 +254,56 @@ describe('factory hook stop (AC-063)', () => {
       block: true,
       reason: expect.stringContaining('plan.md') as string,
     });
+  });
+
+  it('Intake without FACTORY_ITEM cannot end: its item is unknown (fails closed)', async () => {
+    const dir = workingCopy();
+    const stop = { hook_event_name: 'Stop', stop_hook_active: false, agent_type: 'intake' };
+    const r = await hook('stop', input(dir, stop));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/no FACTORY_ITEM/);
+  });
+
+  it.each([
+    ['ends once its labels are complete', ['type:feature', 'priority:p2', 'tier:2'], false],
+    ['keeps going while a label is missing', ['tier:2'], true],
+  ])('Intake with the launcher’s FACTORY_ITEM %s', async (_name, labels, block) => {
+    seedState({ repos: { 'owner/project': { issues: [{ number: 42, labels }] } } });
+    const dir = workingCopy();
+    const stop = input(dir, {
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+      agent_type: 'intake',
+    });
+    const env = { FACTORY_ITEM: '42', FACTORY_STATION: '1' };
+    const result = await runStop(stop, { cwd: dir, now: () => new Date(), env });
+    expect(result.block).toBe(block);
+  });
+
+  it('refuses a FACTORY_ITEM for Define, which works for the project', async () => {
+    const dir = workingCopy();
+    const stop = input(dir, {
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+      agent_type: 'define',
+    });
+    const env = { FACTORY_ITEM: '42', FACTORY_STATION: '0' };
+    await expect(runStop(stop, { cwd: dir, now: () => new Date(), env })).rejects.toThrow(
+      /Define works for the project/,
+    );
+  });
+
+  it('refuses a FACTORY_STATION that is not the role’s station', async () => {
+    const dir = workingCopy();
+    const stop = input(dir, {
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+      agent_type: 'intake',
+    });
+    const env = { FACTORY_ITEM: '42', FACTORY_STATION: '4' };
+    await expect(runStop(stop, { cwd: dir, now: () => new Date(), env })).rejects.toThrow(
+      /FACTORY_STATION 4/,
+    );
   });
 
   it('after one forced continuation the session may end; the dispatcher still finds no output', async () => {

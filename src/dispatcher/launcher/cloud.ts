@@ -3,7 +3,7 @@
 // names it the launcher is unavailable and starts nothing: an `agents: cloud` project waits,
 // and the dispatcher tells the Owner once (Owner decision 2026-10-07).
 import { RefusedError } from '../../cli/env.js';
-import type { LaunchRequest, SessionLauncher } from './types.js';
+import type { Availability, LaunchRequest, SessionLauncher } from './types.js';
 
 /**
  * The `claude` arguments that start a cloud session for `request`, or undefined while T125 has
@@ -15,8 +15,8 @@ export const cloudInvocation: (request: LaunchRequest) => readonly string[] | un
 export class CloudLauncher implements SessionLauncher {
   readonly mode = 'cloud';
 
-  available(): Promise<boolean> {
-    return Promise.resolve(false);
+  available(): Promise<Availability> {
+    return Promise.resolve({ ok: false, reason: 'the cloud launch command awaits the T125 probe' });
   }
 
   launch(request: LaunchRequest): Promise<{ sessionId: string }> {

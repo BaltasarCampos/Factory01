@@ -132,8 +132,11 @@ export async function startDefine(
   ].join('\n\n');
   try {
     const launcher = selectLauncher(config, ctx.launchers);
-    if (!(await launcher.available()))
-      throw new RefusedError(`the ${launcher.mode} launcher is not available`);
+    const availability = await launcher.available();
+    if (!availability.ok)
+      throw new RefusedError(
+        `the ${launcher.mode} launcher is not available: ${availability.reason}`,
+      );
     // Define works for the project, not for a work item.
     const request = { role: 'define', station: 0, item: 0, branch: DEFINE_BRANCH, prompt } as const;
     const { sessionId } = await launcher.launch(request);

@@ -30,13 +30,18 @@ export async function runLoop(
 }
 
 export async function run(ctx: CommandContext): Promise<number> {
-  const context = await projectDispatch(ctx);
-  const stop = await runLoop(() => dispatchOnce(context), {
-    once: ctx.options.once === true,
-    report: (result) => {
-      ctx.io.stdout.write(passLines(result));
-    },
-  });
+  const { context, close } = await projectDispatch(ctx);
+  let stop;
+  try {
+    stop = await runLoop(() => dispatchOnce(context), {
+      once: ctx.options.once === true,
+      report: (result) => {
+        ctx.io.stdout.write(passLines(result));
+      },
+    });
+  } finally {
+    close();
+  }
   ctx.io.stdout.write(`stopped after ${String(stop.passes)} passes: ${stop.reason}\n`);
   return ExitCode.Ok;
 }

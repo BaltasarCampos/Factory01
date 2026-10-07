@@ -36,7 +36,7 @@ import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js'
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
 import { createItemBranch, ensureDraftPr, type ItemRef } from './branch.js';
 import { selectLauncher } from './launcher/select.js';
-import type { Launchers } from './launcher/types.js';
+import { LaunchRefused, type Launchers } from './launcher/types.js';
 import { writeStationManifest } from './manifest.js';
 import {
   nextTransition,
@@ -309,14 +309,23 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     await alertOnce({ urgency: 'urgent', kind, text: err.message });
     return { ...result, refused: err.message };
   }
-  if (!(await launcher.available())) {
-    // One info alert, not one per pass: e.g. a cloud project while T125 has not confirmed the
-    // cloud launch command (src/dispatcher/launcher/cloud.ts).
-    const refused = `the ${launcher.mode} launcher is unavailable`;
+  // One alert, not one per pass: info while a launcher waits (the cloud command until T125,
+  // local sessions until the guards ship), urgent when guardrail files were tampered with.
+  const refuse = async (refused: string, urgent: boolean | undefined): Promise<PassResult> => {
     const text = `no session started for ${repo}: ${refused}`;
-    await alertOnce({ urgency: 'info', kind: 'launcher-unavailable', text });
+    await alertOnce(
+      urgent === true
+        ? { urgency: 'urgent', kind: 'tampering', text }
+        : { urgency: 'info', kind: 'launcher-unavailable', text },
+    );
     return { ...result, refused };
-  }
+  };
+  const availability = await launcher.available();
+  if (!availability.ok)
+    return refuse(
+      `the ${launcher.mode} launcher is unavailable: ${availability.reason}`,
+      availability.urgent,
+    );
   const role = ROLE_AT[station];
   if (station >= 2 && station <= 6) {
     const ref: ItemRef = { issue: item.issue.number, branch };
@@ -325,13 +334,19 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     writeStationManifest(git, ref, { station, role });
   }
   const prompt = `Station ${String(station)} (${STATIONS[station]}) for ${repo}#${String(item.issue.number)} on branch ${branch}.`;
-  const { sessionId } = await launcher.launch({
-    role,
-    station,
-    item: item.issue.number,
-    branch,
-    prompt,
-  });
+  let sessionId: string;
+  try {
+    ({ sessionId } = await launcher.launch({
+      role,
+      station,
+      item: item.issue.number,
+      branch,
+      prompt,
+    }));
+  } catch (err) {
+    if (!(err instanceof LaunchRefused)) throw err;
+    return refuse(err.message, err.urgent);
+  }
   const mode = launcher.mode;
   return {
     ...result,
