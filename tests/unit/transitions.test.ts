@@ -73,6 +73,24 @@ describe('transition table rows (data-model.md § State machine)', () => {
     stays('new', { ...base, owner: { ...NONE, approved: no('stale') } });
   });
 
+  it('new → triaged waits while a proposed tier: is above the confirmed tier (AC-009)', () => {
+    const at = (proposedTier: Tier, confirmed: Tier = 2) => ({
+      ...base,
+      owner: { ...NONE, approved: approved(confirmed) },
+      proposedTier,
+    });
+    expect(next('new', at(3))).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(
+        /tier:3 is above the confirmed tier 2.*approve --tier 3/,
+      ) as string,
+    });
+    moves('new', at(2), 'triaged');
+    moves('new', at(1), 'triaged');
+    // A new `factory approve --tier 3` confirms the raise.
+    moves('new', at(3, 3), 'triaged');
+  });
+
   it('new → triaged never on another gate’s label (AC-069)', () => {
     stays('new', { ...base, owner: { ...NONE, 'spec-approved': specApproved() } });
     stays('new', { ...base, owner: { ...NONE, waiver: ok('waiver', { waives: 'gate:plan' }) } });

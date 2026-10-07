@@ -57,7 +57,8 @@ async function pauseFacts(
         const a = parseAlert(c);
         return a === undefined ? [] : [{ at: c.createdAt, ...a }];
       });
-    const args = ['issue', 'list', '--repo', repoArg(repo), '--state', 'all'];
+    const updated = `updated:>=${start.createdAt}`;
+    const args = ['issue', 'list', '--repo', repoArg(repo), '--state', 'all', '--search', updated];
     const listed = await gh([...args, '--json', 'number,title', '--limit', '1000'], {
       ...project,
       json: true,

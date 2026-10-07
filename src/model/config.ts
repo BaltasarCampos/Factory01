@@ -2,8 +2,10 @@
 //
 // YAML is read with the failsafe schema: every scalar arrives as a string, so a 40-hex commit
 // made only of digits cannot turn into a number and `agents: no` cannot turn into a boolean.
+import { spawnSync } from 'node:child_process';
 import { readFile } from 'node:fs/promises';
 import { parseDocument } from 'yaml';
+import { RefusedError } from '../cli/env.js';
 import { parseReleasePin } from './naming.js';
 import type { AgentsMode, ProjectConfig } from './types.js';
 
@@ -132,4 +134,13 @@ export function parseConfig(text: string, release: ReleaseLimits = RELEASE_LIMIT
 
 export async function loadConfig(path: string, release?: ReleaseLimits): Promise<ProjectConfig> {
   return parseConfig(await readFile(path, 'utf8'), release);
+}
+
+/** `.factory/config` as committed on main, never the work tree. */
+export function configOnMain(projectDir: string, mainRef = 'origin/main'): ProjectConfig {
+  const object = `${mainRef}:.factory/config`;
+  const result = spawnSync('git', ['-C', projectDir, 'show', object], { encoding: 'utf8' });
+  if (result.error !== undefined || result.status !== 0)
+    throw new RefusedError(`cannot read ${object} in ${projectDir}`);
+  return parseConfig(result.stdout);
 }

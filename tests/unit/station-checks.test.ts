@@ -160,9 +160,13 @@ describe('criterion lines (AC-097)', () => {
 
   it.each([
     ['a bold When line', '**When** the session expires, the user is asked to sign in again.'],
-    ['a Given/When line', 'Given a signed-in user, when the session expires, they sign in again.'],
+    ['a Given/When line', 'Given a signed-in user, When the session expires, they sign in again.'],
     ['a list item under Edge Cases', '- Five failed attempts lock the account.'],
     ['a list item under Acceptance Scenarios', '3. The login page loads.'],
+    [
+      'a lowercase given/when/then list item under Acceptance Scenarios',
+      '3. given a user, when they sign in, then they see links.',
+    ],
   ])('AC-097: %s without an ID fails', (_name, line) => {
     const where = line.startsWith('3.')
       ? '**Then** they see an error.'
@@ -172,6 +176,14 @@ describe('criterion lines (AC-097)', () => {
     expect(why(result.missing)).toMatch(
       /spec\.md:\d+: criterion line without a leading \*\*AC-###\*\*/,
     );
+  });
+
+  it('AC-097: lowercase "when … then" prose outside the criteria sections is not a criterion line', () => {
+    const text = add(
+      'Visitors cannot sign in, so every saved link is public.',
+      'when a link is saved, then it stays public.',
+    );
+    expect(checkSpec(text).complete).toBe(true);
   });
 
   it('AC-097: a criterion line starts with exactly one ID, matched as a whole word', () => {

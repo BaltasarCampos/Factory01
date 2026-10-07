@@ -5,7 +5,13 @@
 // Checked against formal/Dispatcher.tla by tests/property/transitions.prop.test.ts.
 import type { Verdict } from '../approvals/verify.js';
 import type { PauseState } from '../pause/derive.js';
-import { STATIONS, type ApprovalRecord, type State, type Station } from '../model/types.js';
+import {
+  STATIONS,
+  type ApprovalRecord,
+  type State,
+  type Station,
+  type Tier,
+} from '../model/types.js';
 
 export type OwnerGate = 'approved' | 'spec-approved' | 'waiver';
 const OWNER_GATES: readonly OwnerGate[] = ['approved', 'spec-approved', 'waiver'];
@@ -18,8 +24,8 @@ export interface ItemStatus {
 
 /**
  * What the dispatcher found for one item. Station outputs left out count as absent, so missing
- * evidence never moves an item. There is deliberately no field for events, `state:` labels or
- * `tier:` labels: none of them opens a gate.
+ * evidence never moves an item. There is deliberately no field for events or `state:` labels,
+ * and `tier:` labels open no gate: a proposed tier can only hold an item.
  */
 export interface Evidence {
   /** Key rotation pending (data-model.md § Keys and rotation): nothing moves. */
@@ -28,6 +34,8 @@ export interface Evidence {
   historySigned: boolean;
   /** `verifyGate` verdicts per `owner:` gate; a gate without its label is `missing`. */
   owner: Record<OwnerGate, Verdict>;
+  /** The highest `tier:` label on the issue; above the confirmed tier, it holds `new`. */
+  proposedTier?: Tier;
   /** An agent's question to the Owner is open on the issue. */
   questionOpen?: boolean;
   /** A failed gate's report, naming the earliest station able to fix it. */
@@ -148,8 +156,16 @@ export function ownerBasisMissing(state: State, e: Evidence): string | undefined
  */
 function forward(state: State, e: Evidence): Decision {
   switch (state) {
-    case 'new':
+    case 'new': {
+      // A raise waits for a new `factory approve --tier` (data-model § State machine).
+      const confirmed = ownerRecord(e, 'approved')?.tier;
+      const proposed = e.proposedTier;
+      if (proposed !== undefined && confirmed !== undefined && proposed > confirmed)
+        return stay(
+          `tier:${String(proposed)} is above the confirmed tier ${String(confirmed)}; waits for factory approve --tier ${String(proposed)}`,
+        );
       return move('triaged', 'owner:approved verified');
+    }
     case 'triaged':
       if (!e.specComplete) return stay('spec.md is not complete');
       return e.draftPr ? move('specified', 'spec.md complete, draft PR open') : stay('no draft PR');

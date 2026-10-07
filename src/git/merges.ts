@@ -66,6 +66,9 @@ export function verifiedMerges(
     ...['-c', `gpg.ssh.allowedSignersFile=${keys.allowedSigners}`],
     ...['-c', `gpg.ssh.revocationFile=${keys.revokedKeys}`],
     ...['-c', 'gpg.ssh.program=ssh-keygen'],
+    // A good signature by a key no allowed_signers line names has trust "undefined"; require
+    // a listed key even where git would accept it.
+    ...['-c', 'gpg.minTrustLevel=fully'],
   ];
   const out: MainMerges = { lastVerified: undefined, merges: [] };
   for (const entry of log.stdout.split('\x1e')) {

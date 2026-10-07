@@ -5,9 +5,9 @@
 //
 // Criterion lines (FR-042, AC-097) are read by one parser, `criterionLines`, which the Specify
 // check uses and `ac-map` and `red-green` will use: every list item under Acceptance Scenarios or
-// Edge Cases and, anywhere else, a line with two or more of Given/When/Then (any case) or one of
-// them in bold, plus any line that starts with an ID. Each must start with exactly one
-// `**AC-###**`.
+// Edge Cases, whatever its wording, and, anywhere else, a line with two or more of a capitalised
+// Given, When or Then, or one of them in bold, plus any line that starts with an ID. Each must
+// start with exactly one `**AC-###**`. Lowercase "when … then" prose is not a criterion line.
 import type { CheckResult } from '../../hooks/stop.js';
 import { featureFiles } from './feature.js';
 
@@ -59,7 +59,7 @@ const REGION = /^(?:#+\s+|\*\*)(?:Acceptance Scenarios|Edge Cases)\b/i;
 const REGION_END = /^(?:#+\s|\*\*[^*]+\*\*:|---|\*\*\*\s*$|___)/;
 const LEADING_ID = /^\*\*(AC-\d+)\*\*(?![\w*-])/;
 const BOLD_ID = /\*\*AC-\d+\*\*/g;
-const KEYWORDS = ['Given', 'When', 'Then'].map((k) => new RegExp(`\\b${k}\\b`, 'i'));
+const KEYWORDS = ['Given', 'When', 'Then'].map((k) => new RegExp(`\\b${k}\\b`));
 const BOLD_KEYWORD = /\*\*(?:Given|When|Then)\b/i;
 
 /** Comments blanked, keeping line numbers. */

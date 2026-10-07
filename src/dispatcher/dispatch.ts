@@ -9,7 +9,6 @@
 // supplied by the caller. Nothing is admitted before main has the Owner-signed Define merge, and
 // when main's key lists or `git verify-commit` cannot be read or run the pass admits nothing,
 // moves nothing and alerts the Owner.
-import { spawnSync } from 'node:child_process';
 import { checkSecondCopy, type KeyCheck, type ReleaseKeys } from '../approvals/keys.js';
 import { verifyGate, type PostedComment, type Verdict } from '../approvals/verify.js';
 import { RefusedError } from '../cli/env.js';
@@ -18,7 +17,7 @@ import { listComments } from '../github/comments.js';
 import type { GhOptions } from '../github/gh.js';
 import { addLabel, removeLabel } from '../github/labels.js';
 import { timeline } from '../github/timeline.js';
-import { parseConfig } from '../model/config.js';
+import { configOnMain } from '../model/config.js';
 import {
   STATES,
   STATIONS,
@@ -29,6 +28,7 @@ import {
   type RoleName,
   type State,
   type Station,
+  type Tier,
 } from '../model/types.js';
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
@@ -127,15 +127,6 @@ const ROLE_AT: Readonly<Record<Station, RoleName>> = {
 };
 const GATES: readonly OwnerGate[] = ['approved', 'spec-approved', 'waiver'];
 const FINAL: readonly State[] = ['done', 'escalated'];
-
-/** `.factory/config` as committed on main, never the work tree. */
-export function configOnMain(projectDir: string, mainRef = 'origin/main'): ProjectConfig {
-  const object = `${mainRef}:.factory/config`;
-  const result = spawnSync('git', ['-C', projectDir, 'show', object], { encoding: 'utf8' });
-  if (result.error !== undefined || result.status !== 0)
-    throw new RefusedError(`cannot read ${object} in ${projectDir}`);
-  return parseConfig(result.stdout);
-}
 
 /** The item's state: its newest current `state:` label, `new` without one. */
 export function itemStatus(labels: readonly string[], events: readonly LabelEvent[]): ItemStatus {
@@ -248,8 +239,10 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       continue;
     }
 
+    const tiers = issue.labels.flatMap((l) => /^tier:([123])$/.exec(l)?.[1] ?? []).map(Number);
     const evidence = () => ({
       ...found,
+      ...(tiers.length > 0 ? { proposedTier: Math.max(...tiers) as Tier } : {}),
       owner: verdicts,
       rotationPending: false,
       historySigned: true,

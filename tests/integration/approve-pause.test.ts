@@ -623,6 +623,7 @@ describe('factory pause and resume (AC-077)', () => {
         {
           number: 8,
           title: 'Old work',
+          createdAt: '2026-10-02T08:05:00Z',
           labels: ['state:done'],
           events: [labeled('state:done', '2026-10-02T08:10:00Z')],
         },
@@ -638,6 +639,19 @@ describe('factory pause and resume (AC-077)', () => {
     expect(r.stdout).not.toMatch(/before the pause/);
     expect(r.stdout).toMatch(/#7 Add login: state:building/);
     expect(r.stdout).not.toMatch(/#8/);
+    // Only issues updated since the pause are read, so #8's timeline is never fetched.
+    const list = calls().find((c) => c[0] === 'issue' && c[1] === 'list');
+    expect(list).toEqual(expect.arrayContaining(['--search', 'updated:>=2026-10-02T08:59:00Z']));
+    expect(calls().some((c) => c.some((a) => a.includes('/issues/8/timeline')))).toBe(false);
+    // What changed lists the items; Known risks holds the pause and its alerts (data-model).
+    const changed = r.stdout.slice(
+      r.stdout.indexOf('What changed'),
+      r.stdout.indexOf('Spec mapping'),
+    );
+    expect(changed).toMatch(/#7 Add login: state:building/);
+    const risks = r.stdout.slice(r.stdout.indexOf('Known risks'), r.stdout.indexOf('Signing for'));
+    expect(risks).toMatch(/pause:line added at 2026-10-02T08:59:00Z by ops-bot \(GitHub\)/);
+    expect(risks).toMatch(/urgent tampering: a secret in the logs/);
     expect(r.stdout.indexOf('Known risks')).toBeLessThan(r.stdout.indexOf('Signing for'));
   });
 

@@ -55,6 +55,8 @@ interface ItemSeed {
   /** Current `state:` labels, added before anything else. */
   states?: string[];
   approval?: Approval;
+  /** Other labels, e.g. a proposed `tier:`. */
+  labels?: string[];
 }
 
 const labeled = (name: string, at: string) => ({
@@ -79,7 +81,7 @@ function approvalBody(repo: string, issue: number, key: TestKeys): string {
 
 function issue(repo: string, seed: ItemSeed): Partial<FakeIssue> & { number: number } {
   const states = seed.states ?? [];
-  const labels = [...states];
+  const labels = [...states, ...(seed.labels ?? [])];
   const events = states.map((s) => labeled(s, BEFORE));
   const comments: FakeIssue['comments'] = [];
   if (seed.approval !== undefined) {
@@ -244,6 +246,18 @@ describe('dispatcher core: admission (AC-008, AC-055)', () => {
     ]);
   });
 
+  it('holds an approved item while its proposed tier: is above the confirmed tier (AC-009)', async () => {
+    // The record confirms tier 2; Intake or the filing agent proposes tier 3.
+    const t = setup([{ number: 2, approval: 'signed', labels: ['tier:3'] }]);
+
+    const result = await dispatchOnce(t.ctx);
+
+    expect(result.moves).toEqual([]);
+    expect(t.labelsOf(2)).not.toContain('state:triaged');
+    // It stays in `new`: no Specify session (whether Intake has work left is T060's evidence).
+    expect(t.cloud.launches.map((l) => l.role)).not.toContain('spec');
+  });
+
   it('starts no session for a state whose Owner gates do not hold (forged state: label)', async () => {
     const t = setup([{ number: 2, states: ['state:building'] }]);
 
@@ -370,6 +384,20 @@ describe('dispatcher core: nothing is admitted before the brief is merged (AC-00
     ]);
     expect(result.moves).toEqual([]);
     expect(t.cloud.launches).toEqual([]);
+  });
+
+  it('a Factory-Merge: define merge with a good signature by a key not in allowed_signers does not count', () => {
+    const t = setup([], { brief: 'on an agent commit' });
+    const merge = t.project.revParse('main');
+    // The signature is valid (U: good, unknown key); only the key is not the Owner's.
+    const listed = ['-c', `gpg.ssh.allowedSignersFile=${t.keys.allowedSigners}`];
+    expect(t.project.git([...listed, 'log', '-1', '--format=%G?', merge])).toBe('U');
+    const trailer = '--format=%(trailers:key=Factory-Merge,valueonly)';
+    expect(t.project.git(['log', '-1', trailer, merge])).toBe('define');
+    expect(verifiedMerges(t.project.path, t.keys, { ref: 'main' })).toEqual({
+      lastVerified: t.project.revParse('main^1'),
+      merges: [],
+    });
   });
 
   it('counts an Owner-signed Factory-Merge: define after the baseline', async () => {

@@ -64,7 +64,7 @@ export interface PauseFacts {
   by: string | undefined;
   /** Alerts posted on the inbox since then. */
   alerts: readonly { at: string; urgency: string; kind: string; text: string }[];
-  /** Items with a `state:` label added since then, and those labels in order. */
+  /** Items with a `state:` label added since then, and those labels in order (What changed). */
   items: readonly { number: number; title: string; states: readonly string[] }[];
 }
 
@@ -140,7 +140,9 @@ function changed(f: SummaryFacts, gate: SummaryGate): Part {
   if (gate === 'resume') {
     const p = f.pause;
     if (p === undefined) return noPause;
-    return [`${p.label} added at ${p.at} by ${p.by ?? 'a deleted account'}`];
+    if (p.items.length === 0) return ['No item changed state since the pause'];
+    const items = p.items.map((i) => `#${String(i.number)} ${i.title}: ${i.states.join(' → ')}`);
+    return ['Items whose state changed since the pause:', ...items];
   }
   const lines = [`Request #${String(f.issue.number)}: ${f.issue.title}`];
   if (gate === 'admission') {
@@ -246,14 +248,14 @@ function risks(f: SummaryFacts, gate: SummaryGate): Part {
   if (gate === 'resume') {
     const p = f.pause;
     if (p === undefined) return noPause;
-    const inbox = `the inbox #${String(f.issue.number)}`;
+    // Agents act through the Owner's account, so the login says which account, not who.
+    const by = p.by === undefined ? 'a deleted account' : `${p.by} (GitHub)`;
     const alerts = p.alerts.map((a) => `${a.at} ${a.urgency} ${a.kind}: ${a.text}`);
-    const items = p.items.map((i) => `#${String(i.number)} ${i.title}: ${i.states.join(' → ')}`);
     return [
-      ...(alerts.length > 0 ? quoted(inbox, alerts) : ['No alert raised during the pause']),
-      ...(items.length > 0
-        ? ['Items whose state changed since the pause:', ...items]
-        : ['No item changed state since the pause']),
+      `${p.label} added at ${p.at} by ${by}`,
+      ...(alerts.length > 0
+        ? quoted(`the inbox #${String(f.issue.number)}`, alerts)
+        : ['No alert raised during the pause']),
     ];
   }
   const others = f.issue.labels.filter((l) => !/^(?:tier|owner|state|pause):/.test(l));

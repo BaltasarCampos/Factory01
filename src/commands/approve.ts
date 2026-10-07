@@ -24,7 +24,6 @@ import {
 import { ownerKeyPath, sign } from '../approvals/sign.js';
 import { specBlobSha, verifyGate, verifySignature } from '../approvals/verify.js';
 import type { CommandContext } from '../cli/commands.js';
-import { configOnMain } from '../dispatcher/dispatch.js';
 import { briefMerged, verifiedMerges } from '../git/merges.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { listComments, postComment } from '../github/comments.js';
@@ -34,6 +33,7 @@ import { viewPr } from '../github/prs.js';
 import { timeline } from '../github/timeline.js';
 import { itemBranch, slugify } from '../model/naming.js';
 import type { ApprovalGate, ApprovalRecord, Tier } from '../model/types.js';
+import { configOnMain } from '../model/config.js';
 import { buildSummary, type SummaryFacts } from '../notify/summary.js';
 import { projectHere } from './pause.js';
 
