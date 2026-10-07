@@ -592,6 +592,16 @@ describe('record verification (T033, contracts/approval-record.md steps 3–6)',
       });
     });
 
+    it("a parent's approved record does not verify for a split child (AC-070)", () => {
+      // Plan files the split work as #43 and copies the parent's record and label onto it.
+      const parent = post(VALID.approved, owner, 0);
+      const child = { ...EXPECT, issue: 43 };
+      expect(gate([parent], approvedLabel, { expected: child })).toMatchObject({
+        ok: false,
+        kind: 'tampering',
+      });
+    });
+
     it('binds a spec approval to the current spec.md blob (AC-071)', () => {
       const repo = makeRepo({ files: { 'README.md': 'sample\n' } });
       repo.checkout('claude/42-add-login', { create: true });

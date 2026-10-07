@@ -129,3 +129,39 @@ export function makeRepo(options: MakeRepoOptions = {}): TestRepo {
   }
   return repo;
 }
+
+/**
+ * `git merge --no-ff` of `branch` into main, signed with `signWith` when given, with a
+ * `Factory-Merge: <trailer>` line as `factory merge` writes it; main is pushed.
+ */
+export function mergeIntoMain(
+  repo: TestRepo,
+  branch: string,
+  trailer: string,
+  options: { signWith?: TestKeys } = {},
+): string {
+  repo.checkout('main');
+  const sign = options.signWith
+    ? ['-c', 'gpg.format=ssh', '-c', `user.signingkey=${options.signWith.privateKey}`]
+    : [];
+  const message = `Merge ${branch}\n\nFactory-Merge: ${trailer}`;
+  repo.git([
+    ...sign,
+    'merge',
+    '-q',
+    '--no-ff',
+    options.signWith ? '-S' : '--no-gpg-sign',
+    '-m',
+    message,
+    branch,
+  ]);
+  repo.push('main');
+  return repo.revParse('HEAD');
+}
+
+/** A Define branch with a brief, merged into main by `mergeIntoMain`. */
+export function mergeBrief(repo: TestRepo, options: { signWith?: TestKeys } = {}): string {
+  repo.checkout('claude/define', { create: true });
+  repo.commit({ '.factory/brief.md': '# Brief\n' }, 'Define: brief');
+  return mergeIntoMain(repo, 'claude/define', 'define', options);
+}

@@ -17,6 +17,7 @@ const issue = (over: Partial<IntakeIssue> = {}): IntakeIssue => ({
   state: 'OPEN',
   labels: LABELS,
   comments: [],
+  confirmedTier: 2,
   ...over,
 });
 
@@ -52,6 +53,23 @@ describe('Intake output check: type, priority and tier (AC-009)', () => {
     const result = checkIntake(issue({ labels }));
     expect(result.complete).toBe(false);
     expect(result.missing.join('\n')).toMatch(why);
+  });
+
+  it.each([
+    ['keeps the confirmed tier', 2, 'tier:2', 2],
+    ['proposes a higher tier', 2, 'tier:3', 3],
+    ['proposes a higher tier than a confirmed tier 1', 1, 'tier:3', 3],
+  ] as const)('AC-009: Intake %s', (_name, confirmedTier, tier, effective) => {
+    const result = checkIntake(issue({ confirmedTier, labels: ['type:bug', 'priority:p2', tier] }));
+    expect(result).toMatchObject({ complete: true, tier: effective });
+  });
+
+  it('AC-009: Intake never proposes a tier lower than the one the Owner confirmed', () => {
+    const result = checkIntake(
+      issue({ confirmedTier: 3, labels: ['type:bug', 'priority:p2', 'tier:2'] }),
+    );
+    expect(result.complete).toBe(false);
+    expect(result.missing.join('\n')).toMatch(/tier:2 is lower than the confirmed tier 3/);
   });
 
   it('AC-009: an item closed without a duplicate-of comment is not triaged', () => {
@@ -101,7 +119,7 @@ describe('Intake output check against GitHub (AC-009)', () => {
 
   it('AC-009: reads the item from GitHub and checks it', async () => {
     seed({ repos: { [REPO]: { issues: [{ number: 7, title: 'Add login', labels: LABELS }] } } });
-    expect(await checkIntakeIssue(REPO, 7)).toMatchObject({ complete: true, tier: 2 });
+    expect(await checkIntakeIssue(REPO, 7, 2)).toMatchObject({ complete: true, tier: 2 });
   });
 
   it('AC-009: a duplicate must name an existing issue', async () => {
@@ -116,7 +134,7 @@ describe('Intake output check against GitHub (AC-009)', () => {
     seed({
       repos: { [REPO]: { issues: [{ number: 7, title: 'Add login', state: 'CLOSED', comments }] } },
     });
-    const result = await checkIntakeIssue(REPO, 7);
+    const result = await checkIntakeIssue(REPO, 7, 2);
     expect(result.complete).toBe(false);
     expect(result.missing.join('\n')).toMatch(/#99: no such issue/);
   });
@@ -140,6 +158,6 @@ describe('Intake output check against GitHub (AC-009)', () => {
         },
       },
     });
-    expect(await checkIntakeIssue(REPO, 7)).toMatchObject({ complete: true, duplicateOf: 3 });
+    expect(await checkIntakeIssue(REPO, 7, 2)).toMatchObject({ complete: true, duplicateOf: 3 });
   });
 });

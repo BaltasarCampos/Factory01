@@ -5,8 +5,8 @@
 // was committed counts. Order is read from history: the questions are asked in one commit, the
 // Owner's answers come after them, and the brief and backlog come after the answers.
 //
-// A seed issue waits until the backlog listing it is on main, which only an Owner-signed merge
-// of the Define pull request can put there, and until it has a verified `owner:approved`.
+// The seed marker and the backlog list are trace information: admission waits for the Owner's
+// signed `Factory-Merge: define` and each issue's own `owner:approved` (src/dispatcher).
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
@@ -256,18 +256,4 @@ export async function defineStopCheck(cwd: string): Promise<CheckResult> {
   const { repo } = await loadConfig(join(cwd, '.factory', 'config'));
   const result = await checkDefine({ workdir: cwd, repo });
   return result.waiting ? { complete: true } : result;
-}
-
-export interface SeedLists {
-  /** Seed issues in the backlog on main: merged by the Owner. */
-  onMain: ReadonlySet<number>;
-  /** Seed issues listed on main or on `claude/define`. */
-  listed: ReadonlySet<number>;
-}
-
-/** The seed backlogs on main and on the Define branch, as the dispatcher's clone has them. */
-export function seedLists(projectDir: string, mainRef = 'origin/main'): SeedLists {
-  const onMain = backlogIssues(show(projectDir, mainRef, BACKLOG_PATH));
-  const onBranch = backlogIssues(show(projectDir, `origin/${DEFINE_BRANCH}`, BACKLOG_PATH));
-  return { onMain: new Set(onMain), listed: new Set([...onMain, ...onBranch]) };
 }

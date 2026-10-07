@@ -13,7 +13,7 @@ import {
 } from '../../src/stations/checks/define.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { seedState, type FakeIssue } from '../helpers/fake-gh.js';
-import { makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
+import { makeRepo, mergeIntoMain, type Files, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
 const REPO = 'owner/project';
@@ -114,7 +114,10 @@ interface ProjectOptions {
 /** A project with `.factory/config` on main and `claude/define` checked out and pushed. */
 function project(options: ProjectOptions = {}): TestRepo {
   const files = { '.factory/config': CONFIG, '.claude/agents/define.md': ROLE };
-  const repo = makeRepo({ files: { ...files, 'src/app.ts': 'export {};\n', ...options.main } });
+  const repo = makeRepo({
+    files: { ...files, 'src/app.ts': 'export {};\n', ...options.main },
+    signWith: owner,
+  });
   repo.checkout(DEFINE, { create: true });
   repo.push(DEFINE);
   const pr =
@@ -361,12 +364,7 @@ describe('dispatcher waits for the Define merge (AC-006, AC-064)', { timeout: 60
   }
 
   /** The Owner's signed `git merge --no-ff -S` of claude/define into main. */
-  function ownerMerge(r: TestRepo): void {
-    r.checkout('main');
-    const signing = ['-c', 'gpg.format=ssh', '-c', `user.signingkey=${owner.privateKey}`];
-    r.git([...signing, 'merge', '-q', '--no-ff', '-S', '-m', 'Merge claude/define', DEFINE]);
-    r.push('main');
-  }
+  const ownerMerge = (r: TestRepo) => mergeIntoMain(r, DEFINE, 'define', { signWith: owner });
 
   it('AC-006: no seed issue is picked before the Owner merges the Define PR, approved or not', async () => {
     const seeds = [
@@ -410,22 +408,22 @@ describe('dispatcher waits for the Define merge (AC-006, AC-064)', { timeout: 60
     expect(local.launches).toEqual([expect.objectContaining({ item: 2, branch: 'claude/2-seed' })]);
   });
 
-  it("AC-064: a re-run's new seed issues wait for the next merge while merged ones go on", async () => {
-    const seeds = [
-      { number: 2, approved: true },
-      { number: 7, approved: true },
-    ];
-    const r = project({ seeds, main: { [BACKLOG_PATH]: backlog([2]) } });
+  it("AC-064: once a brief is merged, a re-run's new seed issues wait for their own owner:approved", async () => {
+    const seeds = [{ number: 2, approved: true }, { number: 7 }];
+    const r = project({ seeds });
     ask(r);
     answer(r);
-    output(r, { [BACKLOG_PATH]: backlog([2, 7]) });
+    output(r, { [BACKLOG_PATH]: backlog([2]) });
+    ownerMerge(r);
+    r.checkout(DEFINE);
+    r.commit({ [BACKLOG_PATH]: backlog([2, 7]) }, 'Define: re-run backlog');
     r.push(DEFINE);
     const { ctx, local } = dispatcher(r);
 
     const result = await dispatchOnce(ctx);
 
     expect(result.skipped).toEqual([
-      { issue: 7, reason: expect.stringMatching(/merge the Define pull request/) as string },
+      { issue: 7, reason: expect.stringMatching(/no verified owner:approved/) as string },
     ]);
     expect(local.launches).toEqual([expect.objectContaining({ item: 2 })]);
   });

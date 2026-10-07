@@ -1,4 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { symlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
@@ -9,11 +12,12 @@ import {
 } from '../../src/dispatcher/dispatch.js';
 import { selectLauncher } from '../../src/dispatcher/launcher/select.js';
 import { RefusedError } from '../../src/cli/env.js';
+import { verifiedMerges } from '../../src/git/merges.js';
 import { STATES, STATIONS, type ApprovalRecord } from '../../src/model/types.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeIssue } from '../helpers/fake-gh.js';
-import { makeRepo } from '../helpers/git-repo.js';
-import { makeKeys, makeOtherKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+import { gitEnv, makeRepo, mergeBrief, type TestRepo } from '../helpers/git-repo.js';
+import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
 const REPO = 'owner/project';
 const INBOX = 1;
@@ -31,9 +35,12 @@ const LATER = '2026-10-01T08:05:00Z';
 
 let owner: TestKeys;
 let other: TestKeys;
+/** An Owner key the pinned release lists and revokes. */
+let revoked: TestKeys;
 beforeAll(() => {
   owner = makeKeys();
   other = makeOtherKeys();
+  revoked = makeKeys();
 });
 
 type Approval =
@@ -96,6 +103,42 @@ interface Setup {
   config?: string;
   inboxLabels?: string[];
   secondCopy?: () => string;
+  /** How main's history reaches the dispatcher; default an Owner-signed Define merge. */
+  brief?: Brief;
+  /** One of main's pinned key lists cannot be read. */
+  unreadable?: 'allowedSigners' | 'revokedKeys';
+}
+
+type Brief =
+  | 'signed'
+  | 'signed after the baseline'
+  | 'not merged'
+  | 'on an unsigned commit'
+  | 'on an agent commit'
+  | 'signed with a revoked key'
+  | 'after an unsigned commit';
+
+/** Main's first-parent history: a signed root, or an unsigned one recorded as `baseline`. */
+function mainHistory(config: string, brief: Brief): TestRepo {
+  if (brief === 'signed after the baseline') {
+    const project = makeRepo({ files: { 'README.md': 'old\n' } });
+    const baseline = `baseline: ${project.revParse('HEAD')}\n`;
+    project.commit({ '.factory/config': config + baseline }, 'adopt', { signWith: owner });
+    mergeBrief(project, { signWith: owner });
+    return project;
+  }
+  const project = makeRepo({ files: { '.factory/config': config }, signWith: owner });
+  if (brief === 'after an unsigned commit') project.commit({ 'x.md': 'x\n' }, 'unsigned');
+  const signers: Partial<Record<Brief, TestKeys>> = {
+    'on an agent commit': other,
+    'signed with a revoked key': revoked,
+  };
+  if (brief !== 'not merged')
+    mergeBrief(
+      project,
+      brief === 'on an unsigned commit' ? {} : { signWith: signers[brief] ?? owner },
+    );
+  return project;
 }
 
 function setup(items: ItemSeed[], options: Setup = {}) {
@@ -119,10 +162,12 @@ function setup(items: ItemSeed[], options: Setup = {}) {
     },
   });
   const config = `factory_release: ${PIN}\nrepo: ${repo}\ninbox_issue: ${String(INBOX)}\n`;
-  const project = makeRepo({
-    files: { '.factory/config': config + (options.config ?? 'agents: cloud\n') },
-  });
-  const keys = writeKeyFiles([owner]);
+  const project = mainHistory(
+    config + (options.config ?? 'agents: cloud\n'),
+    options.brief ?? 'signed',
+  );
+  const keys = writeKeyFiles([revoked, owner], [revoked]);
+  if (options.unreadable !== undefined) keys[options.unreadable] = join(tempDir(), 'missing');
   const cloud = new FakeLauncher('cloud');
   const local = new FakeLauncher('local');
   const logged: [number, DispatchEvent][] = [];
@@ -145,7 +190,17 @@ function setup(items: ItemSeed[], options: Setup = {}) {
   };
   const labelsOf = (n: number) => state().issues.find((i) => i.number === n)?.labels ?? [];
   const inbox = () => state().issues.find((i) => i.number === INBOX)?.comments ?? [];
-  return { ctx, cloud, local, logged, labelsOf, inbox, runs: () => state().workflowRuns };
+  return {
+    ctx,
+    cloud,
+    local,
+    logged,
+    labelsOf,
+    inbox,
+    runs: () => state().workflowRuns,
+    project,
+    keys,
+  };
 }
 
 describe('dispatcher core: admission (AC-008, AC-055)', () => {
@@ -153,23 +208,24 @@ describe('dispatcher core: admission (AC-008, AC-055)', () => {
     ['private project repository', 'owner/project', 'private'],
     ['public factory repository', 'owner/factory', 'public'],
   ] as const)(
-    'never picks an issue neither authored nor approved by the Owner, in the %s (AC-008, AC-055)',
+    'never picks an issue without a verified owner:approved, even one the Owner wrote, in the %s (AC-008, AC-055)',
     async (_name, repo, visibility) => {
       const items = [
         { number: 2, author: 'stranger' },
         { number: 3, author: 'stranger', states: ['state:building'] },
         { number: 4 },
+        { number: 5, approval: 'signed' as const },
       ];
       const t = setup(items, { repo, visibility });
 
       const result = await dispatchOnce(t.ctx);
 
-      expect(result.skipped.map((s) => s.issue)).toEqual([2, 3]);
+      expect(result.skipped.map((s) => s.issue)).toEqual([2, 3, 4]);
+      expect(result.skipped[2]?.reason).toMatch(/no verified owner:approved/);
       expect(t.labelsOf(2)).toEqual([]);
       expect(t.labelsOf(3)).toEqual(['state:building']);
-      expect(t.cloud.launches).toEqual([
-        expect.objectContaining({ item: 4, role: 'intake', station: 1, branch: 'main' }),
-      ]);
+      expect(t.labelsOf(4)).toEqual([]);
+      expect(t.cloud.launches).toEqual([expect.objectContaining({ item: 5, role: 'spec' })]);
       expect(t.inbox()).toEqual([]);
     },
   );
@@ -210,7 +266,7 @@ describe('dispatcher core: launcher selection (AC-002)', () => {
   });
 
   it('a config without agents makes the cloud launch refuse, with the reason shown to the Owner once (AC-002)', async () => {
-    const t = setup([{ number: 2 }], { config: '' });
+    const t = setup([{ number: 2, approval: 'signed' }], { config: '' });
 
     const first = await dispatchOnce(t.ctx);
     const second = await dispatchOnce(t.ctx);
@@ -273,13 +329,14 @@ describe('dispatcher core: owner: labels (AC-068)', () => {
 
 describe('dispatcher core: one pass', () => {
   it('starts at most one session per pass', async () => {
-    const t = setup([{ number: 2 }, { number: 3 }, { number: 4 }]);
+    const approved = [2, 3, 4].map((number) => ({ number, approval: 'signed' as const }));
+    const t = setup(approved);
 
     const result = await dispatchOnce(t.ctx);
 
     expect(t.cloud.launches).toHaveLength(1);
     expect(result.launched).toEqual(
-      expect.objectContaining({ issue: 2, role: 'intake', mode: 'cloud' }),
+      expect.objectContaining({ issue: 2, role: 'spec', mode: 'cloud' }),
     );
   });
 
@@ -293,5 +350,84 @@ describe('dispatcher core: one pass', () => {
     expect(result.halted).toMatch(/pause:line/);
     expect(result.moves).toEqual([]);
     expect(t.cloud.launches).toEqual([]);
+  });
+});
+
+describe('dispatcher core: nothing is admitted before the brief is merged (AC-006)', () => {
+  it.each([
+    'not merged',
+    'on an unsigned commit',
+    'on an agent commit',
+    'signed with a revoked key',
+    'after an unsigned commit',
+  ] as const)('a Factory-Merge: define %s admits no item', async (brief) => {
+    const t = setup([{ number: 2, approval: 'signed' }], { brief });
+
+    const result = await dispatchOnce(t.ctx);
+
+    expect(result.skipped).toEqual([
+      { issue: 2, reason: expect.stringMatching(/merge the Define pull request/) as string },
+    ]);
+    expect(result.moves).toEqual([]);
+    expect(t.cloud.launches).toEqual([]);
+  });
+
+  it('counts an Owner-signed Factory-Merge: define after the baseline', async () => {
+    const t = setup([{ number: 2, approval: 'signed' }], { brief: 'signed after the baseline' });
+
+    const result = await dispatchOnce(t.ctx);
+
+    expect(result.moves).toEqual([expect.objectContaining({ issue: 2, to: 'triaged' })]);
+    expect(t.cloud.launches).toEqual([expect.objectContaining({ item: 2 })]);
+  });
+
+  it('reads trailers only up to the first commit git verify-commit rejects, and names the last verified one', () => {
+    const t = setup([], { brief: 'after an unsigned commit' });
+    const root = t.project.revParse('main~2');
+    expect(verifiedMerges(t.project.path, t.keys, { ref: 'main' })).toEqual({
+      lastVerified: root,
+      merges: [],
+    });
+    const merged = setup([]).project;
+    expect(verifiedMerges(merged.path, t.keys, { ref: 'main' })).toEqual({
+      lastVerified: merged.revParse('main'),
+      merges: [{ commit: merged.revParse('main'), value: 'define' }],
+    });
+  });
+});
+
+describe('dispatcher core: fails closed when main cannot be verified (AC-006)', () => {
+  it.each(['allowedSigners', 'revokedKeys'] as const)(
+    'when the pinned %s cannot be read, admits nothing, moves nothing and alerts the Owner',
+    async (unreadable) => {
+      const t = setup([{ number: 2, approval: 'signed' }], { unreadable });
+
+      const result = await dispatchOnce(t.ctx);
+
+      expect(result.halted).toMatch(/cannot verify main/);
+      expect(result.moves).toEqual([]);
+      expect(t.cloud.launches).toEqual([]);
+      expect(t.inbox()).toHaveLength(1);
+      expect(t.inbox()[0]?.body).toMatch(/urgency=urgent kind=unverifiable/);
+    },
+  );
+
+  it.each([
+    ['git', (): string => ''],
+    [
+      'ssh-keygen',
+      (): string => {
+        const bin = tempDir('factory-bin-');
+        const git = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+        symlinkSync(git, join(bin, 'git'));
+        return bin;
+      },
+    ],
+  ] as const)('refuses to read trailers when %s cannot run', (program, path) => {
+    const t = setup([]);
+    const env = { ...gitEnv, PATH: path() };
+    expect(() => verifiedMerges(t.project.path, t.keys, { ref: 'main', env })).toThrow(
+      new RegExp(`cannot run ${program}`),
+    );
   });
 });

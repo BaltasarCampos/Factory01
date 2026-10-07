@@ -3,7 +3,8 @@
 // comment is also the approval event: the dispatcher copies the issue's records into the item's
 // `events.jsonl` when it creates the branch (T059). The approval summary (FR-043, AC-016) is shown
 // first, read at the one commit the record signs, and nothing is signed while a required part is
-// missing. Nothing is posted or labelled unless signing succeeds.
+// missing. Nothing is posted or labelled unless signing succeeds. Approving an item before main
+// has the Owner-signed Define merge warns: the dispatcher admits nothing until then (AC-006).
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -23,6 +24,8 @@ import {
 import { ownerKeyPath, sign } from '../approvals/sign.js';
 import { specBlobSha, verifyGate, verifySignature } from '../approvals/verify.js';
 import type { CommandContext } from '../cli/commands.js';
+import { configOnMain } from '../dispatcher/dispatch.js';
+import { briefMerged, verifiedMerges } from '../git/merges.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { listComments, postComment } from '../github/comments.js';
 import { Fields, gh, numberArg, repoArg } from '../github/gh.js';
@@ -247,6 +250,23 @@ async function fieldsFor(
   return { fields: { tier, branch, waives: target, head }, info, view };
 }
 
+/** Warn while main has no Owner-signed `Factory-Merge: define`; never refuses. */
+function warnBriefUnmerged(ctx: CommandContext, project: Project, keys: () => ReleaseKeys): void {
+  let why: string;
+  try {
+    const keyLists = keys();
+    const { baseline } = configOnMain(project.cwd);
+    const env = project.env ?? process.env;
+    if (briefMerged(verifiedMerges(project.cwd, keyLists, { baseline, env }))) return;
+    why = 'main has no Owner-signed Factory-Merge: define';
+  } catch (err) {
+    why = `cannot tell whether the brief is merged (${err instanceof Error ? err.message : String(err)})`;
+  }
+  ctx.io.stderr.write(
+    `warning: ${why}; the dispatcher admits no item until the Define pull request is merged\n`,
+  );
+}
+
 const GATE_OF: Record<string, SummaryFacts['gate'] | undefined> = {
   spec: 'spec-approved',
   waiver: 'waiver',
@@ -273,6 +293,7 @@ export async function approve(ctx: CommandContext): Promise<number> {
   let gathered: Gathered;
   try {
     gathered = await fieldsFor(ctx, project, issue, gate, waives, mainKeyLists);
+    if (gate === 'approved') warnBriefUnmerged(ctx, project, mainKeyLists);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

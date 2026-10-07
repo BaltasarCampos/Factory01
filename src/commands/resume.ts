@@ -5,16 +5,83 @@
 // GitHub's would sign a record that lifts nothing. The latest pause label-add time is GitHub's
 // own clock: the record is signed at the later of now and that time plus one second, with a
 // warning when the laptop is more than a minute behind.
+//
+// The approval summary (AC-096) shows what was paused, when and by whom, the alerts raised and
+// the items whose `state:` label changed since then. The pause began at the first add of its
+// label that no verified resume record lifts. Nothing is signed when any of it cannot be read.
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError } from '../cli/env.js';
+import { mainKeys, secondCopy } from '../approvals/keys.js';
 import { newNonce, recordTimestamp, serialise } from '../approvals/record.js';
+import { listComments } from '../github/comments.js';
+import { asList, Fields, gh, repoArg } from '../github/gh.js';
 import { removeLabel } from '../github/labels.js';
 import { timeline } from '../github/timeline.js';
 import type { ApprovalRecord } from '../model/types.js';
+import { parseAlert } from '../notify/inbox.js';
+import { buildSummary, type PauseFacts } from '../notify/summary.js';
+import { resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { postSigned } from './approve.js';
 import { projectHere, scopeOf } from './pause.js';
 
+type Project = Awaited<ReturnType<typeof projectHere>>;
+
 const SKEW_WARNING_MS = 60_000;
+
+async function pauseFacts(
+  project: Project,
+  scope: string,
+  events: readonly LabelEvent[],
+): Promise<PauseFacts> {
+  const { repo, inboxIssue: inbox } = project;
+  const env = project.env ?? process.env;
+  const scratch = mkdtempSync(join(tmpdir(), 'factory-keys-'));
+  try {
+    const keys = mainKeys(project.cwd, env, scratch);
+    const comments = await listComments(repo, inbox, project);
+    const check = { keys, secondCopy: secondCopy(env, project.home), repo, inboxIssue: inbox };
+    const lifts = resumeEntries(comments, check)
+      .filter((r) => r.verified && r.record.scope === scope)
+      .map((r) => Date.parse(r.record.timestamp));
+    const adds = events.filter((e) => e.event === 'labeled');
+    const start = adds.find((e) => !lifts.some((t) => t > Date.parse(e.createdAt))) ?? adds.at(-1);
+    if (start === undefined) throw new Error('no pause label was added');
+    const since = (at: string) => Date.parse(at) >= Date.parse(start.createdAt);
+
+    const alerts = comments
+      .filter((c) => since(c.createdAt))
+      .flatMap((c) => {
+        const a = parseAlert(c);
+        return a === undefined ? [] : [{ at: c.createdAt, ...a }];
+      });
+    const args = ['issue', 'list', '--repo', repoArg(repo), '--state', 'all'];
+    const listed = await gh([...args, '--json', 'number,title', '--limit', '1000'], {
+      ...project,
+      json: true,
+    });
+    const items: PauseFacts['items'][number][] = [];
+    for (const value of asList(listed, 'issues')) {
+      const f = Fields.of(value, 'issue');
+      const number = f.num('number');
+      if (number === inbox) continue;
+      const states = (await timeline(repo, number, project))
+        .filter((e) => e.event === 'labeled' && e.label.startsWith('state:') && since(e.createdAt))
+        .map((e) => e.label);
+      if (states.length > 0) items.push({ number, title: f.str('title'), states });
+    }
+    return { label: start.label, at: start.createdAt, by: start.actor, alerts, items };
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    throw new RefusedError(
+      `cannot read what happened during the pause, so nothing is signed: ${why}`,
+    );
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
 
 export async function resume(ctx: CommandContext): Promise<number> {
   const scope = scopeOf(ctx.positionals[0]);
@@ -37,6 +104,15 @@ export async function resume(ctx: CommandContext): Promise<number> {
       `warning: the laptop clock is at least ${String(Math.round((pausedAt - now) / 1000))} s ` +
         `behind GitHub's (${label} was added at ${lastAdd.createdAt}); signing with ${timestamp}\n`,
     );
+
+  const pause = await pauseFacts(project, scope, events);
+  const issue = { number: project.inboxIssue, title: 'Owner inbox', body: '', labels: [] };
+  const summary = buildSummary({ gate: 'resume', issue, pause });
+  if (!summary.ok)
+    throw new RefusedError(
+      `not signing: the summary is incomplete:\n  ${summary.missing.join('\n  ')}`,
+    );
+  ctx.io.stdout.write(`${summary.text}\n`);
 
   const record: ApprovalRecord = {
     repo: project.repo,

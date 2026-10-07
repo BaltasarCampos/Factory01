@@ -348,7 +348,7 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
     const head = new Map([
       [
         'tests/login.test.ts',
-        "import { seed } from './helpers/db.js';\nimport { login } from '../src/login.js';\nit('a', () => {});\n",
+        "import { seed } from './helpers/db.js';\nimport { fixture } from './shared.test.js';\nimport { login } from '../src/login.js';\nit('a', () => {});\n",
       ],
       ['tests/shared.test.ts', 'export const fixture = 1;\n'],
       [
@@ -361,7 +361,7 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
     ]);
     // src/login.ts is imported by a test but also by src/server.ts: production code, not a helper.
     // lib/fake-clock.ts is imported only by a helper, so it is a helper too (second level).
-    expect([...testHelpers(new Map(), head)].sort()).toEqual([
+    expect([...testHelpers(head, head)].sort()).toEqual([
       'lib/fake-clock.ts',
       'tests/helpers/db.ts',
       'tests/shared.test.ts',
@@ -375,7 +375,7 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
       ['lib/two.ts', "import { leaf } from './three.js';\nexport const deep = leaf;\n"],
       ['lib/three.ts', 'export const leaf = () => expect(1).toBe(1);\n'],
     ]);
-    expect([...testHelpers(new Map(), head)].sort()).toEqual([
+    expect([...testHelpers(head, head)].sort()).toEqual([
       'lib/one.ts',
       'lib/three.ts',
       'lib/two.ts',
@@ -391,7 +391,7 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
       ['src/x.ts', "import { y } from './y.js';\nexport const x = 1;\n"],
       ['src/y.ts', "import { x } from './x.js';\nexport const y = 1;\n"],
     ]);
-    expect([...testHelpers(new Map(), head)].sort()).toEqual(['lib/one.ts', 'lib/two.ts']);
+    expect([...testHelpers(head, head)].sort()).toEqual(['lib/one.ts', 'lib/two.ts']);
   });
 
   it('AC-061: a helper deleted at head is still found from the base, and its deletion needs a waiver', () => {
@@ -411,6 +411,50 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
     const result = weakenedTests([gone], { ...NONE, helpers });
     expect(result.ok).toBe(false);
     expect(messages(result)).toEqual(['lib/seed.ts: deletes a test helper']);
+  });
+
+  it('AC-061: a new module not wired in yet is not a helper, even though only its new test imports it', () => {
+    const base = new Map([['tests/a.test.ts', "it('a', () => expect(1).toBe(1));\n"]]);
+    const head = new Map([
+      ...base,
+      [
+        'tests/parse.test.ts',
+        "import { parse } from '../src/parse.js';\nit('p', () => parse());\n",
+      ],
+      ['src/parse.ts', 'export const parse = () => 1;\n'],
+    ]);
+    expect([...testHelpers(base, head)]).toEqual([]);
+  });
+
+  it('AC-061: an existing test switched to a new no-op helper is flagged through its removed assertions', () => {
+    const base = new Map([
+      ['tests/a.test.ts', "it('a', () => {\n  expect(sum(1, 1)).toBe(2);\n});\n"],
+    ]);
+    const head = new Map([
+      [
+        'tests/a.test.ts',
+        "import { check } from './check.js';\nit('a', () => {\n  check();\n});\n",
+      ],
+      ['tests/check.ts', 'export const check = () => {};\n'],
+    ]);
+    const helpers = testHelpers(base, head);
+    expect([...helpers]).toEqual([]);
+    const diff: DiffFile[] = [
+      file(
+        'tests/a.test.ts',
+        ["import { check } from './check.js';", '  check();'],
+        ['  expect(sum(1, 1)).toBe(2);'],
+      ),
+      {
+        path: 'tests/check.ts',
+        status: 'added',
+        added: ['export const check = () => {};'],
+        removed: [],
+      },
+    ];
+    const result = weakenedTests(diff, { ...NONE, helpers });
+    expect(result.ok).toBe(false);
+    expect(messages(result)).toEqual(['tests/a.test.ts: removes 1 assertion']);
   });
 
   it('AC-061 (end date, T140): the local test-path constant stays only until the release ships test-paths.json', () => {
