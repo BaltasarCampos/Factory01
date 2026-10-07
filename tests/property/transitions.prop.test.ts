@@ -19,6 +19,7 @@ const HEAD = '1c9d0e5f6a7b8c9d0e1f2a3b4c5d6e7f8091a2b3';
 const OLD_HEAD = '0b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6f7a8';
 const GATES = ['approved', 'spec-approved', 'waiver'] as const;
 const OUTPUTS = [
+  'intakeComplete',
   'specComplete',
   'draftPr',
   'planComplete',
@@ -360,6 +361,7 @@ describe('transition table against the TLA+ invariants (AC-069)', () => {
     const out = (name: Output): Action => ({ by: 'agent', act: 'output', name, value: true });
     const w = run([
       { by: 'owner', act: 'approve', tier: 2 },
+      out('intakeComplete'),
       step,
       out('specComplete'),
       out('draftPr'),

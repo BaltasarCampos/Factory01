@@ -1,10 +1,10 @@
-// `factory approve <issue|pr> [spec | waiver <waives>]` (contracts/cli.md, FR-016d, FR-016e):
-// sign a record on the laptop, post it on the issue, then apply its `owner:` label. The record
-// comment is also the approval event: the dispatcher copies the issue's records into the item's
-// `events.jsonl` when it creates the branch (T059). The approval summary (FR-043, AC-016) is shown
-// first, read at the one commit the record signs, and nothing is signed while a required part is
-// missing. Nothing is posted or labelled unless signing succeeds. Approving an item before main
-// has the Owner-signed Define merge warns: the dispatcher admits nothing until then (AC-006).
+// `factory approve <issue|pr> [spec | waiver <waives>]` (contracts/cli.md, FR-016d, FR-016e): sign
+// a record on the laptop, post it on the issue, then apply its `owner:` label. The record lives
+// only in that comment: the dispatcher never copies it into `events.jsonl`, which is telemetry, and
+// it verifies wherever it lives (Owner decision 2026-10-07). The approval summary (FR-043, AC-016)
+// is shown first, read at the one commit the record signs, and nothing is signed while a required
+// part is missing. Nothing is posted or labelled unless signing succeeds. Approving an item before
+// main has the Owner-signed Define merge warns: the dispatcher admits nothing until then (AC-006).
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';

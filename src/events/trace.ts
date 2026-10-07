@@ -27,7 +27,18 @@ export interface TraceCommit {
   message: string;
   /** Number of parents; merge commits are the Owner's, not an agent's. */
   parents: number;
+  /** Files the commit changes; needed to accept a dispatcher commit. */
+  paths?: readonly string[];
 }
+
+/** Not a role: the dispatcher's own commits on an item branch (src/dispatcher/branch.ts). */
+export const DISPATCHER = 'dispatcher';
+
+/** The only files a dispatcher commit may change. */
+const dispatcherFile = (path: string, feature: string) =>
+  path === '.specify/feature.json' ||
+  path === `specs/${feature}/events.jsonl` ||
+  path === `specs/${feature}/.station.json`;
 
 export interface TraceInput {
   issue: number;
@@ -81,9 +92,16 @@ function commitProblems(commit: TraceCommit, feature: string): string[] {
   const problems: string[] = [];
   const roles = t.get('Factory-Role') ?? [];
   if (roles.length === 0) problems.push('no Factory-Role: trailer');
-  for (const role of roles)
-    if (!(ROLES as readonly string[]).includes(role))
+  for (const role of roles) {
+    if (role === DISPATCHER) {
+      const others = commit.paths?.filter((p) => !dispatcherFile(p, feature));
+      if (others === undefined)
+        problems.push(`Factory-Role: ${role} on a commit whose changed files are unknown`);
+      else if (others.length > 0)
+        problems.push(`Factory-Role: ${role} on a commit that changes ${others.join(', ')}`);
+    } else if (!(ROLES as readonly string[]).includes(role))
       problems.push(`Factory-Role: ${role} is not a factory role`);
+  }
   const items = t.get('Factory-Item') ?? [];
   if (items.length === 0) problems.push('no Factory-Item: trailer');
   for (const item of items)

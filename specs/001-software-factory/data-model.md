@@ -93,7 +93,9 @@ decide what reaches main and the laptop.
 
 ## Approval record
 
-Signed text stored as a fenced block in an issue comment and as an event line.
+Signed text stored as a fenced block in an issue comment, and only there: the dispatcher never
+copies records into `events.jsonl`, which is telemetry, and a record verifies wherever it lives
+(Owner decision 2026-10-07).
 
 ```text
 factory-approve/v1
@@ -319,6 +321,15 @@ One JSON object per line in `specs/<feature>/events.jsonl` (pre-merge) or
 Append-only (R12). Only the log hook and the `log_event` tool add lines, and they fill `ts`
 themselves; the path guard denies every role direct writes to `events.jsonl` and
 `.factory/events/**`.
+
+Before the item branch exists, Intake posts its events as issue comments, each holding at most
+4 fenced ` ```factory-event ` blocks of one JSON Event (at most 4 KiB each). When the dispatcher
+creates the branch it copies, as the first lines of `events.jsonl`, each block that validates
+against this schema with `item` equal to the issue and `role` equal to `intake`, with every string
+field cleaned of Unicode `Cc`, `Cf`, `Zl` and `Zp` characters and `ts` set to the comment's GitHub
+time, never the block's. Only comments created before the branch exist are copied, each once by
+comment ID; a pass that finds the branch already there copies nothing. Signed records are never
+copied (§ Approval record). (Owner decision 2026-10-07.)
 
 **The event log is untrusted telemetry.** Agents with a shell run as the same user as the
 hooks, so neither the path guard nor the hook can guarantee who wrote a line or that `ts` is

@@ -35,7 +35,12 @@ const NONE: Evidence['owner'] = {
   'spec-approved': no('missing'),
   waiver: no('missing'),
 };
-const base: Evidence = { rotationPending: false, historySigned: true, owner: NONE };
+const base: Evidence = {
+  rotationPending: false,
+  historySigned: true,
+  owner: NONE,
+  intakeComplete: true,
+};
 /** Both Owner gates verify. */
 const gated: Evidence = {
   ...base,
@@ -71,6 +76,15 @@ describe('transition table rows (data-model.md § State machine)', () => {
     stays('new', base);
     stays('new', { ...base, owner: { ...NONE, approved: ok('approved', { branch: BRANCH }) } });
     stays('new', { ...base, owner: { ...NONE, approved: no('stale') } });
+  });
+
+  it('new → triaged waits until Intake’s output check passes (AC-009)', () => {
+    const owned = { ...base, owner: { ...NONE, approved: approved() } };
+    expect(next('new', { ...owned, intakeComplete: false })).toMatchObject({
+      ok: false,
+      reason: expect.stringMatching(/Intake/) as string,
+    });
+    stays('new', { rotationPending: false, historySigned: true, owner: owned.owner });
   });
 
   it('new → triaged waits while a proposed tier: is above the confirmed tier (AC-009)', () => {
