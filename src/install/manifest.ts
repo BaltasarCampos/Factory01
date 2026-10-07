@@ -30,6 +30,13 @@ export function isHashed(path: string): boolean {
   return HASHED_FILES.includes(p) || HASHED_DIRS.some((dir) => p.startsWith(`${dir}/`));
 }
 
+/** True for a hashed path or a folder holding one: a symlink there would redirect the guards. */
+export function coversHashed(path: string): boolean {
+  const p = normalise(path);
+  const roots = [...HASHED_DIRS, ...HASHED_FILES];
+  return isHashed(p) || roots.some((root) => root === p || root.startsWith(`${p}/`));
+}
+
 /** True for every path an item or Define pull request may not touch. */
 export function isProtected(path: string): boolean {
   const p = normalise(path);

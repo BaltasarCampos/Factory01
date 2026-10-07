@@ -15,7 +15,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
-import { buildManifest, isHashed } from '../../install/manifest.js';
+import { buildManifest, coversHashed } from '../../install/manifest.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
 import { configOnMain } from '../../model/config.js';
 import type { GuardrailManifest, ReleasePin } from '../../model/types.js';
@@ -157,19 +157,26 @@ export class LocalLauncher implements SessionLauncher {
     }
   }
 
-  /** The protected files of main's tree, by path; a symlink or submodule there is tampering. */
-  private mainFiles(): { found: Record<string, string>; settings?: Buffer } | Unavailable {
-    const { project, mainRef = 'origin/main', env } = this.options;
+  /**
+   * The protected files of the tree at `ref` in `dir`, by path. A symlink or submodule at a
+   * protected path, or at a folder holding one (`.claude`, `.github`), is tampering: it would
+   * point the session's writes elsewhere, such as the Owner's clone.
+   */
+  private treeFiles(
+    dir: string,
+    ref: string,
+    where: string,
+  ): { found: Record<string, string>; settings?: Buffer } | Unavailable {
     const found: Record<string, string> = {};
     let settings: Buffer | undefined;
-    const tree = this.git(project, ['ls-tree', '-r', '-z', mainRef]).split('\0');
+    const tree = this.git(dir, ['ls-tree', '-r', '-z', ref]).split('\0');
     for (const entry of tree.filter((e) => e !== '')) {
       const [meta = '', path = ''] = entry.split('\t');
-      if (!isHashed(path)) continue;
+      if (!coversHashed(path)) continue;
       const [mode, , oid = ''] = meta.split(' ');
       if (mode !== '100644' && mode !== '100755')
-        return { ok: false, urgent: true, reason: `main: ${path} is not a regular file` };
-      const blob = spawnSync('git', ['cat-file', 'blob', oid], { cwd: project, env });
+        return { ok: false, urgent: true, reason: `${where}: ${path} is not a regular file` };
+      const blob = spawnSync('git', ['cat-file', 'blob', oid], { cwd: dir, env: this.options.env });
       found[path] = sha256(blob.stdout);
       if (path === SETTINGS) settings = blob.stdout;
     }
@@ -179,13 +186,16 @@ export class LocalLauncher implements SessionLauncher {
   async available(): Promise<Availability> {
     const manifest = this.manifest();
     if ('ok' in manifest) return manifest;
-    const main = this.mainFiles();
+    const { project, mainRef = 'origin/main' } = this.options;
+    const main = this.treeFiles(project, mainRef, 'main');
     if ('ok' in main) return main;
     const guardrails = guardrailCheck(main.found, main.settings, manifest, 'main');
     if (!guardrails.ok) return guardrails;
     try {
-      const { project, env } = this.options;
-      const result = await this.run('claude', ['--version'], { cwd: project, env });
+      const result = await this.run('claude', ['--version'], {
+        cwd: project,
+        env: this.options.env,
+      });
       return result.status === 0 ? { ok: true } : { ok: false, reason: 'claude --version failed' };
     } catch {
       return { ok: false, reason: 'claude is not installed' };
@@ -235,6 +245,12 @@ export class LocalLauncher implements SessionLauncher {
       const manifest = this.manifest();
       if ('ok' in manifest) throw new LaunchRefused(manifest.reason, manifest.urgent);
       const cwd = this.clone(request.branch);
+      // The tree first: a symlinked `.claude` would pass a walk of the files it points at.
+      const tree = this.treeFiles(cwd, 'HEAD', request.branch);
+      const committed =
+        'ok' in tree ? tree : guardrailCheck(tree.found, tree.settings, manifest, request.branch);
+      if (!committed.ok && committed.urgent === true)
+        throw new LaunchRefused(`no local session started: ${committed.reason}`, true);
       let found: Record<string, string>;
       try {
         found = buildManifest(cwd, { tag: manifest.release, sha: manifest.commit }).files;

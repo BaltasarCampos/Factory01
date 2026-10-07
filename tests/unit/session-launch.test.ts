@@ -1,4 +1,4 @@
-import { existsSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { runLoop } from '../../src/commands/run.js';
@@ -157,6 +157,27 @@ describe('LocalLauncher (research R8, R9)', () => {
     const launch = t.launcher.launch(REQUEST);
 
     await expect(launch).rejects.toThrow(LaunchRefused);
+    await expect(launch).rejects.toMatchObject({ urgent: true });
+    expect(t.sessions()).toEqual([]);
+  });
+
+  it('refuses the launch, urgent, when the branch makes .claude a symlink to a folder with the right files', async () => {
+    const t = setup();
+    // The right files elsewhere, e.g. the Owner's clone: the hashes would match through the link.
+    const target = tempDir('factory-target-');
+    mkdirSync(join(target, 'agents'));
+    writeFileSync(join(target, 'settings.json'), HOOKED_SETTINGS);
+    writeFileSync(join(target, 'agents', 'define.md'), DEFINE_ROLE);
+    t.repo.checkout(BRANCH);
+    t.repo.git(['rm', '-q', '-r', '.claude']);
+    symlinkSync(target, join(t.repo.path, '.claude'));
+    t.repo.commit({}, 'link .claude');
+    t.repo.push(BRANCH);
+    t.repo.checkout('main');
+
+    const launch = t.launcher.launch(REQUEST);
+
+    await expect(launch).rejects.toThrow(/\.claude is not a regular file/);
     await expect(launch).rejects.toMatchObject({ urgent: true });
     expect(t.sessions()).toEqual([]);
   });
