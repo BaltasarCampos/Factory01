@@ -34,6 +34,8 @@ export interface Evidence {
   historySigned: boolean;
   /** `verifyGate` verdicts per `owner:` gate; a gate without its label is `missing`. */
   owner: Record<OwnerGate, Verdict>;
+  /** Intake's output check passes with the confirmed tier (src/stations/checks/intake.ts). */
+  intakeComplete?: boolean;
   /** The highest `tier:` label on the issue; above the confirmed tier, it holds `new`. */
   proposedTier?: Tier;
   /** An agent's question to the Owner is open on the issue. */
@@ -164,7 +166,8 @@ function forward(state: State, e: Evidence): Decision {
         return stay(
           `tier:${String(proposed)} is above the confirmed tier ${String(confirmed)}; waits for factory approve --tier ${String(proposed)}`,
         );
-      return move('triaged', 'owner:approved verified');
+      if (!e.intakeComplete) return stay("Intake's output check does not pass");
+      return move('triaged', 'owner:approved verified, Intake done');
     }
     case 'triaged':
       if (!e.specComplete) return stay('spec.md is not complete');

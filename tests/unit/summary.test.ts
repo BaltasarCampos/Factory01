@@ -407,4 +407,24 @@ describe('item trace (AC-017)', () => {
     ]);
     expect(trace({ ...ITEM_TRACE, commits }).untrailered).toHaveLength(5);
   });
+
+  it('AC-017: accepts Factory-Role: dispatcher only on commits limited to the files the dispatcher writes', () => {
+    const dir = `specs/${FEATURE}`;
+    const commit = (sha: string, paths?: string[]) => ({
+      sha: sha.repeat(20),
+      message: `Dispatcher: ${sha}${trailers('dispatcher')}`,
+      parents: 1,
+      ...(paths === undefined ? {} : { paths }),
+    });
+    const commits = [
+      commit('a1', ['.specify/feature.json', `${dir}/events.jsonl`]),
+      commit('b2', [`${dir}/.station.json`]),
+      commit('c3', [`${dir}/.station.json`, 'src/login.ts']),
+      commit('d4'),
+    ];
+    expect(untrailered(commits, FEATURE)).toEqual([
+      `c3c3c3c3c3c3 Dispatcher: c3: Factory-Role: dispatcher on a commit that changes src/login.ts`,
+      `d4d4d4d4d4d4 Dispatcher: d4: Factory-Role: dispatcher on a commit whose changed files are unknown`,
+    ]);
+  });
 });

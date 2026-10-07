@@ -272,7 +272,7 @@ model · 5 transition table · 6a `gh` wrapper + GitHub helpers · 6b Owner inbo
 hook entry · 8 dispatcher core · 9 `approve`/`pause`/`resume` · 10 `factory release` + tag
 verification · 11a install steps (manifest, render, labels, inbox) · 11b `new`/`adopt` ·
 12 Define + profile skeleton · 13 factory copies · 14 station checks · 15 summary, trace, edge
-rules · 15b admission by approval, criterion lines, `resume` summary · 16 item branch, draft PR, launchers · 17 MCP server · 18a safe diff + append-only ·
+rules · 15b admission by approval, criterion lines, `resume` summary · 16a item branch, draft PR, evidence · 16b launchers, `dispatch`/`run` · 17 MCP server · 18a safe diff + append-only ·
 18b coverage, size, ac-map · 19a red-green · 19b release-shipped CI + workflows · 20 signed
 main history + `config set` · 21 merge rules · 21b `test:` waivers · 22 `factory merge` · 23 `factory deploy` +
 backups · 24 role files + station prompts · 25a role policy + settings · 25b tokenizer ·

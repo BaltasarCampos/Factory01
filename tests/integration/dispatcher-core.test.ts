@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { symlinkSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import {
@@ -18,6 +18,9 @@ import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeIssue } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, mergeBrief, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+
+// A pass that admits an item now creates and pushes its branch: more than the default 5 s.
+vi.setConfig({ testTimeout: 60_000 });
 
 const REPO = 'owner/project';
 const INBOX = 1;
@@ -178,7 +181,7 @@ function setup(items: ItemSeed[], options: Setup = {}) {
     keysFor: () => keys,
     secondCopy: options.secondCopy?.() ?? owner.publicKey,
     historySigned: () => Promise.resolve(true),
-    gatherEvidence: () => Promise.resolve({ needsSession: true }),
+    gatherEvidence: () => Promise.resolve({ needsSession: true, intakeComplete: true }),
     launchers: { cloud, local },
     logEvent: (n, event) => {
       logged.push([n, event]);

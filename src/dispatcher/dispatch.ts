@@ -6,13 +6,14 @@
 // The dispatcher is itself an agent session with a shell, so its decisions are advisory
 // (data-model.md § State machine): only signed records, signed commits and the laptop's checks
 // decide what reaches main. Station evidence (T060) and the signed-history audit (T139) are
-// supplied by the caller. Nothing is admitted before main has the Owner-signed Define merge, and
+// supplied by the caller. On `new → triaged` the pass creates the item branch, and before a
+// session on it (stations 2–6) it opens the item's one draft PR and commits `.station.json`. Nothing is admitted before main has the Owner-signed Define merge, and
 // when main's key lists or `git verify-commit` cannot be read or run the pass admits nothing,
 // moves nothing and alerts the Owner.
 import { checkSecondCopy, type KeyCheck, type ReleaseKeys } from '../approvals/keys.js';
 import { verifyGate, type PostedComment, type Verdict } from '../approvals/verify.js';
 import { RefusedError } from '../cli/env.js';
-import { briefMerged, verifiedMerges } from '../git/merges.js';
+import { briefMerged, verifiedMerges, type MainMerges } from '../git/merges.js';
 import { listComments } from '../github/comments.js';
 import type { GhOptions } from '../github/gh.js';
 import { addLabel, removeLabel } from '../github/labels.js';
@@ -33,8 +34,10 @@ import {
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
+import { createItemBranch, ensureDraftPr, type ItemRef } from './branch.js';
 import { selectLauncher } from './launcher/select.js';
 import type { Launchers } from './launcher/types.js';
+import { writeStationManifest } from './manifest.js';
 import {
   nextTransition,
   ownerBasisMissing,
@@ -57,6 +60,8 @@ export interface Candidate {
   state: State;
   /** The branch named by the verified `owner:approved` record. */
   branch?: string;
+  /** The tier that record confirms. */
+  tier?: Tier;
 }
 
 export type DispatchEvent = Pick<Event, 'kind' | 'station' | 'gate' | 'pass' | 'evidence'>;
@@ -71,10 +76,16 @@ export interface DispatchContext {
   secondCopy: string | undefined;
   previousNewest?: string;
   historySigned: (config: ProjectConfig) => Promise<boolean>;
-  gatherEvidence: (item: Candidate, config: ProjectConfig) => Promise<StationEvidence>;
+  gatherEvidence: (
+    item: Candidate,
+    config: ProjectConfig,
+    main: MainMerges,
+  ) => Promise<StationEvidence>;
   launchers: Launchers;
   /** Records an event for the item; where it is written is the caller's choice. */
   logEvent: (issue: number, event: DispatchEvent) => Promise<void>;
+  /** The clock for `.station.json`'s `issued_at`; default the system clock. */
+  now?: () => Date;
   gh?: GhOptions;
 }
 
@@ -165,10 +176,11 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   let keys: ReleaseKeys;
   let keyCheck: KeyCheck;
   let brief: boolean;
+  let history: MainMerges;
   try {
     keys = ctx.keysFor(config.factory_release);
     keyCheck = checkSecondCopy(keys, ctx.secondCopy, ctx.previousNewest);
-    const history = verifiedMerges(ctx.projectDir, keys, {
+    history = verifiedMerges(ctx.projectDir, keys, {
       ref: ctx.mainRef ?? 'origin/main',
       baseline: config.baseline,
     });
@@ -195,7 +207,10 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     return { ...result, halted: 'main has a first-parent commit not signed by the Owner' };
   if (pause.line) return { ...result, halted: 'pause:line in effect' };
 
-  let target: { item: Candidate; station: Station; branch: string } | undefined;
+  const git = { projectDir: ctx.projectDir, now: ctx.now ?? (() => new Date()) };
+  const mainRef = ctx.mainRef ?? 'origin/main';
+  type Target = { item: Candidate; station: Station; branch: string; comments: PostedComment[] };
+  let target: Target | undefined;
   for (const issue of await listOpenIssues(repo, options)) {
     if (issue.number === config.inbox_issue) continue;
     const comments: PostedComment[] = await listComments(repo, issue.number, options);
@@ -224,9 +239,12 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       issue,
       state: status.state,
       ...(approved.ok && approved.record.branch ? { branch: approved.record.branch } : {}),
+      ...(approved.ok && approved.record.tier ? { tier: approved.record.tier } : {}),
     };
     const gather = async (): Promise<StationEvidence> =>
-      why === undefined && !FINAL.includes(item.state) ? ctx.gatherEvidence(item, config) : {};
+      why === undefined && !FINAL.includes(item.state)
+        ? ctx.gatherEvidence(item, config, history)
+        : {};
     let found = await gather();
     const verdicts = {
       approved,
@@ -266,6 +284,8 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
           evidence: decision.reason,
         });
       }
+      if (from === 'new' && decision.to === 'triaged' && item.branch !== undefined)
+        createItemBranch(git, { issue: issue.number, branch: item.branch }, comments, mainRef);
       item.state = decision.to;
       found = await gather();
     }
@@ -275,11 +295,11 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     if (!found.needsSession || pause.stations.has(at)) continue;
     if (ownerBasisMissing(item.state, evidence()) !== undefined) continue;
     const branch = at === 1 ? 'main' : at === 7 ? 'claude/factory-log' : item.branch;
-    if (branch !== undefined) target = { item, station: at, branch };
+    if (branch !== undefined) target = { item, station: at, branch, comments };
   }
 
   if (target === undefined) return result;
-  const { item, station, branch } = target;
+  const { item, station, branch, comments } = target;
   let launcher;
   try {
     launcher = selectLauncher(config, ctx.launchers);
@@ -292,6 +312,12 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   if (!(await launcher.available()))
     return { ...result, refused: `the ${launcher.mode} launcher is unavailable` };
   const role = ROLE_AT[station];
+  if (station >= 2 && station <= 6) {
+    const ref: ItemRef = { issue: item.issue.number, branch };
+    createItemBranch(git, ref, comments, mainRef);
+    await ensureDraftPr(repo, { ...ref, title: item.issue.title }, options);
+    writeStationManifest(git, ref, { station, role });
+  }
   const prompt = `Station ${String(station)} (${STATIONS[station]}) for ${repo}#${String(item.issue.number)} on branch ${branch}.`;
   const { sessionId } = await launcher.launch({
     role,

@@ -28,6 +28,10 @@ nonce: 9f2c1e0a7b4d4e8f8a1b2c3d4e5f6a7b
 ```
 ````
 
+The record lives only in this comment. It is never copied into the item's `events.jsonl`: the
+event log is untrusted telemetry, and the record verifies from the comment (Owner decision
+2026-10-07).
+
 ## Verification algorithm (dispatcher and laptop share `src/approvals/verify.ts`)
 
 1. Extract record and signature blocks; reject if either is missing or malformed.

@@ -52,6 +52,8 @@ needed to stay near 400.
 | 14 Station output checks | T048–T049, T057 | 350 | 350 | 700 | 2 |
 | 15 Summary, trace, edge rules | T054–T055, T058, T067 | 350 | 350 | 700 | 2 |
 | 16 Item branch, launchers, `dispatch`/`run` | T050, T059–T062 | 500 | 400 | 900 | 3 |
+| 16a (split 2026-10-07; slice 16 measured ~1,440) | T050, T059, T060 | — | — | ~890 | — |
+| 16b | T061, T062 | — | — | ~550 | — |
 | 17 MCP server | T056, T063 | 250 | 250 | 500 | 2 |
 | 18 Safe diff + CI checks | T133, T138, T051–T052, T065 | 650 | 600 | 1,250 | 4 |
 | 19 Red-green, release CI, workflows | T135–T136, T140–T141, T066 | 850 | 500 | 1,350 | 4 |
