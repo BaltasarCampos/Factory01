@@ -26,7 +26,11 @@ export interface EvidenceContext {
   gh?: GhOptions;
 }
 
-/** The `ci / red-green` job's check run on `sha`: undefined until it has completed. */
+/**
+ * The `ci / red-green` job's check run on `sha`: the `red-green` run of the GitHub Actions app,
+ * undefined until it has completed. Advisory only: a workflow edited on the item branch could
+ * report a run with this name, so `factory merge` runs its own checks and decides (T068).
+ */
 async function redGreen(repo: string, sha: string, options: GhOptions) {
   let out: unknown;
   try {
@@ -40,7 +44,10 @@ async function redGreen(repo: string, sha: string, options: GhOptions) {
   }
   const runs = (out as { check_runs?: unknown }).check_runs;
   const run = (Array.isArray(runs) ? (runs as Record<string, unknown>[]) : []).findLast(
-    (r) => r.name === 'red-green' && r.status === 'completed',
+    (r) =>
+      r.name === 'red-green' &&
+      r.status === 'completed' &&
+      (r.app as { slug?: unknown } | null | undefined)?.slug === 'github-actions',
   );
   return run === undefined ? undefined : { head: sha, green: run.conclusion === 'success' };
 }

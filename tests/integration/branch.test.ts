@@ -5,12 +5,13 @@ import { sign } from '../../src/approvals/sign.js';
 import { createItemBranch } from '../../src/dispatcher/branch.js';
 import { dispatchOnce, type DispatchContext } from '../../src/dispatcher/dispatch.js';
 import { gatherEvidence } from '../../src/dispatcher/evidence.js';
-import { writeStationManifest } from '../../src/dispatcher/manifest.js';
+import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
+import { configOnMain } from '../../src/model/config.js';
 import { STATES, STATIONS, type ApprovalRecord, type Tier } from '../../src/model/types.js';
 import { FakeClock } from '../helpers/fake-clock.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeComment } from '../helpers/fake-gh.js';
-import { makeRepo, mergeBrief, type TestRepo } from '../helpers/git-repo.js';
+import { makeRepo, mergeBrief, mergeIntoMain, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
 const REPO = 'owner/project';
@@ -145,14 +146,30 @@ const seededLines = (t: ReturnType<typeof setup>) =>
     .map((l) => JSON.parse(l) as Record<string, unknown>);
 
 /** Add a canned `ci / red-green` check run for a commit to the fake GitHub. */
-function checkRun(sha: string, conclusion: 'success' | 'failure') {
+function checkRun(
+  sha: string,
+  conclusion: 'success' | 'failure' | null,
+  run: { status?: string; app?: string } = {},
+) {
   const state = readState();
   const repo = state.repos[REPO];
   if (repo === undefined) throw new Error('no repo');
+  const { status = 'completed', app = 'github-actions' } = run;
   repo.api[`repos/${REPO}/commits/${sha}/check-runs`] = {
     total_count: 1,
-    check_runs: [{ name: 'red-green', head_sha: sha, status: 'completed', conclusion }],
+    check_runs: [{ name: 'red-green', head_sha: sha, status, conclusion, app: { slug: app } }],
   };
+  seedState(state, process.env.FAKE_GH_STATE);
+}
+
+/** Change the fake GitHub's state in place. */
+function editState(
+  edit: (repo: NonNullable<ReturnType<typeof readState>['repos'][string]>) => void,
+) {
+  const state = readState();
+  const repo = state.repos[REPO];
+  if (repo === undefined) throw new Error('no repo');
+  edit(repo);
   seedState(state, process.env.FAKE_GH_STATE);
 }
 
@@ -378,5 +395,187 @@ describe('building → verifying (AC-012)', { timeout: 60_000 }, () => {
     t.project.checkout('main');
 
     expect((await dispatchOnce(t.ctx)).moves).toEqual([]);
+  });
+});
+
+const SPEC = [
+  '# Add login',
+  '## Problem',
+  'Visitors cannot sign in.',
+  '## Non-goals',
+  '- Social login.',
+  '## Affected areas',
+  '- src/login.ts',
+  '### Acceptance Scenarios',
+  '1. **AC-001** Given a visitor, When they sign in, Then they see the home page.',
+  '',
+].join('\n');
+const FEATURE_JSON = { '.specify/feature.json': `{"feature_directory": "${FEATURE}"}\n` };
+
+describe('station evidence (T060)', { timeout: 60_000 }, () => {
+  type State = Parameters<ReturnType<typeof gatherEvidence>>[0]['state'];
+  /** T060's evidence for the item in `state`, read the way the dispatcher reads it. */
+  const gather = (
+    t: ReturnType<typeof setup>,
+    state: State,
+    over: { merged?: boolean; branch?: string | null; tier?: Tier | null } = {},
+  ) => {
+    const issue = { number: ISSUE, title: 'Add login', author: 'owner', body: '', labels: [] };
+    const branch = over.branch === undefined ? BRANCH : over.branch;
+    const tier = over.tier === undefined ? 2 : over.tier;
+    const item = {
+      issue,
+      state,
+      ...(branch === null ? {} : { branch }),
+      ...(tier === null ? {} : { tier }),
+    };
+    const merges = over.merged ? [{ commit: t.project.revParse('main'), value: '#2' }] : [];
+    const config = configOnMain(t.project.path);
+    return gatherEvidence({ projectDir: t.project.path })(item, config, {
+      lastVerified: undefined,
+      merges,
+    });
+  };
+  const tipOf = (t: ReturnType<typeof setup>) => t.project.git(['rev-parse', `origin/${BRANCH}`]);
+
+  it('reads a merged item from main once its branch is deleted', async () => {
+    const t = setup({ branch: { ...FEATURE_JSON, [`${FEATURE}/spec.md`]: SPEC } });
+    mergeIntoMain(t.project, BRANCH, '#2', { signWith: owner });
+    t.project.git(['push', '-q', 'origin', '--delete', BRANCH]);
+
+    const e = await gather(t, 'integrating', { merged: true });
+
+    expect(e).toMatchObject({ ownerMerge: true, specComplete: true, draftPr: false });
+    expect(e.specSha).toMatch(/^[0-9a-f]{40}$/);
+    expect(e.branchHead).toBeUndefined();
+  });
+
+  it('without the branch and without a merge, the station needs a session to create it', async () => {
+    const t = setup();
+    expect(await gather(t, 'triaged')).toEqual({ ownerMerge: false, needsSession: true });
+    expect(await gather(t, 'triaged', { branch: null })).toEqual({ ownerMerge: false });
+    expect(await gather(t, 'new', { tier: null })).toEqual({ ownerMerge: false });
+  });
+
+  it.each([
+    ['spec.md', { [`${FEATURE}/plan.md`]: '# Plan\n', [`${FEATURE}/tasks.md`]: '- [X] T001 a\n' }],
+    ['plan.md', { [`${FEATURE}/spec.md`]: SPEC, [`${FEATURE}/tasks.md`]: '- [X] T001 a\n' }],
+    ['tasks.md', { [`${FEATURE}/spec.md`]: SPEC, [`${FEATURE}/plan.md`]: '# Plan\n' }],
+  ])('with %s missing the plan is not complete', async (missing, files) => {
+    const t = setup({ branch: { ...FEATURE_JSON, ...files } });
+
+    const e = await gather(t, 'spec-approved');
+
+    expect(e).toMatchObject({ planComplete: false, needsSession: true });
+    expect(e.specComplete).toBe(missing !== 'spec.md');
+    expect(e.tasksDone).toBe(missing !== 'tasks.md');
+    expect('specSha' in e).toBe(missing !== 'spec.md');
+  });
+
+  it('counts no red-green run when the open PR’s head is not the branch tip', async () => {
+    const t = setup({ branch: FEATURE_JSON });
+    checkRun(tipOf(t), 'success');
+    editState((repo) => {
+      // Without the remote the fake GitHub keeps the PR head it was given: an older commit.
+      delete repo.origin;
+      repo.prs.push({
+        ...{ number: 9, title: '#2', body: '', author: 'owner', headRefName: BRANCH },
+        ...{ baseRefName: 'main', headRefOid: 'f'.repeat(40), isDraft: true, state: 'OPEN' },
+        ...{ comments: [], createdAt: BEFORE },
+      });
+    });
+
+    const e = await gather(t, 'building');
+
+    expect(e).toMatchObject({ draftPr: true, branchHead: tipOf(t) });
+    expect(e.redGreen).toBeUndefined();
+  });
+
+  it.each([
+    ['a run still in progress', null, { status: 'in_progress' }, undefined],
+    ['a run from another app', 'success', { app: 'some-ci-bot' }, undefined],
+    ['a failed run', 'failure', {}, false],
+    ['a passing run', 'success', {}, true],
+  ] as const)('reads %s on the PR head', async (_name, conclusion, run, green) => {
+    const t = setup({ branch: FEATURE_JSON });
+    editState((repo) => {
+      repo.prs.push({
+        ...{ number: 9, title: '#2', body: '', author: 'owner', headRefName: BRANCH },
+        ...{ baseRefName: 'main', headRefOid: '', isDraft: true, state: 'OPEN' },
+        ...{ comments: [], createdAt: BEFORE },
+      });
+    });
+    checkRun(tipOf(t), conclusion, run);
+
+    const e = await gather(t, 'building');
+
+    expect(e.redGreen).toEqual(green === undefined ? undefined : { head: tipOf(t), green });
+  });
+
+  it('a pending manifest for the same station starts no session; one for another station does not hold', async () => {
+    const t = setup();
+    await dispatchOnce(t.ctx); // creates the branch and the Specify (station 2) manifest
+
+    expect((await gather(t, 'triaged')).needsSession).toBe(false);
+    expect((await gather(t, 'spec-approved')).needsSession).toBe(true);
+  });
+
+  it('a session commit dressed as a manifest commit is not a pending manifest', async () => {
+    const t = setup({ branch: FEATURE_JSON });
+    t.project.checkout(BRANCH);
+    t.project.commit({ 'src/x.ts': 'x\n' }, 'Dispatcher: station 2 (spec) manifest');
+    t.project.push(BRANCH);
+    t.project.checkout('main');
+
+    expect((await gather(t, 'triaged')).needsSession).toBe(true);
+  });
+
+  it('reads the verify report and the Integrate conflict report', async () => {
+    const verify = ['| CI | pass |', '| Coverage | pass |', '- [ ] blocking: unsafe eval', ''];
+    const integrate = '## Conflicts\n\n- src/login.ts changes behaviour\n';
+    const t = setup({
+      branch: {
+        ...FEATURE_JSON,
+        [`${FEATURE}/reports/verify.md`]: verify.join('\n'),
+        [`${FEATURE}/reports/integrate.md`]: integrate,
+      },
+    });
+
+    const e = await gather(t, 'verifying');
+
+    expect(e).toMatchObject({ verifyReport: false, findingsResolved: false, needsSession: true });
+    expect(e.failure).toMatchObject({ station: 4 });
+  });
+});
+
+describe('station manifest (T059)', { timeout: 60_000 }, () => {
+  it('nextTask: no open task, and a Files list with parenthesised notes', () => {
+    expect(nextTask('- [X] T001 Done · Files: a.ts\n')).toBeUndefined();
+    const tasks = '- [ ] T004 Form · Files: `src/a.ts`, src/b.ts (shared with T005, T006), c.ts\n';
+    expect(nextTask(tasks)).toEqual({ task: 'T004', files: ['src/a.ts', 'src/b.ts', 'c.ts'] });
+    expect(nextTask('- [ ] T007 No list\n')).toEqual({ task: 'T007', files: [] });
+  });
+
+  it('a Builder manifest without tasks.md names no task, and a missing branch is refused', () => {
+    const t = setup({ branch: FEATURE_JSON });
+    const at = { projectDir: t.project.path, now: () => new Date('2026-10-01T11:00:00Z') };
+
+    const manifest = writeStationManifest(
+      at,
+      { issue: ISSUE, branch: BRANCH },
+      {
+        station: 4,
+        role: 'builder',
+      },
+    );
+
+    expect(manifest).not.toHaveProperty('task');
+    expect(() =>
+      writeStationManifest(
+        at,
+        { issue: 3, branch: 'claude/3-other' },
+        { station: 2, role: 'spec' },
+      ),
+    ).toThrow(/does not exist/);
   });
 });

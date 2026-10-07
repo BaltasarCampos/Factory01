@@ -1,15 +1,15 @@
 // One dispatcher pass (contracts/cli.md `factory dispatch`, FR-016f): read the config on main,
-// check the two copies of the Owner key, derive pause state, admit issues, verify every
-// `owner:` label, apply each item's transition through `state:` labels, and start at most one
-// session.
+// check the two copies of the Owner key, derive pause state, admit issues, verify every `owner:`
+// label, apply each item's transition through `state:` labels, and start at most one session.
 //
 // The dispatcher is itself an agent session with a shell, so its decisions are advisory
 // (data-model.md § State machine): only signed records, signed commits and the laptop's checks
 // decide what reaches main. Station evidence (T060) and the signed-history audit (T139) are
-// supplied by the caller. On `new → triaged` the pass creates the item branch, and before a
-// session on it (stations 2–6) it opens the item's one draft PR and commits `.station.json`. Nothing is admitted before main has the Owner-signed Define merge, and
-// when main's key lists or `git verify-commit` cannot be read or run the pass admits nothing,
-// moves nothing and alerts the Owner.
+// supplied by the caller. On `new → triaged` the pass creates the item branch, and before a session
+// on it (stations 2–6) it opens the item's one draft PR and commits `.station.json`. Nothing is
+// admitted before main has the Owner-signed Define merge, and when main's key lists or
+// `git verify-commit` cannot be read or run the pass admits nothing, moves nothing and alerts the
+// Owner.
 import { checkSecondCopy, type KeyCheck, type ReleaseKeys } from '../approvals/keys.js';
 import { verifyGate, type PostedComment, type Verdict } from '../approvals/verify.js';
 import { RefusedError } from '../cli/env.js';

@@ -290,7 +290,7 @@ fake clock and launcher; confirm it stops at gates, caps and pause and leaves su
 ### Implementation for User Story 5
 
 - [ ] T096 [US5] Retry and routing: count `gate_result` failures per station, route to the earliest fixing station from the failure report, escalate at `retry_limit` · Files: src/dispatcher/retry.ts
-- [ ] T097 [US5] Blocked / caps / usage: `state:blocked` handling and resume-to-prior-state, cap detection with a `cap` reason event and clean exit, usage-limit stop and escalation · Files: src/dispatcher/limits.ts (gap recorded 2026-10-07, slice 16a: T060's evidence has no `questionOpen` yet; this task supplies it, from an agent question open on the issue, so `→ blocked` and the resume can happen)
+- [ ] T097 [US5] Blocked / caps / usage: `state:blocked` handling and resume-to-prior-state, cap detection with a `cap` reason event and clean exit, usage-limit stop and escalation · Files: src/dispatcher/limits.ts (gap recorded 2026-10-07, slice 16a: T060's evidence has no `questionOpen` yet; this task supplies it, from an agent question open on the issue, so `→ blocked` and the resume can happen) (Owner decision 2026-10-07, stalled sessions: a pending `.station.json` on the branch tip older than a stale limit counts as stale; the dispatcher then relaunches the station, counts the stale session towards `retry_limit` and raises one alert, so a session that died without pushing cannot stall an item forever. Test, with T094's cases in `tests/integration/dispatcher.test.ts`: "a pending .station.json older than the stale limit is relaunched, counted towards retry_limit and alerted once")
 - [ ] T098 [US5] Pause enforcement: routine exits at once on `pause:line`, station-pause waits, restore removed labels + alert; `advance_item` consults `derivePause` · Files: src/dispatcher/pause-enforce.ts, src/mcp/tools/advance-item.ts
 - [ ] T099 [US5] `pre-compact` hook (log, request split, instruct stop) · Files: src/hooks/pre-compact.ts, src/commands/hook.ts
 - [ ] T100 [US5] Launcher fallback to local when cloud is unavailable; parallel limit from `parallel_sessions` in main's config; per-issue summary comment after each run; integrate T096–T098 into `dispatchOnce` and `factory run` · Files: src/dispatcher/launcher/select.ts, src/dispatcher/dispatch.ts, src/commands/run.ts (gap recorded 2026-10-07, slice 16a: a launch is recorded before it starts, so no item gets two sessions at once once cloud sessions run; today only item-branch stations have a marker, the dispatcher's `.station.json` commit on the branch tip, and Intake, on main, has none. The running-session signal stays telemetry: it may prevent a second launch, never decide a merge)
@@ -546,7 +546,7 @@ when its last part lands.
 | 15 | T054–T055, T058, T067 | Summary, trace, station edge rules (1,146, accepted over the limit; not merged alone: its AC-058 test locks in the wrong behaviour) | ~700 |
 | 15-fix | T054–T055, T058, T067 (fix-ups from the Owner's review, 2026-10-05), T042 (constitution 2.7.0 copy) | Merged items move on; verified test-waiver targets; inverted T140 test; Unicode-category cleaning; one commit per approval; per-gate summary for `approve`; trace for review only. Own PR `claude/slice-15-fixup`, stacked on slice 15; the Owner merges the two back to back | ~700 (measured 1,068: 546 source, 522 tests; 1,264 with the constitution copy; accepted over the limit by the Owner on 2026-10-06 once the second review's fixes were in; those add 337 and the third review's 213, for about 1,814 in all, accepted by the Owner on 2026-10-06) |
 | 15b | T152–T156, T157 file changes | Admission by approval only, brief-merged rule, Intake tier rule, criterion-line parser, `resume` summary, helpers only where they can weaken an existing test | ~650 |
-| 16a | T050, T059, T060 | Item branch, `factory-event` copy, draft PR, station manifest, station evidence, Intake guard, `dispatcher` trailer (slice 16 measured ~1,440 and was split in two on 2026-10-07) | ~890 |
+| 16a | T050, T059, T060 | Item branch, `factory-event` copy, draft PR, station manifest, station evidence, Intake guard, `dispatcher` trailer (slice 16 measured ~1,440 and was split in two on 2026-10-07; measured 882, then 1,104 with the review's evidence and manifest tests, accepted over the limit by the Owner on 2026-10-07) | ~890 |
 | 16b | T061, T062 | Launchers (cloud unavailable until T125), `dispatch`/`run` | ~550 |
 | 17 | T056, T063 | MCP server | ~500 |
 | 18a | T133, T138, T052; the append-only part of T065 | Safe diff + `factory ci append-only` | ~600 |
@@ -558,7 +558,7 @@ when its last part lands.
 | 21b | T151 | `test:` waiver targets, range-diff re-sign | ~350 |
 | 22 | T068; T053 merge cases (AC-014, AC-073, AC-078, AC-088) | `factory merge` | ~750 |
 | 23 | T069, T129–T130, T160; T053 deploy cases (AC-015, AC-073, AC-087) | `factory deploy` + backups, release evidence | ~800 |
-| 24 | T070–T072, T159 | Role files + station prompts, Define started by `new`/`adopt` | ~950 |
+| 24 | T070–T072, T159 | Role files + station prompts, Define started by `new`/`adopt` (near the limit: split it when we get there, Owner 2026-10-07) | ~950 |
 | 25a | T074, T081, T082 | Role policy + settings generator | ~650 |
 | 25b | T076, T083 | Command tokenizer | ~600 |
 | 25c | T075, T084, T085 | Command, path and read guards | ~850 |
