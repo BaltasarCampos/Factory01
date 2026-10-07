@@ -19,7 +19,7 @@ import { STATIONS, type ApprovalRecord } from '../../src/model/types.js';
 import { derivePause, resumeEntries } from '../../src/pause/derive.js';
 import { calls, readState, seedState, type FakeIssue, type FakePr } from '../helpers/fake-gh.js';
 import { FakeClock } from '../helpers/fake-clock.js';
-import { makeRepo, type TestRepo } from '../helpers/git-repo.js';
+import { makeRepo, mergeBrief, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
 const REPO = 'owner/project';
@@ -137,6 +137,8 @@ interface Setup {
   revoke?: 'owner' | 'old';
   /** Main pins a release the factory clone does not have. */
   unknownRelease?: boolean;
+  /** Main has no Owner-signed `Factory-Merge: define` yet. */
+  briefUnmerged?: boolean;
   project?: (repo: TestRepo) => void;
 }
 
@@ -164,7 +166,8 @@ function setup(options: Setup = {}) {
     },
   });
   const pin = options.unknownRelease ? 'a'.repeat(40) : factory.revParse('HEAD');
-  const project = makeRepo({ files: { '.factory/config': config(pin) } });
+  const project = makeRepo({ files: { '.factory/config': config(pin) }, signWith: owner });
+  if (!options.briefUnmerged) mergeBrief(project, { signWith: owner });
   options.project?.(project);
   const home = tempDir('factory-home-');
   mkdirSync(join(home, '.factory', 'keys'), { recursive: true });
@@ -245,6 +248,18 @@ describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
     expect(order.indexOf('issue comment')).toBeLessThan(order.indexOf('issue edit'));
     const ledger = readFileSync(nonceLedgerPath(t.home), 'utf8');
     expect(ledger).toContain(`${t.posted(ITEM).nonce} ${REPO}#7/`);
+  });
+
+  it('approve <issue> warns while main has no Owner-signed Factory-Merge: define, and still signs (AC-006)', async () => {
+    const t = setup({ briefUnmerged: true });
+
+    const r = await t.cli(['approve', String(ITEM)]);
+
+    expect(r.code).toBe(0);
+    expect(r.stderr).toMatch(
+      /^warning: main has no Owner-signed Factory-Merge: define.*admits no item/m,
+    );
+    expect(t.issue(ITEM).labels).toContain('owner:approved');
   });
 
   it('approve <issue> --tier 1 confirms a tier other than the proposed one', async () => {
@@ -576,6 +591,84 @@ describe('factory pause and resume (AC-077)', () => {
     const state = await pauseState();
     expect(state.line).toBe(true);
     expect(state.stations.size).toBe(0);
+  });
+
+  const alert = (id: number, at: string, text: string) => ({
+    id,
+    author: 'owner',
+    createdAt: at,
+    body: `<!-- factory-alert id=01J9Z8X7W6V5T4S3R2Q1P0N${String(id)} urgency=urgent kind=tampering -->\n\n${text}\n`,
+  });
+
+  it('resume shows what was paused, when and by whom, the alerts raised during it and the items whose state changed since (AC-096)', async () => {
+    const t = setup({
+      inbox: {
+        labels: ['pause:line'],
+        events: [{ ...labeled('pause:line', '2026-10-02T08:59:00Z'), actor: { login: 'ops-bot' } }],
+        comments: [
+          alert(101, '2026-10-02T08:00:00Z', 'an alert from before the pause'),
+          alert(102, '2026-10-02T08:59:30Z', 'a secret in the logs'),
+        ],
+      },
+      issues: [
+        {
+          number: ITEM,
+          title: 'Add login',
+          labels: ['state:building'],
+          events: [
+            labeled('state:triaged', '2026-10-02T08:00:00Z'),
+            labeled('state:building', '2026-10-02T08:59:40Z'),
+          ],
+        },
+        {
+          number: 8,
+          title: 'Old work',
+          createdAt: '2026-10-02T08:05:00Z',
+          labels: ['state:done'],
+          events: [labeled('state:done', '2026-10-02T08:10:00Z')],
+        },
+      ],
+    });
+
+    const r = await t.cli(['resume']);
+
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain('Approval summary for #1 (resume)');
+    expect(r.stdout).toMatch(/pause:line added at 2026-10-02T08:59:00Z by ops-bot/);
+    expect(r.stdout).toMatch(/urgent tampering: a secret in the logs/);
+    expect(r.stdout).not.toMatch(/before the pause/);
+    expect(r.stdout).toMatch(/#7 Add login: state:building/);
+    expect(r.stdout).not.toMatch(/#8/);
+    // Only issues updated since the pause are read, so #8's timeline is never fetched.
+    const list = calls().find((c) => c[0] === 'issue' && c[1] === 'list');
+    expect(list).toEqual(expect.arrayContaining(['--search', 'updated:>=2026-10-02T08:59:00Z']));
+    expect(calls().some((c) => c.some((a) => a.includes('/issues/8/timeline')))).toBe(false);
+    // What changed lists the items; Known risks holds the pause and its alerts (data-model).
+    const changed = r.stdout.slice(
+      r.stdout.indexOf('What changed'),
+      r.stdout.indexOf('Spec mapping'),
+    );
+    expect(changed).toMatch(/#7 Add login: state:building/);
+    const risks = r.stdout.slice(r.stdout.indexOf('Known risks'), r.stdout.indexOf('Signing for'));
+    expect(risks).toMatch(/pause:line added at 2026-10-02T08:59:00Z by ops-bot \(GitHub\)/);
+    expect(risks).toMatch(/urgent tampering: a secret in the logs/);
+    expect(r.stdout.indexOf('Known risks')).toBeLessThan(r.stdout.indexOf('Signing for'));
+  });
+
+  it('resume refuses, signing nothing, when it cannot read what changed during the pause (AC-096)', async () => {
+    const t = setup({
+      inbox: paused('2026-10-02T08:59:00Z'),
+      issues: [
+        { number: ITEM, title: 'Add login', events: [labeled('state:building', 'not a time')] },
+      ],
+    });
+
+    const r = await t.cli(['resume']);
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/cannot read/);
+    expect(t.issue(INBOX).comments).toEqual([]);
+    expect(t.issue(INBOX).labels).toEqual(['pause:line']);
   });
 
   it('resume refuses a scope that was never paused', async () => {

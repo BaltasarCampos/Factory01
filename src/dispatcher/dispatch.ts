@@ -6,16 +6,18 @@
 // The dispatcher is itself an agent session with a shell, so its decisions are advisory
 // (data-model.md § State machine): only signed records, signed commits and the laptop's checks
 // decide what reaches main. Station evidence (T060) and the signed-history audit (T139) are
-// supplied by the caller.
-import { spawnSync } from 'node:child_process';
-import { checkSecondCopy, type ReleaseKeys } from '../approvals/keys.js';
+// supplied by the caller. Nothing is admitted before main has the Owner-signed Define merge, and
+// when main's key lists or `git verify-commit` cannot be read or run the pass admits nothing,
+// moves nothing and alerts the Owner.
+import { checkSecondCopy, type KeyCheck, type ReleaseKeys } from '../approvals/keys.js';
 import { verifyGate, type PostedComment, type Verdict } from '../approvals/verify.js';
 import { RefusedError } from '../cli/env.js';
+import { briefMerged, verifiedMerges } from '../git/merges.js';
 import { listComments } from '../github/comments.js';
 import type { GhOptions } from '../github/gh.js';
 import { addLabel, removeLabel } from '../github/labels.js';
 import { timeline } from '../github/timeline.js';
-import { parseConfig } from '../model/config.js';
+import { configOnMain } from '../model/config.js';
 import {
   STATES,
   STATIONS,
@@ -26,11 +28,11 @@ import {
   type RoleName,
   type State,
   type Station,
+  type Tier,
 } from '../model/types.js';
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
-import { seedLists } from '../stations/checks/define.js';
-import { listOpenIssues, notAdmitted, ownerLogin, type IssueSummary } from './admission.js';
+import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
 import { selectLauncher } from './launcher/select.js';
 import type { Launchers } from './launcher/types.js';
 import {
@@ -126,15 +128,6 @@ const ROLE_AT: Readonly<Record<Station, RoleName>> = {
 const GATES: readonly OwnerGate[] = ['approved', 'spec-approved', 'waiver'];
 const FINAL: readonly State[] = ['done', 'escalated'];
 
-/** `.factory/config` as committed on main, never the work tree. */
-export function configOnMain(projectDir: string, mainRef = 'origin/main'): ProjectConfig {
-  const object = `${mainRef}:.factory/config`;
-  const result = spawnSync('git', ['-C', projectDir, 'show', object], { encoding: 'utf8' });
-  if (result.error !== undefined || result.status !== 0)
-    throw new RefusedError(`cannot read ${object} in ${projectDir}`);
-  return parseConfig(result.stdout);
-}
-
 /** The item's state: its newest current `state:` label, `new` without one. */
 export function itemStatus(labels: readonly string[], events: readonly LabelEvent[]): ItemStatus {
   const adds = events.filter((e) => e.event === 'labeled' && e.label.startsWith('state:'));
@@ -158,7 +151,6 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   const options = ctx.gh ?? {};
   const config = configOnMain(ctx.projectDir, ctx.mainRef);
   const { repo } = config;
-  const keys = ctx.keysFor(config.factory_release);
   const inbox: InboxTarget = { ...options, repo, inboxIssue: config.inbox_issue };
 
   const inboxComments = await listComments(repo, config.inbox_issue, options);
@@ -170,7 +162,22 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     posted.push({ id: '', urgency: input.urgency, kind: input.kind, text: input.text });
   };
 
-  const keyCheck = checkSecondCopy(keys, ctx.secondCopy, ctx.previousNewest);
+  let keys: ReleaseKeys;
+  let keyCheck: KeyCheck;
+  let brief: boolean;
+  try {
+    keys = ctx.keysFor(config.factory_release);
+    keyCheck = checkSecondCopy(keys, ctx.secondCopy, ctx.previousNewest);
+    const history = verifiedMerges(ctx.projectDir, keys, {
+      ref: ctx.mainRef ?? 'origin/main',
+      baseline: config.baseline,
+    });
+    brief = briefMerged(history);
+  } catch (err) {
+    const reason = `cannot verify main, so nothing is admitted: ${err instanceof Error ? err.message : String(err)}`;
+    await alertOnce({ urgency: 'urgent', kind: 'unverifiable', text: `line stopped: ${reason}` });
+    return { ...result, halted: reason };
+  }
   if (keyCheck.status !== 'ok') {
     const kind = keyCheck.status === 'rotation-pending' ? 'rotation-pending' : 'tampering';
     await alertOnce({ urgency: 'urgent', kind, text: `line stopped: ${keyCheck.reason}` });
@@ -188,8 +195,6 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     return { ...result, halted: 'main has a first-parent commit not signed by the Owner' };
   if (pause.line) return { ...result, halted: 'pause:line in effect' };
 
-  const owner = ownerLogin(repo);
-  const seeds = seedLists(ctx.projectDir, ctx.mainRef);
   let target: { item: Candidate; station: Station; branch: string } | undefined;
   for (const issue of await listOpenIssues(repo, options)) {
     if (issue.number === config.inbox_issue) continue;
@@ -214,7 +219,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
 
     const status = itemStatus(issue.labels, events);
     const approved = verdict('approved');
-    const why = notAdmitted(issue, owner, approved, seeds);
+    const why = notAdmitted(approved, brief);
     const item: Candidate = {
       issue,
       state: status.state,
@@ -234,8 +239,10 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       continue;
     }
 
+    const tiers = issue.labels.flatMap((l) => /^tier:([123])$/.exec(l)?.[1] ?? []).map(Number);
     const evidence = () => ({
       ...found,
+      ...(tiers.length > 0 ? { proposedTier: Math.max(...tiers) as Tier } : {}),
       owner: verdicts,
       rotationPending: false,
       historySigned: true,

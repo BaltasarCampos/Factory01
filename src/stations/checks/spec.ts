@@ -2,6 +2,12 @@
 // affected areas, and defines at least one acceptance criterion, each with an `AC-###` ID and
 // testable as Given/When/Then. A section is a heading (`## Problem`) or, in a tier 1 one-line
 // spec, a labelled line (`**Problem**: …`). Template placeholders and comments are not content.
+//
+// Criterion lines (FR-042, AC-097) are read by one parser, `criterionLines`, which the Specify
+// check uses and `ac-map` and `red-green` will use: every list item under Acceptance Scenarios or
+// Edge Cases, whatever its wording, and, anywhere else, a line with two or more of a capitalised
+// Given, When or Then, or one of them in bold, plus any line that starts with an ID. Each must
+// start with exactly one `**AC-###**`. Lowercase "when … then" prose is not a criterion line.
 import type { CheckResult } from '../../hooks/stop.js';
 import { featureFiles } from './feature.js';
 
@@ -40,8 +46,54 @@ export function section(lines: readonly string[], name: string): string[] | unde
   return undefined;
 }
 
+export interface CriterionLine {
+  /** 1-based line number in `spec.md`. */
+  line: number;
+  /** The leading `**AC-###**`, when the line has exactly one. */
+  id?: string;
+  problem?: string;
+}
+
+const LIST_ITEM = /^\s*(?:[-*+]|\d+[.)])\s+/;
+const REGION = /^(?:#+\s+|\*\*)(?:Acceptance Scenarios|Edge Cases)\b/i;
+const REGION_END = /^(?:#+\s|\*\*[^*]+\*\*:|---|\*\*\*\s*$|___)/;
+const LEADING_ID = /^\*\*(AC-\d+)\*\*(?![\w*-])/;
+const BOLD_ID = /\*\*AC-\d+\*\*/g;
+const KEYWORDS = ['Given', 'When', 'Then'].map((k) => new RegExp(`\\b${k}\\b`));
+const BOLD_KEYWORD = /\*\*(?:Given|When|Then)\b/i;
+
+/** Comments blanked, keeping line numbers. */
+const uncommented = (text: string) =>
+  text.replace(/<!--[\s\S]*?-->/g, (c) => c.replace(/[^\n]/g, '')).split('\n');
+
+/** Every criterion line of a spec, with its ID or what is wrong with it. */
+export function criterionLines(text: string): CriterionLine[] {
+  let region = false;
+  return uncommented(text).flatMap((raw, i): CriterionLine[] => {
+    const line = raw.trim();
+    if (REGION.test(line)) {
+      region = true;
+      return [];
+    }
+    if (REGION_END.test(line)) region = false;
+    const item = LIST_ITEM.exec(raw);
+    const body = item ? raw.slice(item[0].length).trim() : line;
+    const keywords = KEYWORDS.filter((k) => k.test(body)).length;
+    const lead = LEADING_ID.exec(body)?.[1];
+    const ids = body.match(BOLD_ID)?.length ?? 0;
+    const criterion = (region && item) || keywords >= 2 || BOLD_KEYWORD.test(body);
+    if (!criterion && lead === undefined && !/^\*\*AC-/.test(body)) return [];
+    const at = { line: i + 1 };
+    if (lead === undefined)
+      return [{ ...at, problem: 'criterion line without a leading **AC-###** ID' }];
+    if (ids > 1)
+      return [{ ...at, problem: `criterion line with ${String(ids)} **AC-###** IDs; exactly one` }];
+    return [{ ...at, id: lead }];
+  });
+}
+
 export function checkSpec(text: string): SpecResult {
-  const lines = text.replace(/<!--[\s\S]*?-->/g, '').split('\n');
+  const lines = uncommented(text);
   const missing: string[] = [];
   for (const name of SPEC_SECTIONS) {
     const content = section(lines, name);
@@ -50,12 +102,13 @@ export function checkSpec(text: string): SpecResult {
   }
 
   const defined = new Map<string, number>();
-  for (const line of lines) {
-    const m = /^\s*(?:[-*]|\d+\.)?\s*\*\*(AC-\d+)\*\*(.*)$/.exec(line);
-    if (!m) continue;
-    const [, id = '', rest = ''] = m;
+  for (const { line, id, problem } of criterionLines(text)) {
+    if (id === undefined) {
+      missing.push(`spec.md:${String(line)}: ${problem ?? ''}`);
+      continue;
+    }
     defined.set(id, (defined.get(id) ?? 0) + 1);
-    if (!/\bGiven\b[\s\S]*\bWhen\b[\s\S]*\bThen\b/.test(rest))
+    if (!/\bGiven\b[\s\S]*\bWhen\b[\s\S]*\bThen\b/.test(lines[line - 1] ?? ''))
       missing.push(`spec.md: ${id} has no Given/When/Then`);
   }
   if (defined.size === 0) missing.push('spec.md: no acceptance criteria (**AC-###** lines)');

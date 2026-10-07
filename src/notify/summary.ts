@@ -56,8 +56,20 @@ export const GATE_PARTS: Readonly<Record<SummaryGate, Readonly<Record<SummaryPar
 /** Code gates whose check this release runs; a waiver for any other has nothing to skip. */
 export const CODE_CHECKS: ReadonlySet<string> = new Set();
 
+/** Resume (AC-096): the pause being lifted, and what happened while it held. */
+export interface PauseFacts {
+  label: string;
+  /** When and by whom the pause began, from the inbox label history. */
+  at: string;
+  by: string | undefined;
+  /** Alerts posted on the inbox since then. */
+  alerts: readonly { at: string; urgency: string; kind: string; text: string }[];
+  /** Items with a `state:` label added since then, and those labels in order (What changed). */
+  items: readonly { number: number; title: string; states: readonly string[] }[];
+}
+
 export interface SummaryFacts {
-  gate: Extract<ApprovalGate, 'approved' | 'spec-approved' | 'waiver'>;
+  gate: Extract<ApprovalGate, 'approved' | 'spec-approved' | 'waiver' | 'resume'>;
   /** The row of the per-gate list; derived from `gate` when absent (merge and deploy set it). */
   kind?: SummaryGate | undefined;
   issue: { number: number; title: string; body: string; labels: readonly string[] };
@@ -77,6 +89,7 @@ export interface SummaryFacts {
         events?: string | undefined;
       }
     | undefined;
+  pause?: PauseFacts | undefined;
   /** Spec re-approval: the last approved blob and the diff from it (undefined: not available). */
   previousSpec?: { blob: string; diff: string | undefined } | undefined;
 }
@@ -94,6 +107,7 @@ const plural = (n: number, word: string) => `${String(n)} ${word}${n === 1 ? '' 
 
 export function summaryGate(f: SummaryFacts): SummaryGate {
   if (f.kind !== undefined) return f.kind;
+  if (f.gate === 'resume') return 'resume';
   if (f.gate === 'approved') return 'admission';
   if (f.gate === 'spec-approved') return 'spec';
   if (f.branch === undefined) return 'waiver-other';
@@ -120,7 +134,16 @@ function specSection(spec: string, name: string): string[] {
 const noSpec = (f: SummaryFacts) => ({ missing: `no spec.md on ${f.branch ?? 'the branch'}` });
 const checkName = (f: SummaryFacts) => (f.waives ?? '').slice('gate:'.length);
 
+const noPause = { missing: 'the pause could not be read from the inbox label history' };
+
 function changed(f: SummaryFacts, gate: SummaryGate): Part {
+  if (gate === 'resume') {
+    const p = f.pause;
+    if (p === undefined) return noPause;
+    if (p.items.length === 0) return ['No item changed state since the pause'];
+    const items = p.items.map((i) => `#${String(i.number)} ${i.title}: ${i.states.join(' → ')}`);
+    return ['Items whose state changed since the pause:', ...items];
+  }
   const lines = [`Request #${String(f.issue.number)}: ${f.issue.title}`];
   if (gate === 'admission') {
     const body = f.issue.body.split('\n').filter((l) => l.trim() !== '');
@@ -222,6 +245,19 @@ function usage(f: SummaryFacts): Part {
 }
 
 function risks(f: SummaryFacts, gate: SummaryGate): Part {
+  if (gate === 'resume') {
+    const p = f.pause;
+    if (p === undefined) return noPause;
+    // Agents act through the Owner's account, so the login says which account, not who.
+    const by = p.by === undefined ? 'a deleted account' : `${p.by} (GitHub)`;
+    const alerts = p.alerts.map((a) => `${a.at} ${a.urgency} ${a.kind}: ${a.text}`);
+    return [
+      `${p.label} added at ${p.at} by ${by}`,
+      ...(alerts.length > 0
+        ? quoted(`the inbox #${String(f.issue.number)}`, alerts)
+        : ['No alert raised during the pause']),
+    ];
+  }
   const others = f.issue.labels.filter((l) => !/^(?:tier|owner|state|pause):/.test(l));
   const labels = others.length > 0 ? [`Other labels: ${others.join(', ')}`] : [];
   if (gate === 'waiver-other') {

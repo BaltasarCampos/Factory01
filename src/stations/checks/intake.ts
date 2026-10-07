@@ -1,6 +1,8 @@
 // Intake output check (FR-015, AC-009). Intake pushes nothing: its output is the item's labels
 // and comments. A triaged item has exactly one `type:`, one `priority:` and one proposed `tier:`
 // label (the Owner confirms the tier in the signed `approved` record, never through this label).
+// Intake runs after approval and may keep the confirmed tier or propose a higher one, never a
+// lower one (AC-009).
 // A duplicate gets no labels: it is closed with a `<!-- duplicate-of #<n> -->` comment, so it
 // never enters the line twice.
 import { gh, Fields, GhError, numberArg, repoArg, type GhOptions } from '../../github/gh.js';
@@ -14,6 +16,8 @@ export interface IntakeIssue {
   state: string;
   labels: readonly string[];
   comments: readonly { body: string }[];
+  /** The tier in the Owner's verified `approved` record. */
+  confirmedTier: Tier;
 }
 
 export interface IntakeResult extends CheckResult {
@@ -79,6 +83,10 @@ export function checkIntake(issue: IntakeIssue): IntakeResult {
   const tier = single(issue.labels, 'tier', ['1', '2', '3'] as const, '1–3');
   for (const p of [type.problem, priority.problem, tier.problem])
     if (p !== undefined) missing.push(`${at}: ${p}`);
+  if (tier.value !== undefined && Number(tier.value) < issue.confirmedTier)
+    missing.push(
+      `${at}: tier:${tier.value} is lower than the confirmed tier ${String(issue.confirmedTier)}; Intake may only raise it`,
+    );
   return done(missing, {
     type: type.value,
     priority: priority.value,
@@ -90,6 +98,7 @@ export function checkIntake(issue: IntakeIssue): IntakeResult {
 export async function checkIntakeIssue(
   repo: string,
   issue: number,
+  confirmedTier: Tier,
   options: GhOptions = {},
 ): Promise<IntakeResult> {
   const view = (n: number, fields: string) =>
@@ -103,6 +112,7 @@ export async function checkIntakeIssue(
     state: f.str('state'),
     labels: f.list('labels').map((l) => Fields.of(l, 'label').str('name')),
     comments: f.list('comments').map((c) => ({ body: Fields.of(c, 'comment').str('body') })),
+    confirmedTier,
   });
   if (result.duplicateOf === undefined) return result;
   try {

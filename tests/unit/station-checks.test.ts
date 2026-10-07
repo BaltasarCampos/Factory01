@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { runStop } from '../../src/hooks/stop.js';
 import { checkPlan } from '../../src/stations/checks/plan.js';
-import { checkSpec } from '../../src/stations/checks/spec.js';
+import { checkSpec, criterionLines } from '../../src/stations/checks/spec.js';
 import { makeRepo, type Files } from '../helpers/git-repo.js';
 
 const SPEC = `# Feature Specification: Add login
@@ -144,6 +144,60 @@ describe('Specify output check (AC-010)', () => {
     for (const s of ['Problem', 'Non-goals', 'Affected areas'])
       expect(template).toMatch(new RegExp(`^## ${s} \\*\\(mandatory\\)\\*$`, 'm'));
     expect(why(checkSpec(template).missing)).toMatch(/the Problem section is empty/);
+  });
+});
+
+describe('criterion lines (AC-097)', () => {
+  const add = (where: string, line: string) => SPEC.replace(where, `${where}\n${line}`);
+
+  it('AC-097: a Problem sentence starting "When users…" is not a criterion line', () => {
+    const text = add(
+      'Visitors cannot sign in, so every saved link is public.',
+      'When users log out, nothing changes.',
+    );
+    expect(checkSpec(text)).toMatchObject({ complete: true, acs: ['AC-001', 'AC-002', 'AC-003'] });
+  });
+
+  it.each([
+    ['a bold When line', '**When** the session expires, the user is asked to sign in again.'],
+    ['a Given/When line', 'Given a signed-in user, When the session expires, they sign in again.'],
+    ['a list item under Edge Cases', '- Five failed attempts lock the account.'],
+    ['a list item under Acceptance Scenarios', '3. The login page loads.'],
+    [
+      'a lowercase given/when/then list item under Acceptance Scenarios',
+      '3. given a user, when they sign in, then they see links.',
+    ],
+  ])('AC-097: %s without an ID fails', (_name, line) => {
+    const where = line.startsWith('3.')
+      ? '**Then** they see an error.'
+      : '**Then** they wait one minute.';
+    const result = checkSpec(add(where, line));
+    expect(result.complete).toBe(false);
+    expect(why(result.missing)).toMatch(
+      /spec\.md:\d+: criterion line without a leading \*\*AC-###\*\*/,
+    );
+  });
+
+  it('AC-097: lowercase "when … then" prose outside the criteria sections is not a criterion line', () => {
+    const text = add(
+      'Visitors cannot sign in, so every saved link is public.',
+      'when a link is saved, then it stays public.',
+    );
+    expect(checkSpec(text).complete).toBe(true);
+  });
+
+  it('AC-097: a criterion line starts with exactly one ID, matched as a whole word', () => {
+    const two = SPEC.replace('**AC-002** —', '**AC-002** **AC-004** —');
+    expect(why(checkSpec(two).missing)).toMatch(/criterion line with 2 \*\*AC-###\*\* IDs/);
+    const glued = SPEC.replace('**AC-002** —', '**AC-002x** —');
+    expect(why(checkSpec(glued).missing)).toMatch(/criterion line without a leading/);
+  });
+
+  it('AC-097: the criterion lines are read by one parser, with their IDs', () => {
+    expect(criterionLines(SPEC).map((c) => c.id)).toEqual(['AC-001', 'AC-002', 'AC-003']);
+    expect(criterionLines('# S\n\n**Given** x, **When** y, **Then** z.\n')).toEqual([
+      { line: 3, problem: 'criterion line without a leading **AC-###** ID' },
+    ]);
   });
 });
 

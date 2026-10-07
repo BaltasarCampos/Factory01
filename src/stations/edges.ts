@@ -164,10 +164,13 @@ function resolveImport(from: string, spec: string, files: ReadonlyMap<string, st
 }
 
 /**
- * Test helpers, over base and head together so a helper deleted at head is still found: files in
- * the test paths with no `it`/`test` call, and, as a fixed point, every file outside them whose
- * importers are all tests or helpers (a module the app also imports is production code under
- * test, not a helper).
+ * Test helpers that can weaken an existing test. Helpers are found over base and head together:
+ * files in the test paths with no `it`/`test` call, and, as a fixed point, every file outside
+ * them whose importers are all tests or helpers (a module the app also imports is production
+ * code under test, not a helper). Only those that exist at the base and that a test at the base
+ * reaches, directly or through other helpers, are returned: a new helper cannot weaken an
+ * earlier test, and a new module that only its new test imports is not one yet. A helper deleted
+ * at head is still returned from the base.
  */
 export function testHelpers(
   base: ReadonlyMap<string, string>,
@@ -177,12 +180,14 @@ export function testHelpers(
   const helpers = new Set<string>();
   const tests = new Set<string>();
   const importers = new Map<string, Set<string>>();
+  const baseImports = new Map<string, string[]>();
   for (const files of [base, head])
     for (const [path, text] of files) {
       for (const m of text.matchAll(IMPORT)) {
         const target = resolveImport(path, m[1] ?? '', files);
-        if (target !== undefined)
-          importers.set(target, (importers.get(target) ?? new Set()).add(path));
+        if (target === undefined) continue;
+        importers.set(target, (importers.get(target) ?? new Set()).add(path));
+        if (files === base) baseImports.set(path, [...(baseImports.get(path) ?? []), target]);
       }
     }
   for (const path of new Set([...base.keys(), ...head.keys()])) {
@@ -204,7 +209,17 @@ export function testHelpers(
     }
   }
   for (const path of candidates) helpers.add(path);
-  return helpers;
+
+  const reached = new Set<string>();
+  const visit = (path: string) => {
+    for (const target of baseImports.get(path) ?? [])
+      if (helpers.has(target) && !reached.has(target)) {
+        reached.add(target);
+        visit(target);
+      }
+  };
+  for (const [path, text] of base) if (inTestPaths(config, path) && CALL.test(text)) visit(path);
+  return reached;
 }
 
 /**

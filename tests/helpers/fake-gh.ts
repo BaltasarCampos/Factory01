@@ -460,8 +460,18 @@ function issueCommand(state: FakeGhState, sub: string | undefined, p: Parsed, ou
       const labels = listFlag(p, 'label');
       const author = flag(p, 'author');
       const limit = Number(flag(p, 'limit') ?? '30');
+      // Only the `updated:>=<time>` search qualifier; an issue is updated by its events and comments.
+      const since = /\bupdated:>=(\S+)/.exec(flag(p, 'search') ?? '')?.[1];
+      const updated = (i: FakeIssue) =>
+        Math.max(
+          Date.parse(i.createdAt),
+          ...i.events.map((e) => Date.parse(e.created_at)),
+          ...i.comments.map((c) => Date.parse(c.createdAt)),
+        );
       const issues = repo.issues
         .filter((i) => wantState === 'ALL' || i.state === wantState)
+        // An unparseable time keeps the issue, so a malformed event still gets read.
+        .filter((i) => since === undefined || !(updated(i) < Date.parse(since)))
         .filter((i) => labels.every((l) => i.labels.includes(l)))
         .filter((i) => author === undefined || i.author === author)
         .sort((a, b) => b.number - a.number)
