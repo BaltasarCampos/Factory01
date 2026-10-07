@@ -519,7 +519,11 @@ Task: "Contract tests for guardrail-change (AC-020) · Files: tests/contract/gua
 Each delivery slice from plan.md is one PR under 1,000 changed lines while the factory is
 bootstrapping (plan.md Complexity Tracking #3; estimates in
 [reports/slice-estimates.md](reports/slice-estimates.md)). Slice numbers are kept; split
-slices take a letter. Every P1 task belongs to exactly one Phase 0 slice. When a test task is
+slices take a letter. Every P1 task belongs to exactly one Phase 0 slice. From 2026-10-07 a slice
+is split when its calibrated estimate (the estimate below × 1.3, since estimates have run about
+30% under actual) is above about 950; the rows split on that date give the calibrated figure
+("cal."). Slices kept whole near that line are measured as they go and split if they head past
+1,000 (Owner decision 2026-10-07). When a test task is
 split across slices, each slice writes the cases named here, and the task is marked `[X]` only
 when its last part lands.
 
@@ -552,32 +556,39 @@ when its last part lands.
 | 18a | T133, T138, T052; the append-only part of T065 | Safe diff + `factory ci append-only` | ~600 |
 | 18b | T051; the coverage, size, ac-map and command parts of T065 | `factory ci coverage`, `size`, `ac-map` | ~650 |
 | 19a | T135, T140 | `factory ci red-green` | ~600 |
-| 19b | T136, T141, T066 | Release-shipped CI configs, `test`/`lint`/`scan`, workflows | ~750 |
+| 19b | T136, T141, T066 | Release-shipped CI configs, `test`/`lint`/`scan`, workflows (cal. ~975: kept whole; split if it heads past 1,000) | ~750 |
 | 20 | T134, T137, T139, T142 | Signed main history + `config set` | ~650 |
 | 21 | T143; T053 cases for per-branch rules (AC-081–AC-083, AC-086, FR-016g) | Merge rules | ~700 |
 | 21b | T151 | `test:` waiver targets, range-diff re-sign | ~350 |
-| 22 | T068; T053 merge cases (AC-014, AC-073, AC-078, AC-088) | `factory merge` | ~750 |
-| 23 | T069, T129–T130, T160; T053 deploy cases (AC-015, AC-073, AC-087) | `factory deploy` + backups, release evidence | ~800 |
-| 24 | T070–T072, T159 | Role files + station prompts, Define started by `new`/`adopt` (near the limit: split it when we get there, Owner 2026-10-07) | ~950 |
+| 22a | T068 checks; T053 merge refusal cases (AC-073, AC-078, AC-088 once-only and running-session warning, AC-094, AC-097) | `factory merge` checks: signed history, pause and session warnings, `Factory-Merge:` once-only, criterion set, approval summary, chain re-verification and stale-waiver re-sign (split 2026-10-07: the most security-critical slice, and its reviews add fixes) | cal. ~500 |
+| 22b | T068 merge; T053 merge cases (AC-014, AC-088 moved head) | `factory merge` merge: required CI on the checked head, `git merge --no-ff -S` of the checked head with the trailer, push (abort if main moved), close a PR whose head moved, delete the branch | cal. ~475 |
+| 23a | T069; T053 deploy cases (AC-015, AC-073, AC-087) | `factory deploy` | cal. ~550 |
+| 23b | T129–T130, T160 | Product backups, release evidence for `releasing → done` | cal. ~490 |
+| 24a | T070 | Role files: Intake, Spec, Planner, Builder, Test, Reviewer | cal. ~410 |
+| 24b | T071 | Role files: Security, Integrator, Release, Ops, Coach | cal. ~350 |
+| 24c | T072, T159 | Station prompts 1–8, Define started by `new`/`adopt` | cal. ~475 |
 | 25a | T074, T081, T082 | Role policy + settings generator | ~650 |
 | 25b | T076, T083 | Command tokenizer | ~600 |
-| 25c | T075, T084, T085 | Command, path and read guards | ~850 |
+| 25c | T084; T075 command-guard cases | Command guard | cal. ~550 |
+| 25f | T085; T075 path- and read-guard cases | Path and read guards | cal. ~550 |
 | 27 | T077, T087 | `guardrail-change` | ~350 |
 | 28 | T078, T086 | Session-start + guard hooks | ~650 |
-| 29 | T073, T079–T080, T088 | Gate A e2e, injection, attack suite | ~800 |
+| 29 | T073 | Gate A e2e | cal. ~450 |
+| 29c | T079–T080, T088 | Injection fixtures, attack suite | cal. ~590 |
 | 29b | T157 | Rename `master` to `main`: done early (2026-10-07); its file changes ride with slice 15b, and T157 closes when the Owner's copy of `ci.yml` is on main | — |
 
 Then:
 
 | Slice | Tasks | Content | Est. lines |
 |-------|-------|---------|------------|
-| 30 | T089–T093 | Lanes, tiers, batch (US4) | ~750 |
+| 30 | T089–T093 | Lanes, tiers, batch (US4) (cal. ~975: kept whole; split if it heads past 1,000) | ~750 |
 | 31a | T102, T104, T105 | Security findings and gates (US6) | ~650 |
 | 31b | T103, T106, T107 | New-dependency gate + security workflows (US6) | ~450 |
-| 32a | T095–T099, T158; T094 cases AC-032–AC-037 | Retry, blocked, caps, usage, pause enforcement, dispatcher events on `claude/factory-log` (US5) | ~750 |
+| 32a | T095–T099, T158; T094 cases AC-032–AC-037 | Retry, blocked, caps, usage, pause enforcement, dispatcher events on `claude/factory-log` (US5) (cal. ~975: kept whole; split if it heads past 1,000) | ~750 |
 | 32b | T100, T101; T094 cases AC-030, AC-031, AC-038, AC-039, AC-059 | Launcher fallback, parallel limit, review trigger (US5) | ~450 |
 | 33 | T108–T110 | Ops and metrics (US7) | ~700 |
-| 34 | T111–T113, T149–T150 | Coach and benchmark (US8) | ~950 |
+| 34a | T113, T112 lessons writer; T111 lessons and coach-scope cases | Coach lessons and coach-scope guard (US8) | cal. ~600 |
+| 34b | T149–T150, T112 replay runner; T111 replay cases | Benchmark `init`/`add` and replay (US8) | cal. ~635 |
 | 35 | T114–T115 | Upgrade (US9) | ~550 |
 | 36 | T144–T145 | Key rotation | ~550 |
 
