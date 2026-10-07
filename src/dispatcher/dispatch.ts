@@ -309,8 +309,14 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     await alertOnce({ urgency: 'urgent', kind, text: err.message });
     return { ...result, refused: err.message };
   }
-  if (!(await launcher.available()))
-    return { ...result, refused: `the ${launcher.mode} launcher is unavailable` };
+  if (!(await launcher.available())) {
+    // One info alert, not one per pass: e.g. a cloud project while T125 has not confirmed the
+    // cloud launch command (src/dispatcher/launcher/cloud.ts).
+    const refused = `the ${launcher.mode} launcher is unavailable`;
+    const text = `no session started for ${repo}: ${refused}`;
+    await alertOnce({ urgency: 'info', kind: 'launcher-unavailable', text });
+    return { ...result, refused };
+  }
   const role = ROLE_AT[station];
   if (station >= 2 && station <= 6) {
     const ref: ItemRef = { issue: item.issue.number, branch };
