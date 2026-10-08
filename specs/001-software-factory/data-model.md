@@ -156,9 +156,15 @@ results count only after these checks pass, because a `pull_request` run uses th
 files of the pull request: once the laptop confirms no protected file changed, CI ran the
 pinned workflows.
 
-Every diff is computed with `git -c core.attributesFile=/dev/null diff --no-renames
---no-ext-diff --no-textconv <main>...<checked head>`, ignoring `.gitattributes`, so a rename is
-a deletion plus an addition and no filter hides content.
+Every diff is the safe diff (`src/git/diff.ts` `safeDiff`), from the merge base of main and
+the checked head: changed files from `git diff-tree -r -z --no-renames <base> <head>`; lines
+from blob-to-blob `git diff --text --no-ext-diff --no-textconv`; file types and append-only on
+the raw blob bytes. A plain `git diff`, even with `core.attributesFile=/dev/null`, still applies
+the pull request's `.gitattributes` from the working tree, where `-diff` or a textconv filter
+hides changed lines. Every git call runs without the global and system config
+(`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), with `--no-color`,
+`--diff-algorithm=myers` and an explicit `-U`, so a rename is a deletion plus an addition and
+nothing in the pull request or the user's git settings changes which lines count.
 
 | Head branch | Checks (all computed on the laptop) | Effect |
 |-------------|-------------------------------------|--------|
