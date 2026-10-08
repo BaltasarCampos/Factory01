@@ -190,8 +190,7 @@ probes are tasks in Phase 0 and their results amend this file.
   `package.json` scripts and tool configs are never used in CI.
 - **Changed-line coverage (QG-3)**: `factory ci coverage` (threshold = the stricter of the
   release's floor, 90, and `coverage_min` in main's config) intersects
-  `git diff -U0 --no-renames --no-ext-diff --no-textconv base...head` (`.gitattributes`
-  ignored) with Vitest's lcov output (`@vitest/coverage-v8`). Avoids a
+  the safe diff (R18) from `base...head` with Vitest's lcov output (`@vitest/coverage-v8`). Avoids a
   Python dependency such as diff-cover.
 - **Size limit (QG-6)**: `factory ci size --max 400` counts changed lines excluding
   `specs/**`, lockfiles and generated files.
@@ -241,9 +240,15 @@ probes are tasks in Phase 0 and their results amend this file.
 - **Problem**: GitHub runs `pull_request` workflows from the PR's own files, so CI can be made
   to pass by the PR it checks; agents act on GitHub as the Owner, so labels, tags and merges
   made through GitHub prove nothing; hooks share a user with the agent's shell.
-- **Decision**: `factory merge` is the only merge path. On the laptop it computes the diff
-  (`git -c core.attributesFile=/dev/null diff --no-renames --no-ext-diff --no-textconv`),
-  applies the per-branch rules (data-model § Pull request merge checks), checks CI on the
+- **Decision**: `factory merge` is the only merge path. On the laptop it computes the safe
+  diff (`safeDiff`): changed files from `git diff-tree -r -z --no-renames <base> <head>`; lines
+  from blob-to-blob `git diff --text --no-ext-diff --no-textconv`; file types and append-only
+  on the raw blob bytes. A plain `git diff`, even with `core.attributesFile=/dev/null`, still
+  applies the pull request's `.gitattributes` from the working tree. Every git call runs
+  without the global and system config (`GIT_CONFIG_GLOBAL=/dev/null`,
+  `GIT_CONFIG_NOSYSTEM=1`) and without any inherited `GIT_*` variable,
+  with `--no-color`, `--diff-algorithm=myers` and an explicit `-U`
+  (Owner decision 2026-10-08). It then applies the per-branch rules (data-model § Pull request merge checks), checks CI on the
   checked commit, then runs `git merge --no-ff -S <sha>` and pushes main. `gh pr merge` is
   not used: GitHub would sign the merge commit with its own key. A rejected push (main moved)
   aborts; a moved PR head is closed with a comment; merged item branches are deleted.

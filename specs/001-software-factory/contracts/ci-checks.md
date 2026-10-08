@@ -18,8 +18,14 @@ PR's code runs inside CI, so every job is built to depend on nothing the PR cont
 - Jobs call `factory ci <check>`, never `npm test` or other `package.json` scripts, and use the
   configs, thresholds and test-path patterns shipped in that release
   (`factory/profiles/typescript/ci/`), never the project's own configs.
-- Every diff is computed with `--no-renames --no-ext-diff --no-textconv` and
-  `.gitattributes` ignored.
+- Every diff is the safe diff (`safeDiff`): changed files from
+  `git diff-tree -r -z --no-renames <base> <head>`; lines from blob-to-blob
+  `git diff --text --no-ext-diff --no-textconv`; file types and append-only on the raw blob
+  bytes. A plain `git diff`, even with `core.attributesFile=/dev/null`, still applies the pull
+  request's `.gitattributes` from the working tree. Every git call runs without the global and
+  system config (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`) and without any inherited `GIT_*` variable,
+  with `--no-color`,
+  `--diff-algorithm=myers` and an explicit `-U`.
 
 What remains: test files are PR code. A test can assert nothing, or fail at the base for an
 irrelevant reason, and still count. The independent review is the control for test quality

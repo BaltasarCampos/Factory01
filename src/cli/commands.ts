@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline/promises';
 import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 import { adopt } from '../commands/adopt.js';
 import { approve } from '../commands/approve.js';
+import { ci } from '../commands/ci.js';
 import { dispatch } from '../commands/dispatch.js';
 import { hook } from '../commands/hook.js';
 import { inbox } from '../commands/inbox.js';
@@ -214,12 +215,13 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   },
   ci: {
     summary: 'CI checks built from the pinned release (GitHub Actions)',
-    usage: 'factory ci <check> [args...]',
+    usage: 'factory ci <check> [args...] [--branch <name>] [--push]',
     laptopOnly: false,
     requires: ['git'],
-    options: {},
+    options: { branch: { type: 'string' }, push: { type: 'boolean' } },
     positionals: { min: 1, max: ANY },
     showsAlerts: false,
+    run: ci,
   },
   keygen: {
     summary: 'Create or rotate the Owner signing key',
