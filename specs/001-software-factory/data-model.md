@@ -52,7 +52,7 @@ Stored as one GitHub issue plus its labels, comments and feature folder.
 | `tier` | `1` \| `2` \| `3` | Proposed by the filing agent's `tier:` label or given with `factory approve --tier`; confirmed only by the `owner:approved` record; Intake may only propose raising it |
 | `state` | one `state:` label | See state machine below |
 | `owner_labels` | set of `owner:approved` / `owner:spec-approved` / `owner:waiver` | Valid only with a verifying record |
-| `attempts` | map station → count | From gate-result events (telemetry; affects only escalation timing, never a merge); ≥ `retry_limit` → `escalated` |
+| `attempts` | map station → count | Gate failures the dispatcher saw itself (a failed required check or a failing verify report), counted as its own sends-back out of each station in the item's `state:` label history (T096); events never count. ≥ `retry_limit` → `escalated` |
 | `pr` | number | One draft PR, opened at Specify (FR-016a) |
 | `author` | GitHub login | Informational only: agents act through the Owner's account, so authorship never admits an item |
 
@@ -333,12 +333,14 @@ copied (§ Approval record). (Owner decision 2026-10-07.)
 
 **The event log is untrusted telemetry.** Agents with a shell run as the same user as the
 hooks, so neither the path guard nor the hook can guarantee who wrote a line or that `ts` is
-true. Events feed metrics, the Coach and escalation timing; no merge, deploy or gate decision
-on the laptop relies on their content.
+true. Events feed metrics and the Coach; no transition, retry count, merge, deploy or gate
+decision relies on their content (Owner decision 2026-10-08).
 
 ## Gate result
 
-An Event with `kind: gate_result`; attempts per station are counted from these.
+An Event with `kind: gate_result`. A session's `gate_result` events are telemetry and never
+count toward `retry_limit`; attempts are the gate failures the dispatcher saw itself
+(§ Work item `attempts`).
 
 ## Role
 

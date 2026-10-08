@@ -3,6 +3,11 @@
 Served by `factory mcp` over stdio, declared in each project's `.mcp.json` (guardrail file).
 All inputs are validated; invalid input returns an MCP error and logs a `blocked` event.
 
+The session context (role, session id, item, station, model, role version and event log) is
+the one its hooks resolve. A hook reads the role and session id from its input; the MCP server
+reads them from `FACTORY_ROLE` and `FACTORY_SESSION`, which the launcher sets, and refuses to
+serve without them. An `item` other than the session's is invalid input.
+
 ## `advance_item`
 
 Request that the dispatcher move an item to its next `state:`. Never moves labels itself.
@@ -24,7 +29,10 @@ The dispatcher later checks the gate and any `owner:` record and applies or reje
 ```
 
 Appends one Event ([data-model.md](../data-model.md#event)); `ts`, `role`, `session`, `model`
-are filled from the session context, never from the caller. Secrets redacted.
+are filled from the session context, never from the caller. Secrets redacted. `kind` is one of
+`tool_call`, `gate_result` or `usage`, the kinds a session originates; approvals, alerts, Owner
+comments and caps come from the Owner and the dispatcher, and `split` and `advance_request`
+have their own tools. These events are telemetry: they never count toward a gate or a retry.
 
 ## `request_split`
 

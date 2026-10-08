@@ -7,6 +7,7 @@ import { dispatch } from '../commands/dispatch.js';
 import { hook } from '../commands/hook.js';
 import { inbox } from '../commands/inbox.js';
 import { keygen } from '../commands/keygen.js';
+import { mcp } from '../commands/mcp.js';
 import { newProject } from '../commands/new.js';
 import { pause } from '../commands/pause.js';
 import { release } from '../commands/release.js';
@@ -199,6 +200,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     options: {},
     positionals: { min: 0, max: 0 },
     showsAlerts: false,
+    run: mcp,
   },
   hook: {
     summary: 'Claude Code hook entry point (sessions)',
