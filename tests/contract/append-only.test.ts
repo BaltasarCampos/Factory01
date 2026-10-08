@@ -160,34 +160,58 @@ describe('factory ci append-only --branch claude/factory-log (AC-065, AC-081, AC
     ]);
   });
 
+  it.each<[string, Files, string[]]>([
+    ['only appended lines passes', { '.factory/events/2026-10.jsonl': LINE1 + LINE2 }, []],
+    [
+      'an edited line fails',
+      { [OPS]: '# Health\nfine\n' },
+      [`${OPS}: an existing line was edited, deleted or moved`],
+    ],
+  ])('a log-branch pull request cut from an older main: %s', async (_name, change, findings) => {
+    const { repo } = setup({ '.factory/events/2026-10.jsonl': LINE1 });
+    repo.checkout(LOG, { create: true });
+    const head = repo.commit(change, 'log');
+    repo.checkout('main');
+    const main = repo.commit({ 'src/a.ts': 'main moved\n' }, 'main moved on');
+
+    expect(checkAppendOnly(repo.path, main, head, { logBranch: true })).toEqual(findings);
+    expect((await ci(repo, [main, head, '--branch', LOG])).code).toBe(findings.length > 0 ? 1 : 0);
+  });
+});
+
+describe('factory ci append-only --push: a push must not rewrite history', () => {
   it('checks the branch’s first push (an all-zeros base) from its merge base with main', async () => {
     const { repo } = setup();
     repo.checkout(LOG, { create: true });
     const head = repo.commit({ '.factory/events/2026-10.jsonl': LINE1 }, 'log 1');
     const first = '0'.repeat(40);
+    const options = { logBranch: true, push: true };
 
-    expect(checkAppendOnly(repo.path, first, head, { logBranch: true })).toEqual([]);
-    expect((await ci(repo, [first, head, '--branch', LOG])).code).toBe(0);
+    expect(checkAppendOnly(repo.path, first, head, options)).toEqual([]);
+    expect((await ci(repo, [first, head, '--branch', LOG, '--push'])).code).toBe(0);
 
     const edited = repo.commit({ [OPS]: '# Health\nfine\n' }, 'edit');
-    expect(checkAppendOnly(repo.path, first, edited, { logBranch: true })).toEqual([
+    expect(checkAppendOnly(repo.path, first, edited, options)).toEqual([
       `${OPS}: an existing line was edited, deleted or moved`,
     ]);
-    expect(() => checkAppendOnly(repo.path, first, head, { logBranch: false })).toThrow(
+    expect(() => checkAppendOnly(repo.path, first, head, { logBranch: true })).toThrow(
       /not a commit/,
     );
   });
 
-  it('fails a push that rewrote the branch’s history', () => {
+  it('fails a push that rewrote the branch’s history', async () => {
     const { repo } = setup();
     repo.checkout(LOG, { create: true });
     const before = repo.commit({ '.factory/events/2026-10.jsonl': LINE1 }, 'log 1');
     repo.git(['reset', '-q', '--hard', 'HEAD~1']);
     const after = repo.commit({ '.factory/events/2026-10.jsonl': LINE2 }, 'rewritten');
 
-    expect(checkAppendOnly(repo.path, before, after, { logBranch: true })).toEqual([
+    expect(checkAppendOnly(repo.path, before, after, { logBranch: true, push: true })).toEqual([
       `history rewritten: ${before} is not an ancestor of ${after}`,
     ]);
+    const r = await ci(repo, [before, after, '--branch', LOG, '--push']);
+    expect(r.code).toBe(1);
+    expect(r.output).toMatch(/history rewritten/);
   });
 });
 

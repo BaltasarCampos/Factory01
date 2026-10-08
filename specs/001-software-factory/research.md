@@ -246,7 +246,8 @@ probes are tasks in Phase 0 and their results amend this file.
   on the raw blob bytes. A plain `git diff`, even with `core.attributesFile=/dev/null`, still
   applies the pull request's `.gitattributes` from the working tree. Every git call runs
   without the global and system config (`GIT_CONFIG_GLOBAL=/dev/null`,
-  `GIT_CONFIG_NOSYSTEM=1`), with `--no-color`, `--diff-algorithm=myers` and an explicit `-U`
+  `GIT_CONFIG_NOSYSTEM=1`) and without any inherited `GIT_*` variable,
+  with `--no-color`, `--diff-algorithm=myers` and an explicit `-U`
   (Owner decision 2026-10-08). It then applies the per-branch rules (data-model § Pull request merge checks), checks CI on the
   checked commit, then runs `git merge --no-ff -S <sha>` and pushes main. `gh pr merge` is
   not used: GitHub would sign the merge commit with its own key. A rejected push (main moved)

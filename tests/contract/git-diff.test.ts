@@ -112,6 +112,31 @@ describe('safeDiff (T138)', () => {
     });
   });
 
+  it('inherited GIT_* variables change nothing: config by environment, GIT_DIFF_OPTS', () => {
+    // GIT_DIFF_OPTS overrides -U0, and with diff.suppressBlankEmpty a blank context line loses
+    // its leading space, so the line numbers after it would be wrong.
+    const { repo, base } = repoWith({ 'f.txt': 'a\n\nc\nd\ne\nf\ng\n' });
+    const head = repo.commit({ 'f.txt': 'a\n\nc\nD\ne\nf\ng\n' }, 'c');
+    const inherited = {
+      ...gitEnv,
+      GIT_CONFIG_COUNT: '2',
+      GIT_CONFIG_KEY_0: 'color.diff',
+      GIT_CONFIG_VALUE_0: 'always',
+      GIT_CONFIG_KEY_1: 'diff.suppressBlankEmpty',
+      GIT_CONFIG_VALUE_1: 'true',
+      GIT_DIFF_OPTS: '-u3',
+    };
+    const plain = (env: NodeJS.ProcessEnv) =>
+      execFileSync('git', ['diff', '-U0', base, head], { cwd: repo.path, env, encoding: 'utf8' });
+    expect(plain(inherited)).not.toBe(plain(gitEnv));
+
+    expect(safeDiff(repo.path, base, head, inherited)).toEqual(safeDiff(repo.path, base, head));
+    expect(byPath(safeDiff(repo.path, base, head, inherited), 'f.txt')).toMatchObject({
+      removed: [{ line: 4, text: 'd' }],
+      added: [{ line: 4, text: 'D' }],
+    });
+  });
+
   it('a rename is a deletion plus an addition', () => {
     const { repo, base } = repoWith({ 'src/a.ts': SOURCE });
     repo.git(['mv', 'src/a.ts', 'src/b.ts']);

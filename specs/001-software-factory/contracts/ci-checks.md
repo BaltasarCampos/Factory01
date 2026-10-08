@@ -23,7 +23,8 @@ PR's code runs inside CI, so every job is built to depend on nothing the PR cont
   `git diff --text --no-ext-diff --no-textconv`; file types and append-only on the raw blob
   bytes. A plain `git diff`, even with `core.attributesFile=/dev/null`, still applies the pull
   request's `.gitattributes` from the working tree. Every git call runs without the global and
-  system config (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`), with `--no-color`,
+  system config (`GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM=1`) and without any inherited `GIT_*` variable,
+  with `--no-color`,
   `--diff-algorithm=myers` and an explicit `-U`.
 
 What remains: test files are PR code. A test can assert nothing, or fail at the base for an

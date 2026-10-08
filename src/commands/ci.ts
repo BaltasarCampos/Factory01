@@ -31,9 +31,10 @@ function report(ctx: CommandContext, check: string, findings: readonly string[])
 function appendOnlyCheck(ctx: CommandContext, args: readonly string[]): number {
   const [base, head] = args;
   if (args.length !== 2 || base === undefined || head === undefined)
-    throw new UsageError('usage: factory ci append-only <base> <head> [--branch <name>]');
+    throw new UsageError('usage: factory ci append-only <base> <head> [--branch <name>] [--push]');
   const logBranch = ctx.options.branch === LOG_BRANCH;
-  const findings = checkAppendOnly(ctx.cwd, base, head, { logBranch, env: ctx.env });
+  const push = ctx.options.push === true;
+  const findings = checkAppendOnly(ctx.cwd, base, head, { logBranch, push, env: ctx.env });
   return report(ctx, 'append-only', findings);
 }
 

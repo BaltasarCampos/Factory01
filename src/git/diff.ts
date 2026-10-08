@@ -42,11 +42,17 @@ const SYMLINK = '120000';
 const GITLINK = '160000';
 
 /**
- * Git without the global and system config, attributes files or an external diff. Dropping the
+ * Git without the global and system config, attributes files or an external diff. Every
+ * inherited `GIT_*` variable is dropped first: `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT`
+ * add config past `GIT_CONFIG_GLOBAL`, `GIT_DIFF_OPTS` overrides `-U`, and `GIT_DIR`,
+ * `GIT_INDEX_FILE` or `GIT_OBJECT_DIRECTORY` could point at another repository. Dropping the
  * global config also drops a CI runner's `safe.directory`, so the repository is named on the
  * command line, which git counts as protected configuration.
  */
 export function safeGit(repo: string, args: readonly string[], env: NodeJS.ProcessEnv) {
+  const clean = Object.fromEntries(
+    Object.entries(env).filter(([name]) => !name.startsWith('GIT_')),
+  );
   const result = spawnSync(
     'git',
     [
@@ -56,11 +62,10 @@ export function safeGit(repo: string, args: readonly string[], env: NodeJS.Proce
     {
       cwd: repo,
       env: {
-        ...env,
+        ...clean,
         GIT_CONFIG_GLOBAL: '/dev/null',
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_ATTR_NOSYSTEM: '1',
-        GIT_EXTERNAL_DIFF: '',
       },
       maxBuffer: 256 * 1024 * 1024,
     },
@@ -129,6 +134,7 @@ function lineDiff(repo: string, oldOid: string, newOid: string, env: NodeJS.Proc
     } else if (!inHunk) continue;
     else if (row.startsWith('-')) removed.push({ line: oldLine++, text: row.slice(1) });
     else if (row.startsWith('+')) added.push({ line: newLine++, text: row.slice(1) });
+    else if (row.startsWith(' ')) [oldLine, newLine] = [oldLine + 1, newLine + 1];
   }
   return { added, removed };
 }
