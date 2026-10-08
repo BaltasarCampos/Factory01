@@ -17,6 +17,7 @@ This is v1.8: it records the decisions made while building slice 15. Only a sign
 - `factory merge` writes a `Factory-Merge:` trailer into every signed merge commit; the once-only rule and the brief rule read only those trailers. A failure found after an item's merge never sends it back: it moves on to `releasing` with an alert and becomes a new issue.
 - Criterion lines are defined; the checked set is the approved spec's IDs (tier 2–3) or every ID that ever appeared on the branch (tier 1); an empty set fails.
 - Approval summaries: the per-gate list is a constant in the factory code; usage is never required; a spec re-approval shows the diff from the last approved spec; quoted text is cleaned by Unicode category.
+- Retries are counted only from gate failures the dispatcher sees itself, never from the event log, so a session cannot delay its own escalation by reporting nothing.
 - v1.7 changes (red-green per criterion, waivers bound to the head and their exact target, signed first commits, branches closed after merge) are recorded in the Decisions log.
 
 ## Vision and scope
@@ -231,7 +232,7 @@ A small orchestrator script drives each work item through the stations; all stat
 - **Orchestrator:** the `factory` CLI. It picks the next ready issue by label and starts that item's current station as a Claude Code cloud session (`claude --cloud`) with the station's prompt; when the gate passes it moves the label on. The same logic runs in a daily cloud routine, so the line moves without the laptop.
 - **Work item store:** GitHub Issues plus a Project board; one issue per work item; `owner:`, `state:` and `tier:` labels (see Branches, labels and records).
 - **Artifact store:** the repository itself, in Spec Kit's layout: one feature folder per item, `specs/<issue>-<slug>/`, on the item's branch, holding `spec.md`, `plan.md`, `tasks.md` and `reports/` (verify and review reports, also posted as pull request comments).
-- **Event log:** append-only `events.jsonl` in the item's feature folder until merge, then lines under `.factory/events/` on `claude/factory-log`; Intake's entries start as issue comments. Untrusted telemetry: it feeds metrics, retries and the Coach, never a merge or gate decision.
+- **Event log:** append-only `events.jsonl` in the item's feature folder until merge, then lines under `.factory/events/` on `claude/factory-log`; Intake's entries start as issue comments. Untrusted telemetry: it feeds metrics and the Coach, never a retry count, merge or gate decision.
 - **Sandbox:** each cloud session's own isolated VM; GitHub credentials stay outside it, and network access uses the Trusted allowlist (package registries and common development hosts).
 - **Model access:** your Claude Pro plan; Sonnet as the main model with an Opus advisor (see Capacity); the plan's usage limits are the spending cap.
 - **Knowledge layer:** `CLAUDE.md`, the constitution (`.specify/memory/constitution.md`), Spec Kit templates in `.specify/templates/`, role instruction files and subagent definitions in `.claude/agents/`, architecture decision records in `/docs/adr`; cloud sessions pick these up from the cloned repo.
@@ -240,7 +241,7 @@ A small orchestrator script drives each work item through the stations; all stat
 
 `state:new → state:triaged → state:specified → state:spec-approved → state:planned → state:building → state:verifying → state:integrating → state:releasing → state:done`, with `state:blocked` and `state:escalated` reachable from any state. An item enters at `state:triaged` only after `owner:approved` (see Branches, labels and records).
 
-**Retry policy:** a failed gate returns the item to the earliest station that can fix it, with the failure report; after 3 failed attempts it escalates to you (count to confirm in shadow mode).
+**Retry policy:** a failed gate returns the item to the earliest station that can fix it, with the failure report; after 3 failed attempts it escalates to you (count to confirm in shadow mode). The dispatcher counts attempts only from gate failures it sees itself (a failed required check, a failing verify report), never from the event log, so a session that reports nothing still escalates.
 
 ## Branches, labels and records
 
@@ -339,10 +340,10 @@ CI and the event log can both be shaped by the pull request or the agent that pr
 | Signed records and signed commits | Yes | Made with a key that exists only on your laptop |
 | Checks `factory merge` runs on your laptop | Yes | Computed from the exact commit being merged, outside any agent session |
 | CI on a pull request | Only after the laptop check passes | GitHub runs the pull request's own workflow files; once the laptop confirms no protected file changed, CI ran the pinned workflows |
-| The event log (`events.jsonl`, `.factory/events/`) | No: telemetry only | Written inside agent sessions, where any agent with a shell can write any file; useful for metrics, retries and the Coach, never for a merge or gate decision |
+| The event log (`events.jsonl`, `.factory/events/`) | No: telemetry only | Written inside agent sessions, where any agent with a shell can write any file; useful for metrics and the Coach, never for a retry count, a merge or a gate decision |
 | Agent path rules (path guard) | Defence in depth | They cover Claude Code's Write and Edit tools, not a shell |
 
-The dispatcher's own gate decisions are therefore advisory: a forged retry count can delay escalation, never merge anything.
+The dispatcher's own gate decisions are therefore advisory, and it counts retries only from gate failures it sees itself: a forged event can neither delay escalation nor merge anything.
 
 **Signed history on `main`:**
 
@@ -779,6 +780,7 @@ Eleven review rounds produced the frozen v1.0; v1.1 recorded the Spec Kit alignm
 | What happens to a failure found after an item's merge? | It moves on to `releasing` with an alert and becomes a new issue; nothing sends a merged item back | Merging and verification |
 | What is a criterion line, and which IDs are checked? | Acceptance list items, plus lines with two Given/When/Then or one in bold; approved IDs at tier 2–3, every ID ever seen at tier 1; an empty set fails | Merging and verification |
 | Can telemetry block an approval? | No: usage is shown when present and never required | Quality gates |
+| Who counts retries? | The dispatcher, from gate failures it sees itself (failed required checks, failing verify reports); events a session writes never count, so a silent session still escalates | Control plane; Merging and verification |
 
 **Still open**
 
