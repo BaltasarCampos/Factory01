@@ -14,6 +14,8 @@ export interface HookContext {
   /** The session's working copy. */
   cwd: string;
   now: () => Date;
+  /** The session's environment: `FACTORY_ITEM` and `FACTORY_STATION`, set by the launcher. */
+  env?: NodeJS.ProcessEnv;
 }
 
 export interface HookResult {
@@ -102,6 +104,21 @@ async function roleIdentity(cwd: string, role: RoleName) {
   return { model, roleVersion: roleVersion(config.factory_release.tag, text) };
 }
 
+/**
+ * The item a fixed-branch session works on, from the launcher's `FACTORY_ITEM` (such roles have
+ * no `.station.json`); 0 without one. The launcher always sets `FACTORY_STATION`, which must be
+ * the role's station, and sets no item for Define, which works for the project.
+ */
+function launchedItem(env: NodeJS.ProcessEnv, station: Station): number {
+  const { FACTORY_ITEM: item, FACTORY_STATION: at } = env;
+  if (at !== undefined && at !== String(station))
+    throw new HookError(`FACTORY_STATION ${at} is not this role's station ${String(station)}`);
+  if (item === undefined) return 0;
+  if (station === 0) throw new HookError('Define works for the project: FACTORY_ITEM is set');
+  if (!/^[1-9]\d*$/.test(item)) throw new HookError(`FACTORY_ITEM ${item} is not an issue number`);
+  return Number(item);
+}
+
 export async function resolveSession(input: HookInput, ctx: HookContext): Promise<Session> {
   const agent = input[AGENT_FIELD];
   const role = ROLES.find((r) => r === agent);
@@ -115,7 +132,8 @@ export async function resolveSession(input: HookInput, ctx: HookContext): Promis
   const fixed = FIXED_ROLES[role];
   if (fixed !== undefined) {
     const log = fixed.noLog ?? { factoryLog: ctx.cwd };
-    return { role, station: fixed.station, item: 0, session, ...identity, log };
+    const item = launchedItem(ctx.env ?? {}, fixed.station);
+    return { role, station: fixed.station, item, session, ...identity, log };
   }
   const { item, station, featureDir } = stationManifest(ctx.cwd, role);
   return { role, station, item, session, ...identity, log: { featureDir } };

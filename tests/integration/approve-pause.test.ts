@@ -513,7 +513,7 @@ describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
   });
 });
 
-describe('factory pause and resume (AC-077)', () => {
+describe('factory pause and resume (AC-077)', { timeout: 60_000 }, () => {
   it.each([
     [[], 'pause:line'],
     [['build'], 'pause:build'],

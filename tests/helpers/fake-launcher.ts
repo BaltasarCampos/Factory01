@@ -28,8 +28,10 @@ export class FakeLauncher {
     this.isAvailable = !unavailable;
   }
 
-  available(): Promise<boolean> {
-    return Promise.resolve(this.isAvailable);
+  available(): Promise<{ ok: true } | { ok: false; reason: string }> {
+    return Promise.resolve(
+      this.isAvailable ? { ok: true } : { ok: false, reason: `${this.mode} launcher unavailable` },
+    );
   }
 
   launch(request: LaunchRequest): Promise<{ sessionId: string }> {

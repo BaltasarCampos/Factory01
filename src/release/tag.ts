@@ -4,7 +4,8 @@
 import { spawnSync } from 'node:child_process';
 import type { ReleaseKeys } from '../approvals/keys.js';
 import { EnvironmentError, RefusedError } from '../cli/env.js';
-import type { ReleasePin } from '../model/types.js';
+import { parseManifest } from '../install/manifest.js';
+import type { GuardrailManifest, ReleasePin } from '../model/types.js';
 
 export const RELEASE_TAG = /^v\d+\.\d+\.\d+$/;
 
@@ -72,4 +73,21 @@ export function lastSignedTag(
     }
   }
   return undefined;
+}
+
+/**
+ * The guardrail manifest of the pinned release, read from its tag only after `verifyReleaseTag`
+ * accepts the tag with `keys`: the hashes are trusted because the Owner signed them.
+ */
+export function verifiedManifest(
+  repo: string,
+  pin: ReleasePin,
+  keys: ReleaseKeys,
+): GuardrailManifest {
+  verifyReleaseTag(repo, pin.tag, pin.sha, keys);
+  const object = git(repo, ['cat-file', 'tag', `refs/tags/${pin.tag}`]).out;
+  const manifest = parseManifest(object.slice(object.indexOf('\n\n') + 2));
+  if (manifest.release !== pin.tag || manifest.commit !== pin.sha)
+    throw new ReleaseTagError(`the manifest in ${pin.tag} is not for ${pin.tag}@${pin.sha}`);
+  return manifest;
 }
