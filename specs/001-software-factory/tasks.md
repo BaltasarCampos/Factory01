@@ -553,7 +553,7 @@ when its last part lands.
 | 16a | T050, T059, T060 | Item branch, `factory-event` copy, draft PR, station manifest, station evidence, Intake guard, `dispatcher` trailer (slice 16 measured ~1,440 and was split in two on 2026-10-07; measured 882, then 1,104 with the review's evidence and manifest tests, accepted over the limit by the Owner on 2026-10-07) | ~890 |
 | 16b | T061, T062 | Launchers (cloud unavailable until T125; local only once the release ships the guards, each session in a fresh clone), `dispatch`/`run` (measured 540, then 1,359 with the Owner's three reviews, accepted over the limit by the Owner on 2026-10-07) | ~550 |
 | 17 | T056, T063 | MCP server (done, 693) | ~500 |
-| 18a | T133, T138, T052; the append-only part of T065 | Safe diff + `factory ci append-only` (done, 795) | ~600 |
+| 18a | T133, T138, T052; the append-only part of T065 | Safe diff + `factory ci append-only` (done, measured 795: 15 over the calibrated ~780, 600 × 1.3) | ~600 |
 | 18b | T051; the coverage, size, ac-map and command parts of T065 | `factory ci coverage`, `size`, `ac-map` | ~650 |
 | 19a | T135, T140 | `factory ci red-green` | ~600 |
 | 19b | T136, T141, T066 | Release-shipped CI configs, `test`/`lint`/`scan`, workflows (cal. ~975: kept whole; split if it heads past 1,000) | ~750 |
