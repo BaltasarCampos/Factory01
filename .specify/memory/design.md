@@ -18,6 +18,7 @@ This is v1.8: it records the decisions made while building slice 15. Only a sign
 - Criterion lines are defined; the checked set is the approved spec's IDs (tier 2–3) or every ID that ever appeared on the branch (tier 1); an empty set fails.
 - Approval summaries: the per-gate list is a constant in the factory code; usage is never required; a spec re-approval shows the diff from the last approved spec; quoted text is cleaned by Unicode category.
 - Retries are counted only from gate failures the dispatcher sees itself, never from the event log, so a session cannot delay its own escalation by reporting nothing.
+- The laptop's diff reads git's raw tree and blob data, because plain git diff still applies a pull request's own .gitattributes and could hide changed lines.
 - v1.7 changes (red-green per criterion, waivers bound to the head and their exact target, signed first commits, branches closed after merge) are recorded in the Decisions log.
 
 ## Vision and scope
@@ -355,7 +356,7 @@ The dispatcher's own gate decisions are therefore advisory, and it counts retrie
 - **Starting point:** `factory new` creates the GitHub repository empty (no auto-generated README) and pushes a signed first commit, so the rule holds from the very first commit. `factory adopt` records the hash of the last unsigned commit as `baseline` in `.factory/config`, and its own signed commit comes right after it; every first-parent commit after the baseline must be signed. The dispatcher fetches enough first-parent history to reach it; the laptop checks incrementally from the last commit it verified.
 - **No separate merge record:** the signed merge commit is the record. Only deploys, which make no commit, keep a signed `deployed` record.
 
-**What `factory merge` checks on the laptop, for every pull request:** CI green on the checked commit, every approval in the item's chain verified, and the diff computed by the laptop itself with `git diff --no-renames --no-ext-diff --no-textconv` against `main`:
+**What `factory merge` checks on the laptop, for every pull request:** CI green on the checked commit, every approval in the item's chain verified, and the diff computed by the laptop itself against `main` from git's raw data: the changed files from `git diff-tree -r -z --no-renames`, and each file's lines from a blob-to-blob diff with `--text --no-ext-diff --no-textconv`. Plain `git diff` would still apply the pull request's own `.gitattributes`, so a `-diff` or binary marking could hide changed lines. Read raw, the diff cannot be hidden by any attribute, binary marking or diff driver. On that diff it checks:
 
 - **Protected paths:** no protected path is touched (see Guardrail protection), except in an upgrade pull request; no waiver overrides this.
 - **`.factory/config`:** protected but not hashed against the release; outside an upgrade pull request it may not change at all, and in one only the `factory_release` line may change. Other changes (`agents`, `parallel_sessions`) are your signed commits on `main`, made with `factory config set`.
