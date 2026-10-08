@@ -2,8 +2,7 @@
 // at the end (AC-065), and `claude/factory-log` holds only regular text files under the log
 // paths, each growing at the end (AC-081, AC-082). CI runs it for early feedback; `factory merge`
 // repeats it on the laptop and trusts only its own result.
-import { RefusedError } from '../cli/env.js';
-import { appendOnly, resolveCommit, safeDiff, safeGit } from '../git/diff.js';
+import { appendOnly, mergeBase, resolveCommit, safeDiff, safeGit } from '../git/diff.js';
 
 export const LOG_BRANCH = 'claude/factory-log';
 export const LOG_PATHS = [
@@ -32,15 +31,9 @@ export function checkAppendOnly(
 ): string[] {
   const env = options.env ?? process.env;
   const to = resolveCommit(repo, head, env);
-  const mergeBase = (from: string) => {
-    const found = safeGit(repo, ['merge-base', from, to], env);
-    if (found.status !== 0) throw new RefusedError(`${from} and ${to} share no history`);
-    return found.stdout.toString().trim();
-  };
   let start: string;
-  if (options.push !== true) start = mergeBase(resolveCommit(repo, base, env));
-  else if (NO_COMMIT.test(base))
-    start = mergeBase(resolveCommit(repo, options.mainRef ?? 'origin/main', env));
+  if (options.push !== true) start = mergeBase(repo, base, to, env);
+  else if (NO_COMMIT.test(base)) start = mergeBase(repo, options.mainRef ?? 'origin/main', to, env);
   else {
     const from = resolveCommit(repo, base, env);
     if (safeGit(repo, ['merge-base', '--is-ancestor', from, to], env).status !== 0)

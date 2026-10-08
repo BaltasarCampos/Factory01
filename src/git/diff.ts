@@ -88,6 +88,21 @@ export function resolveCommit(repo: string, ref: string, env = process.env): str
   return result.stdout.toString().trim();
 }
 
+/** Where a pull request's changes start: the merge base of `base` and `head`. */
+export function mergeBase(repo: string, base: string, head: string, env = process.env): string {
+  const from = resolveCommit(repo, base, env);
+  const to = resolveCommit(repo, head, env);
+  const found = safeGit(repo, ['merge-base', from, to], env);
+  if (found.status !== 0) throw new RefusedError(`${from} and ${to} share no history`);
+  return found.stdout.toString().trim();
+}
+
+/** A file's bytes at a commit, or undefined when the commit has no such file. */
+export function fileAt(repo: string, commit: string, path: string, env = process.env) {
+  const found = safeGit(repo, ['cat-file', 'blob', `${commit}:${path}`], env);
+  return found.status === 0 ? found.stdout : undefined;
+}
+
 const blob = (repo: string, oid: string, env: NodeJS.ProcessEnv) =>
   git(repo, ['cat-file', 'blob', oid], env);
 

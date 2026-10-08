@@ -215,10 +215,10 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
   },
   ci: {
     summary: 'CI checks built from the pinned release (GitHub Actions)',
-    usage: 'factory ci <check> [args...] [--branch <name>] [--push]',
+    usage: 'factory ci <check> [args...] [--branch <name>] [--push] [--tier <1|2|3>]',
     laptopOnly: false,
     requires: ['git'],
-    options: { branch: { type: 'string' }, push: { type: 'boolean' } },
+    options: { branch: { type: 'string' }, push: { type: 'boolean' }, tier: { type: 'string' } },
     positionals: { min: 1, max: ANY },
     showsAlerts: false,
     run: ci,
