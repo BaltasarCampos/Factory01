@@ -1,12 +1,15 @@
 // `factory ci <check>` (contracts/cli.md, contracts/ci-checks.md): the checks the project's CI
 // workflows run, from the CLI built at the release pinned on main. Exit 0 passes, 1 fails.
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { checkAcMap, checkedSet, passingTitles } from '../ci/ac-map.js';
 import { checkAppendOnly, LOG_BRANCH } from '../ci/append-only.js';
 import { meetsThreshold, measureCoverage, parseLcov } from '../ci/coverage.js';
 import { redGreen } from '../ci/red-green.js';
+import { inGithubActions } from '../ci/sandbox.js';
 import { measureSize } from '../ci/size.js';
+import type { Isolation } from '../ci/vitest-run.js';
+import { weakened } from '../ci/weakened.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { fileAt, mergeBase, safeDiff } from '../git/diff.js';
@@ -19,6 +22,7 @@ const KNOWN = [
   'scan',
   'coverage',
   'red-green',
+  'weakened',
   'size',
   'ac-map',
   'guardrail-change',
@@ -132,12 +136,35 @@ function appendOnlyCheck(ctx: CommandContext, args: readonly string[]): number {
   return report(ctx, 'append-only', findings);
 }
 
+/**
+ * Where the pull request's tests run: in GitHub Actions on the job's install (`--install`, else
+ * the checkout's); anywhere else in the sandbox, which installs the head's dependencies itself.
+ * An install made outside the sandbox has read the pull request's `.npmrc` with the full
+ * environment, so `--install` is refused there.
+ */
+function isolation(ctx: CommandContext): Isolation {
+  const { install } = ctx.options;
+  if (inGithubActions(ctx.env))
+    return {
+      sandbox: false,
+      install:
+        typeof install === 'string' ? resolve(ctx.cwd, install) : join(ctx.cwd, 'node_modules'),
+    };
+  if (install !== undefined)
+    throw new UsageError('--install is accepted only in GitHub Actions; here the sandbox installs');
+  return { sandbox: true };
+}
+
 function redGreenCheck(ctx: CommandContext, args: readonly string[]): number {
   const [base, head] = range(args, 'red-green <base> <head> --branch <name> [--tier <1|2|3>]');
   const branch = branchOption(ctx, 'red-green');
   const { tier, label } = tierOption(ctx);
-  const install = join(ctx.cwd, 'node_modules');
-  const result = redGreen(ctx.cwd, base, head, { tier, branch, install, env: ctx.env });
+  const result = redGreen(ctx.cwd, base, head, {
+    tier,
+    branch,
+    isolation: isolation(ctx),
+    env: ctx.env,
+  });
   if (result.skipped) {
     const files = result.files.map((f) => `  ${f}\n`).join('');
     ctx.io.stdout.write(`red-green skipped: only test code changed\n${files}`);
@@ -147,12 +174,20 @@ function redGreenCheck(ctx: CommandContext, args: readonly string[]): number {
   return report(ctx, 'red-green', result.findings, [summary]);
 }
 
+function weakenedCheck(ctx: CommandContext, args: readonly string[]): number {
+  const [base, head] = range(args, 'weakened <base> <head>');
+  const result = weakened(ctx.cwd, base, head, { isolation: isolation(ctx), env: ctx.env });
+  const summary = `${String(result.passed)} tests passed at the merge base`;
+  return report(ctx, 'weakened', result.findings, [summary]);
+}
+
 const CHECKS: Readonly<Record<string, (ctx: CommandContext, args: readonly string[]) => number>> = {
   'append-only': appendOnlyCheck,
   size: sizeCheck,
   coverage: coverageCheck,
   'ac-map': acMapCheck,
   'red-green': redGreenCheck,
+  weakened: weakenedCheck,
 };
 
 export function ci(ctx: CommandContext): Promise<number> {

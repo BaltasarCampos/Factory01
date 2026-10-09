@@ -159,9 +159,9 @@ export const isTestFile = (path: string, config: TestConfig = TEST_CONFIG) =>
 export const isTestCode = (path: string, config: TestConfig = TEST_CONFIG) =>
   matches(config.paths, path);
 
-// An early warning only: the check that decides, at merge, runs Vitest at base and head with
-// the JSON reporter and flags every test that passed at base but is skipped, todo or missing at
-// head (T140, T068). Any `.skip(` call counts, so `ctx.skip()` inside a test does too.
+// An early warning only: the check that decides, `factory ci weakened` (T162), runs Vitest at
+// base and head and flags every test that passed at base but is skipped, todo or missing at head.
+// Any `.skip(` call counts, so `ctx.skip()` inside a test does too.
 const SKIP =
   /\b(?:it|test|describe)(?:\.\w+)*\.(?:skipIf|runIf|todo)\b|\.skip\b|\bx(?:it|test|describe)\(/;
 const ONLY = /\b(?:it|test|describe)(?:\.\w+)*\.only\b|\bf(?:it|describe)\(/;

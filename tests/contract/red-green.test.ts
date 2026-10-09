@@ -2,6 +2,7 @@
 // AC-089, AC-097): every checked acceptance criterion has a tagged test that fails at the merge
 // base and passes at the head. Both runs use the factory's own Vitest on trees written from raw
 // git blobs, the base run being the base sources with the head's test code laid over them.
+// Outside GitHub Actions both runs are sandboxed (T164); in it they use the job's install.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -50,12 +51,22 @@ function installed(repo: TestRepo, name: string, files: Record<string, string>) 
 
 const BRANCH = 'claude/42-calc';
 
-async function ci(repo: TestRepo, args: string[], branch: string[] = ['--branch', BRANCH]) {
+/** The laptop: the runs are sandboxed. */
+const laptop: NodeJS.ProcessEnv = { ...gitEnv, GITHUB_ACTIONS: undefined };
+/** GitHub's runner: the runs use the job's install, the checkout's `node_modules`. */
+const actions: NodeJS.ProcessEnv = { ...gitEnv, GITHUB_ACTIONS: 'true' };
+
+async function ci(
+  repo: TestRepo,
+  args: string[],
+  branch: string[] = ['--branch', BRANCH],
+  env = laptop,
+) {
   const out: string[] = [];
   const code = await runCli(['ci', 'red-green', ...args, ...branch], {
     stdout: { write: (s: string) => void out.push(s) },
     stderr: { write: (s: string) => void out.push(s) },
-    env: gitEnv,
+    env,
     stdinIsTTY: false,
     cwd: repo.path,
     unreadAlerts: () => Promise.reject(new Error('ci must not read the inbox')),
@@ -171,6 +182,39 @@ describe('factory ci red-green: each checked criterion (AC-012, AC-089)', () => 
   });
 });
 
+describe('factory ci red-green: a pass that is not green', () => {
+  it(
+    'AC-012: a tagged it.fails test, or one passing only after a retry, is not seen failing first',
+    async () => {
+      const { repo, base } = project();
+      const head = repo.commit(
+        {
+          ...FEATURE,
+          [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001', 'AC-002', 'AC-003']),
+          // A new module: the file cannot load at base, which is red for every test in it.
+          'src/mul.ts': 'export const mul = (a: number, b: number) => a * b;\n',
+          'tests/mul.test.ts': [
+            "import { expect, it } from 'vitest';",
+            "import { mul } from '../src/mul.js';",
+            "it.fails('AC-001: inverted', () => { expect(mul(2, 3)).toBe(7); });",
+            'let tries = 0;',
+            "it('AC-002: flaky', { retry: 3 }, () => { tries += 1; expect(tries).toBe(2); });",
+            "it('AC-003: multiplies', () => { expect(mul(2, 3)).toBe(6); });",
+            '',
+          ].join('\n'),
+        },
+        'mul',
+      );
+      const r = await ci(repo, [base, head, '--tier', '2']);
+      expect(r.output).toContain('AC-001: no tagged test fails at the merge base and passes');
+      expect(r.output).toContain('AC-002: no tagged test fails at the merge base and passes');
+      expect(r.output).not.toContain('AC-003:');
+      expect(r.output).toContain('1 of 3 checked criteria seen failing first');
+    },
+    RUN,
+  );
+});
+
 describe('factory ci red-green: the feature folder is the branch’s', () => {
   it('AC-089: a feature.json pointing at another feature fails; no --branch is a usage error', async () => {
     const { repo, base } = project();
@@ -267,27 +311,27 @@ describe('factory ci red-green: the test-only skip (FR-042)', () => {
   );
 });
 
-describe('factory ci red-green: the factory’s Vitest, never the project’s', () => {
-  const featureCommit = (repo: TestRepo, extra: Files = {}) =>
-    repo.commit(
-      {
-        ...FEATURE,
-        [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001', 'AC-002']),
-        'src/mul.ts':
-          "import { factor } from 'fake-dep';\nexport const mul = (a: number, b: number) => a * b * factor;\n",
-        'tests/mul.test.ts': [
-          "import { expect, it } from 'vitest';",
-          "import { mul } from '../src/mul.js';",
-          "it('AC-001: multiplies through a dependency', () => { expect(mul(2, 3)).toBe(6); });",
-          'let tries = 0;',
-          "it('AC-002: passes only on a retry', () => { tries += 1; expect(tries).toBe(2); });",
-          '',
-        ].join('\n'),
-        ...extra,
-      },
-      'feature',
-    );
+const featureCommit = (repo: TestRepo, extra: Files = {}) =>
+  repo.commit(
+    {
+      ...FEATURE,
+      [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001', 'AC-002']),
+      'src/mul.ts':
+        "import { factor } from 'fake-dep';\nexport const mul = (a: number, b: number) => a * b * factor;\n",
+      'tests/mul.test.ts': [
+        "import { expect, it } from 'vitest';",
+        "import { mul } from '../src/mul.js';",
+        "it('AC-001: multiplies through a dependency', () => { expect(mul(2, 3)).toBe(6); });",
+        'let tries = 0;',
+        "it('AC-002: passes only on a retry', () => { tries += 1; expect(tries).toBe(2); });",
+        '',
+      ].join('\n'),
+      ...extra,
+    },
+    'feature',
+  );
 
+describe('factory ci red-green: the factory’s Vitest, never the project’s', () => {
   it(
     'runs with no Vitest in the project, resolving the project’s dependencies through the linked install',
     async () => {
@@ -297,7 +341,7 @@ describe('factory ci red-green: the factory’s Vitest, never the project’s', 
         'index.js': 'export const factor = 1;\n',
       });
       const head = featureCommit(repo);
-      const r = await ci(repo, [base, head, '--tier', '2']);
+      const r = await ci(repo, [base, head, '--tier', '2'], undefined, actions);
       expect(r.output).not.toContain('AC-001:');
       // No retries: the project cannot make a flaky test pass.
       expect(r.output).toContain('AC-002: no tagged test fails at the merge base');
@@ -329,10 +373,69 @@ describe('factory ci red-green: the factory’s Vitest, never the project’s', 
         'vite.config.ts': config,
         'vitest.workspace.ts': 'export default ["nothing"];\n',
       });
-      const r = await ci(repo, [base, head, '--tier', '2']);
+      const r = await ci(repo, [base, head, '--tier', '2'], undefined, actions);
       expect(r.output).not.toContain('AC-001:');
       expect(r.output).not.toContain('the project’s own vitest');
       expect(r.output).toContain('AC-002: no tagged test fails at the merge base');
+    },
+    RUN,
+  );
+});
+
+describe('factory ci red-green: the install', () => {
+  it(
+    'on the laptop installs the head’s package.json and lockfile in the sandbox; --install is a usage error there',
+    async () => {
+      const { repo, base } = project();
+      const head = featureCommit(repo, {
+        'package.json': JSON.stringify({ name: 'calc', version: '1.0.0' }),
+        'package-lock.json': JSON.stringify({
+          name: 'calc',
+          version: '1.0.0',
+          lockfileVersion: 3,
+          requires: true,
+          packages: { '': { name: 'calc', version: '1.0.0' } },
+        }),
+      });
+      // `fake-dep` is in the checkout's node_modules only: the sandbox never sees that install.
+      installed(repo, 'fake-dep', {
+        'package.json': JSON.stringify({ name: 'fake-dep', type: 'module', main: 'index.js' }),
+        'index.js': 'export const factor = 1;\n',
+      });
+      // The test file cannot load at the head without it, so no test names AC-001.
+      const r = await ci(repo, [base, head, '--tier', '2']);
+      expect(r.output).toContain('AC-001: no test names it');
+      // The install is the head's: without its lockfile, npm ci refuses.
+      const unlocked = repo.commit({ 'package-lock.json': null }, 'no lockfile');
+      const refused = await ci(repo, [base, unlocked, '--tier', '2']);
+      expect(refused.code).toBe(1);
+      expect(refused.output).toContain('npm ci failed');
+      const usage = await ci(repo, [base, head, '--install', join(repo.path, 'node_modules')]);
+      expect(usage).toMatchObject({ code: 2 });
+      expect(usage.output).toContain('--install is accepted only in GitHub Actions');
+    },
+    RUN,
+  );
+
+  it(
+    'in GitHub Actions uses the install --install names',
+    async () => {
+      const { repo, base } = project();
+      const elsewhere = tempDir();
+      mkdirSync(join(elsewhere, 'fake-dep'), { recursive: true });
+      writeFileSync(
+        join(elsewhere, 'fake-dep', 'package.json'),
+        JSON.stringify({ name: 'fake-dep', type: 'module', main: 'index.js' }),
+      );
+      writeFileSync(join(elsewhere, 'fake-dep', 'index.js'), 'export const factor = 1;\n');
+      const head = featureCommit(repo);
+      const r = await ci(
+        repo,
+        [base, head, '--tier', '2', '--install', elsewhere],
+        undefined,
+        actions,
+      );
+      expect(r.output).not.toContain('AC-001:');
     },
     RUN,
   );
