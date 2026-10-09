@@ -6,14 +6,11 @@
 // fails there or its file fails to load; it must then pass at the head, same file and title.
 // A diff of test code only, besides the item's own feature folder, skips the check. CI reads no
 // waivers: a finding names the waiver that would cover it, and `factory merge` decides.
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { mergeBase, resolveCommit, safeDiff } from '../git/diff.js';
 import type { Tier } from '../model/types.js';
 import { isTestCode, TEST_CONFIG, type TestConfig } from '../stations/edges.js';
 import { checkedSet, featureDir, namesId, setFindings } from './ac-map.js';
-import { linkInstall, runTests, writeTree, type TestRun } from './vitest-run.js';
+import { cleanPass, inWorkspace, type Isolation, type TestRun } from './vitest-run.js';
 
 export type RedGreen =
   | { skipped: true; files: string[] }
@@ -41,7 +38,8 @@ export function judge(
       findings.push(`${id}: no test names it${dropped}`);
       continue;
     }
-    if (tagged.some((t) => t.status === 'passed' && atBase(t.file, t.name))) {
+    // A pass in `fails` mode or after a retry is not green.
+    if (tagged.some((t) => cleanPass(t) && atBase(t.file, t.name))) {
       seen += 1;
       continue;
     }
@@ -59,7 +57,7 @@ export function redGreen(
   options: {
     tier: Tier | undefined;
     branch: string;
-    install: string;
+    isolation: Isolation;
     env: NodeJS.ProcessEnv;
     config?: TestConfig;
   },
@@ -79,18 +77,11 @@ export function redGreen(
   if (changed.every((path) => own(path) || isTestCode(path, config)))
     return { skipped: true, files: changed };
 
-  const work = mkdtempSync(join(tmpdir(), 'factory-red-green-'));
-  try {
-    const tree = (name: string) => join(work, name, 'tree');
-    writeTree(repo, to, tree('head'), () => true, env);
-    writeTree(repo, start, tree('base'), (p) => !isTestCode(p, config), env);
-    writeTree(repo, to, tree('base'), (p) => isTestCode(p, config), env);
-    for (const name of ['head', 'base']) linkInstall(tree(name), options.install);
-    const headRun = runTests(tree('head'), join(work, 'head'), config, env);
-    const baseRun = runTests(tree('base'), join(work, 'base'), config, env);
-    const { findings, seen } = judge(set.ids, set.headIds, baseRun, headRun, to);
+  return inWorkspace(repo, to, { isolation: options.isolation, config, env }, (ws) => {
+    ws.write('head', to);
+    ws.write('base', start, (p) => !isTestCode(p, config));
+    ws.write('base', to, (p) => isTestCode(p, config));
+    const { findings, seen } = judge(set.ids, set.headIds, ws.test('base'), ws.test('head'), to);
     return { skipped: false, findings, checked: set.ids.size, seen };
-  } finally {
-    rmSync(work, { recursive: true, force: true });
-  }
+  });
 }

@@ -27,16 +27,25 @@ PR's code runs inside CI, so every job is built to depend on nothing the PR cont
   with `--no-color`,
   `--diff-algorithm=myers` and an explicit `-U`.
 
+- Outside GitHub Actions, the pull request's install and tests run only inside a bubblewrap
+  sandbox (`sandboxed()`, T164): no home folder, no agent sockets, an empty environment, no
+  network for the tests and only the run's temp folder writable. Without a working bubblewrap
+  the check refuses to run them. `factory merge` and `factory approve` always sandbox.
+
 What remains: test files are PR code. A test can assert nothing, or fail at the base for an
-irrelevant reason, and still count. Test code runs with the job's permissions, so it can also
-reach and rewrite the results files the checks read (accepted, 2026-10-09). The independent
+irrelevant reason, and still count. Test code runs with the job's permissions (on the laptop, the
+sandbox's), so it can also reach and rewrite the results files the checks read (accepted,
+2026-10-09). On the laptop the install step shares the host network, so the pull request's
+`.npmrc` can point npm at a service on localhost; npm only sends package GET requests there, and
+no pull request code runs with the network on (accepted, 2026-10-09). The independent
 review is the control for test quality (spec Risks).
 
 | Workflow / job | Trigger | Passes when | Spec |
 |----------------|---------|-------------|------|
 | `ci / build-test` | PR, push to `claude/**` | `factory ci test` (build, type check, Vitest with the release's config) and `factory ci lint` green | QG-1, QG-4 |
 | `ci / coverage` | PR | `factory ci coverage` ≥ the stricter of the release's floor and `coverage_min` in main's config, on changed lines | QG-3 |
-| `ci / red-green` | PR | Every checked acceptance criterion (below) has at least one test tagged with its `AC-###` that fails against the code at the merge base and passes at the head (for a changed test, its head version is run against the base code). Skipped when the diff touches only the release's test code (`paths` in `test-paths.json`), apart from the item's own feature folder and `.specify/feature.json`. A tagged test is red at the base when it fails or its file fails to load, never when skipped; it must pass at the head. A refactor passes only with a verified `gate:red-green` waiver whose `head` is the current head | FR-042, AC-012, AC-089 |
+| `ci / red-green` | PR | Every checked acceptance criterion (below) has at least one test tagged with its `AC-###` that fails against the code at the merge base and passes at the head (for a changed test, its head version is run against the base code). Skipped when the diff touches only the release's test code (`paths` in `test-paths.json`), apart from the item's own feature folder and `.specify/feature.json`. A tagged test is red at the base when it fails or its file fails to load, never when skipped; it must pass at the head on its first try and not in `fails` mode. A refactor passes only with a verified `gate:red-green` waiver whose `head` is the current head | FR-042, AC-012, AC-089 |
+| `ci / weakened` | PR | No test that passed at the merge base (base tests on base sources) is skipped, todo or missing at the head (head tests on head sources), or there runs in `fails` mode or passes only after a retry; each finding names its `test:<path>#<title>` target, a deleted test file its `test:<path>` | AC-061 |
 | `ci / ac-map` | PR | Every checked acceptance criterion has a passing tagged test | QG-2 |
 | `ci / size` | PR | Changed lines ≤ the stricter of the release's limit and `size_limit_lines` in main's config | QG-6 |
 | `ci / formal` | PR touching `formal/**` or tier 3 | TLC / Dafny checks pass | QG-7 |
