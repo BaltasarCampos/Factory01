@@ -10,6 +10,8 @@
 //   or assertions, or changes a setup file or test helper needs a signed waiver naming that test
 //   (`test:<path>#<title>`) or its file (`test:<path>`). A flaky test is fixed, or quarantined:
 //   skipped with `quarantine #<n>` naming an open issue the Owner can see, and still waived.
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { CheckResult } from '../hooks/stop.js';
 import type { Station } from '../model/types.js';
 import { meaningful, section } from './checks/spec.js';
@@ -79,23 +81,42 @@ export interface DiffFile {
 
 /** Which files are tests and which set them up, as in a Vitest config. */
 export interface TestConfig {
+  /** All test code (tests, helpers, setup): laid over the base for red-green, and its skip rule. */
+  paths: readonly string[];
   include: readonly string[];
   exclude: readonly string[];
   setupFiles: readonly string[];
   globalSetup: readonly string[];
 }
 
-/**
- * The TypeScript profile's test files (profile.yaml `tools.test.files`), hard-coded in the factory
- * and never read from the project, until T140 ships the release's Vitest config; a test fails
- * once that lands, so this constant cannot outlive it.
- */
-export const LOCAL_TEST_CONFIG: TestConfig = {
-  include: ['tests/**/*.test.ts'],
-  exclude: [],
-  setupFiles: [],
-  globalSetup: [],
-};
+/** The release's test-path patterns, shipped with the CLI; a project never supplies them. */
+export const RELEASE_TEST_PATHS = fileURLToPath(
+  new URL('../../factory/profiles/typescript/ci/test-paths.json', import.meta.url),
+);
+
+/** Reads and checks a test-paths file: five lists of glob strings, nothing else. */
+export function loadTestConfig(path: string = RELEASE_TEST_PATHS): TestConfig {
+  const value = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+  const keys = ['paths', 'include', 'exclude', 'setupFiles', 'globalSetup'] as const;
+  const extra = Object.keys(value).filter((k) => !(keys as readonly string[]).includes(k));
+  const list = (k: string) => {
+    const v = value[k];
+    if (!Array.isArray(v) || !v.every((x) => typeof x === 'string'))
+      throw new Error(`${path}: ${k} must be a list of patterns`);
+    return v;
+  };
+  if (extra.length > 0) throw new Error(`${path}: unknown keys ${extra.join(', ')}`);
+  return {
+    paths: list('paths'),
+    include: list('include'),
+    exclude: list('exclude'),
+    setupFiles: list('setupFiles'),
+    globalSetup: list('globalSetup'),
+  };
+}
+
+/** Which files are tests, for the weakened-test check, `factory ci coverage` and red-green. */
+export const TEST_CONFIG: TestConfig = loadTestConfig();
 
 export interface TestFinding {
   message: string;
@@ -117,10 +138,12 @@ export interface TestChanges {
 const glob = (pattern: string) =>
   new RegExp(
     `^${pattern
-      .split(/(\*\*\/|\*)/)
-      .map((p) =>
-        p === '**/' ? '(?:.*/)?' : p === '*' ? '[^/]*' : p.replace(/[.+?^${}()|[\]\\]/g, '\\$&'),
-      )
+      .split(/(\*\*\/|\*\*|\*)/)
+      .map((p) => {
+        if (p === '**/') return '(?:.*/)?';
+        if (p === '**') return '.*';
+        return p === '*' ? '[^/]*' : p.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+      })
       .join('')}$`,
   );
 const matches = (patterns: readonly string[], path: string) =>
@@ -128,9 +151,13 @@ const matches = (patterns: readonly string[], path: string) =>
 const inTestPaths = (config: TestConfig, path: string) =>
   matches(config.include, path) && !matches(config.exclude, path);
 
-/** Whether `path` is a test file; `factory ci coverage` uses the same pattern, so T140 moves both. */
-export const isTestFile = (path: string, config: TestConfig = LOCAL_TEST_CONFIG) =>
+/** Whether `path` is a test file, by the release's patterns, as coverage and red-green read them. */
+export const isTestFile = (path: string, config: TestConfig = TEST_CONFIG) =>
   inTestPaths(config, path);
+
+/** Whether `path` is test code (a test, helper or setup file) by the release's `paths`. */
+export const isTestCode = (path: string, config: TestConfig = TEST_CONFIG) =>
+  matches(config.paths, path);
 
 // An early warning only: the check that decides, at merge, runs Vitest at base and head with
 // the JSON reporter and flags every test that passed at base but is skipped, todo or missing at
@@ -179,7 +206,7 @@ function resolveImport(from: string, spec: string, files: ReadonlyMap<string, st
 export function testHelpers(
   base: ReadonlyMap<string, string>,
   head: ReadonlyMap<string, string>,
-  config: TestConfig = LOCAL_TEST_CONFIG,
+  config: TestConfig = TEST_CONFIG,
 ): Set<string> {
   const helpers = new Set<string>();
   const tests = new Set<string>();
@@ -240,7 +267,7 @@ export function weakenedTests(
     config?: TestConfig;
   },
 ): TestChanges {
-  const config = options.config ?? LOCAL_TEST_CONFIG;
+  const config = options.config ?? TEST_CONFIG;
   const findings: TestFinding[] = [];
   const problems: string[] = [];
   const quarantines: number[] = [];

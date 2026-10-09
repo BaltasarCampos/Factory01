@@ -1,0 +1,7 @@
+{
+  "paths": ["tests/**"],
+  "include": ["tests/**/*.test.ts"],
+  "exclude": [],
+  "setupFiles": [],
+  "globalSetup": []
+}

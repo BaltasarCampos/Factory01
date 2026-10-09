@@ -2,11 +2,11 @@
 // adds, from the safe diff, against Vitest's lcov report. Deleted lines never count. A changed
 // source file the report does not list fails by name: a file no test loads has no coverage to
 // measure, and guessing which of its lines are executable would let it pass. Test files are
-// never sources; they are found with the weakened-test check's pattern, so T140 moves both.
+// never sources; they are found with the weakened-test check's pattern, read from the release's test-paths.json.
 import { realpathSync } from 'node:fs';
 import { isAbsolute, posix, relative } from 'node:path';
 import type { FileChange } from '../git/diff.js';
-import { isTestFile, LOCAL_TEST_CONFIG } from '../stations/edges.js';
+import { isTestFile, TEST_CONFIG } from '../stations/edges.js';
 
 /** Sources the TypeScript profile measures. */
 const SOURCE = /^src\/.+\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
@@ -58,7 +58,7 @@ export function measureCoverage(
     if (lines === undefined) {
       const { path } = change;
       if (isTestFile(path) || !SOURCE.test(path) || DECLARATION.test(path)) continue;
-      const pattern = LOCAL_TEST_CONFIG.include.join(', ');
+      const pattern = TEST_CONFIG.include.join(', ');
       result.problems.push(
         TEST_NAME.test(path)
           ? `${path} is outside the test paths (${pattern}), so it never runs; move it under tests/`

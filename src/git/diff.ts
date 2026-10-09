@@ -49,7 +49,12 @@ const GITLINK = '160000';
  * global config also drops a CI runner's `safe.directory`, so the repository is named on the
  * command line, which git counts as protected configuration.
  */
-export function safeGit(repo: string, args: readonly string[], env: NodeJS.ProcessEnv) {
+export function safeGit(
+  repo: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  input?: string,
+) {
   const clean = Object.fromEntries(
     Object.entries(env).filter(([name]) => !name.startsWith('GIT_')),
   );
@@ -67,7 +72,8 @@ export function safeGit(repo: string, args: readonly string[], env: NodeJS.Proce
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_ATTR_NOSYSTEM: '1',
       },
-      maxBuffer: 256 * 1024 * 1024,
+      maxBuffer: 1024 * 1024 * 1024,
+      ...(input === undefined ? {} : { input }),
     },
   );
   if (result.error !== undefined) throw result.error;
