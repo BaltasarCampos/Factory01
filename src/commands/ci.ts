@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { checkAcMap, checkedSet, passingTitles } from '../ci/ac-map.js';
 import { checkAppendOnly, LOG_BRANCH } from '../ci/append-only.js';
 import { meetsThreshold, measureCoverage, parseLcov } from '../ci/coverage.js';
+import { redGreen } from '../ci/red-green.js';
 import { measureSize } from '../ci/size.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
@@ -94,15 +95,32 @@ function coverageCheck(ctx: CommandContext, args: readonly string[]): number {
   return report(ctx, 'coverage', findings, [summary]);
 }
 
-function acMapCheck(ctx: CommandContext, args: readonly string[]): number {
-  const [base, head] = range(args, 'ac-map <base> <head> [--tier <1|2|3>]');
+/** `--tier`, from the issue's label: unverified, and used in CI only. */
+function tierOption(ctx: CommandContext): { tier: Tier | undefined; label: string } {
   const raw = ctx.options.tier;
   if (raw !== undefined && raw !== '1' && raw !== '2' && raw !== '3')
     throw new UsageError('--tier must be 1, 2 or 3');
-  const tier = raw === undefined ? undefined : (Number(raw) as Tier);
-  const set = checkedSet(ctx.cwd, base, head, tier, ctx.env);
+  return {
+    tier: raw === undefined ? undefined : (Number(raw) as Tier),
+    label: raw ?? '1, none given',
+  };
+}
+
+/** `--branch`, the pull request's head branch, which names the item's feature folder. */
+function branchOption(ctx: CommandContext, check: string): string {
+  const { branch } = ctx.options;
+  if (typeof branch !== 'string')
+    throw new UsageError(`factory ci ${check} needs --branch <head branch>`);
+  return branch;
+}
+
+function acMapCheck(ctx: CommandContext, args: readonly string[]): number {
+  const [base, head] = range(args, 'ac-map <base> <head> --branch <name> [--tier <1|2|3>]');
+  const branch = branchOption(ctx, 'ac-map');
+  const { tier, label } = tierOption(ctx);
+  const set = checkedSet(ctx.cwd, base, head, tier, branch, ctx.env);
   const titles = passingTitles(readReport(ctx, 'coverage/vitest-results.json', head));
-  const checked = `${String(set.ids.size)} checked acceptance criteria (tier ${raw ?? '1, none given'})`;
+  const checked = `${String(set.ids.size)} checked acceptance criteria (tier ${label})`;
   return report(ctx, 'ac-map', checkAcMap(set, titles), [checked]);
 }
 
@@ -114,11 +132,27 @@ function appendOnlyCheck(ctx: CommandContext, args: readonly string[]): number {
   return report(ctx, 'append-only', findings);
 }
 
+function redGreenCheck(ctx: CommandContext, args: readonly string[]): number {
+  const [base, head] = range(args, 'red-green <base> <head> --branch <name> [--tier <1|2|3>]');
+  const branch = branchOption(ctx, 'red-green');
+  const { tier, label } = tierOption(ctx);
+  const install = join(ctx.cwd, 'node_modules');
+  const result = redGreen(ctx.cwd, base, head, { tier, branch, install, env: ctx.env });
+  if (result.skipped) {
+    const files = result.files.map((f) => `  ${f}\n`).join('');
+    ctx.io.stdout.write(`red-green skipped: only test code changed\n${files}`);
+    return ExitCode.Ok;
+  }
+  const summary = `${String(result.seen)} of ${String(result.checked)} checked criteria seen failing first (tier ${label})`;
+  return report(ctx, 'red-green', result.findings, [summary]);
+}
+
 const CHECKS: Readonly<Record<string, (ctx: CommandContext, args: readonly string[]) => number>> = {
   'append-only': appendOnlyCheck,
   size: sizeCheck,
   coverage: coverageCheck,
   'ac-map': acMapCheck,
+  'red-green': redGreenCheck,
 };
 
 export function ci(ctx: CommandContext): Promise<number> {

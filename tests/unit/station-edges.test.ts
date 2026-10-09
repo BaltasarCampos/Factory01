@@ -1,4 +1,4 @@
-import { existsSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -8,13 +8,18 @@ import { runStop } from '../../src/hooks/stop.js';
 import {
   checkSplit,
   conflictFailure,
-  LOCAL_TEST_CONFIG,
+  isTestCode,
+  isTestFile,
+  loadTestConfig,
+  RELEASE_TEST_PATHS,
+  TEST_CONFIG,
   splitFailure,
   testHelpers,
   weakenedTests,
   type DiffFile,
 } from '../../src/stations/edges.js';
 import { makeRepo } from '../helpers/git-repo.js';
+import { tempDir } from '../helpers/keys.js';
 
 const BRANCH = 'claude/42-add-login';
 const verified = (gate: 'approved' | 'spec-approved'): Verdict => ({
@@ -323,7 +328,7 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
 
   it('AC-061: changed setup files and test helpers need a file-wide waiver', () => {
     const setup = 'tests/setup.ts';
-    const config = { ...LOCAL_TEST_CONFIG, setupFiles: [setup], globalSetup: [] };
+    const config = { ...TEST_CONFIG, setupFiles: [setup], globalSetup: [] };
     const diff = [
       file(setup, ['process.env.TZ = "UTC";']),
       file('tests/helpers/db.ts', ['export const seed = 2;'], ['export const seed = 1;']),
@@ -457,17 +462,29 @@ describe('flaky, skipped and weakened tests (AC-061)', () => {
     expect(messages(result)).toEqual(['tests/a.test.ts: removes 1 assertion']);
   });
 
-  it('AC-061 (end date, T140): the local test-path constant stays only until the release ships test-paths.json', () => {
-    // When this fails, T140 has landed: switch src/stations/edges.ts to the release's patterns
-    // and setup files, then delete LOCAL_TEST_CONFIG and this test.
+  it('AC-061: test paths come from the release’s test-paths.json, never a local constant or the project', () => {
     const root = fileURLToPath(new URL('../../', import.meta.url));
-    expect(existsSync(join(root, 'factory/profiles/typescript/ci/test-paths.json'))).toBe(false);
-    expect(LOCAL_TEST_CONFIG).toEqual({
-      include: ['tests/**/*.test.ts'],
-      exclude: [],
-      setupFiles: [],
-      globalSetup: [],
-    });
+    const shipped = join(root, 'factory/profiles/typescript/ci/test-paths.json');
+    expect(RELEASE_TEST_PATHS).toBe(shipped);
+    expect(TEST_CONFIG).toEqual(JSON.parse(readFileSync(shipped, 'utf8')));
+    expect(TEST_CONFIG.include).toEqual(['tests/**/*.test.ts']);
+    expect(TEST_CONFIG.paths).toEqual(['tests/**']);
+  });
+
+  it('AC-061: test code is everything under tests/, at any depth; test files only *.test.ts there', () => {
+    expect(isTestCode('tests/helpers/git/repo.ts')).toBe(true);
+    expect(isTestCode('src/tests/x.ts')).toBe(false);
+    expect(isTestFile('tests/helpers/git/repo.ts')).toBe(false);
+    expect(isTestFile('tests/unit/a/b.test.ts')).toBe(true);
+  });
+
+  it('AC-061: a test-paths file with anything but the five pattern lists is refused', () => {
+    const dir = tempDir();
+    const file = join(dir, 'test-paths.json');
+    writeFileSync(file, JSON.stringify({ ...TEST_CONFIG, include: 'tests/**' }));
+    expect(() => loadTestConfig(file)).toThrow(/include must be a list/);
+    writeFileSync(file, JSON.stringify({ ...TEST_CONFIG, retry: 3 }));
+    expect(() => loadTestConfig(file)).toThrow(/unknown keys retry/);
   });
 });
 

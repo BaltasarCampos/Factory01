@@ -11,19 +11,39 @@ import type { Tier } from '../model/types.js';
 
 const AC_ID = /\bAC-\d+\b/g;
 
-/** The feature folder `.specify/feature.json` names at `commit`. */
-function featureDir(repo: string, commit: string, env: NodeJS.ProcessEnv): string {
+const ITEM_BRANCH = /^claude\/(\d+-[a-z0-9-]+)$/;
+
+/**
+ * The item's feature folder: `specs/<issue>-<slug>` for the branch `claude/<issue>-<slug>`, and
+ * `.specify/feature.json` at `commit` must name exactly that. Otherwise a branch could point the
+ * checks at another feature's criteria, or at a new trivial spec.
+ */
+export function featureDir(
+  repo: string,
+  commit: string,
+  branch: string,
+  env: NodeJS.ProcessEnv,
+): string {
+  const item = ITEM_BRANCH.exec(branch)?.[1];
+  if (item === undefined)
+    throw new RefusedError(`${branch} is not a work-item branch (claude/<issue>-<slug>)`);
   const bytes = fileAt(repo, commit, '.specify/feature.json', env);
   if (bytes === undefined) throw new RefusedError('no .specify/feature.json at the head');
   const dir = (JSON.parse(bytes.toString('utf8')) as { feature_directory?: unknown })
     .feature_directory;
   if (typeof dir !== 'string' || !/^specs\/[^/]+$/.test(dir))
     throw new RefusedError('.specify/feature.json: feature_directory must be specs/<feature>');
+  if (dir !== `specs/${item}`)
+    throw new RefusedError(
+      `.specify/feature.json names ${dir}, but the branch ${branch} is the feature specs/${item}`,
+    );
   return dir;
 }
 
 export interface CheckedSet {
   ids: Set<string>;
+  /** The IDs in `spec.md` at the head; at tier 1 `ids` may hold more. */
+  headIds: Set<string>;
   /** Criterion lines at the head without exactly one leading ID. */
   problems: string[];
 }
@@ -33,14 +53,16 @@ export function checkedSet(
   base: string,
   head: string,
   tier: Tier | undefined,
+  branch: string,
   env: NodeJS.ProcessEnv = process.env,
 ): CheckedSet {
   const to = resolveCommit(repo, head, env);
-  const spec = `${featureDir(repo, to, env)}/spec.md`;
+  const spec = `${featureDir(repo, to, branch, env)}/spec.md`;
   const text = fileAt(repo, to, spec, env)?.toString('utf8');
   if (text === undefined) throw new RefusedError(`no ${spec} at the head`);
   const lines = criterionLines(text);
-  const ids = new Set(lines.flatMap((l) => (l.id === undefined ? [] : [l.id])));
+  const headIds = new Set(lines.flatMap((l) => (l.id === undefined ? [] : [l.id])));
+  const ids = new Set(headIds);
   const problems = lines.flatMap((l) =>
     l.problem === undefined ? [] : [`spec.md:${String(l.line)}: ${l.problem}`],
   );
@@ -53,7 +75,7 @@ export function checkedSet(
         if (line.id !== undefined) ids.add(line.id);
     }
   }
-  return { ids, problems };
+  return { ids, headIds, problems };
 }
 
 type TestResult = {
@@ -78,11 +100,20 @@ export function passingTitles(json: string): string[] {
   );
 }
 
+/** Whether a test title names `id` exactly: `AC-01` is not named by a title with `AC-010`. */
+export const namesId = (title: string, id: string) =>
+  [...title.matchAll(AC_ID)].some(([found]) => found === id);
+
+/** The checked-set findings red-green and ac-map share: problems, and an empty set. */
+export const setFindings = (set: CheckedSet) => [
+  ...set.problems,
+  ...(set.ids.size === 0 ? ['no acceptance criteria to check'] : []),
+];
+
 export function checkAcMap(set: CheckedSet, titles: readonly string[]): string[] {
   const named = new Set(titles.flatMap((t) => t.match(AC_ID) ?? []));
   return [
-    ...set.problems,
-    ...(set.ids.size === 0 ? ['no acceptance criteria to check'] : []),
+    ...setFindings(set),
     ...[...set.ids]
       .sort()
       .flatMap((id) => (named.has(id) ? [] : [`${id}: no passing test names it`])),
