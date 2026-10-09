@@ -128,6 +128,10 @@ const matches = (patterns: readonly string[], path: string) =>
 const inTestPaths = (config: TestConfig, path: string) =>
   matches(config.include, path) && !matches(config.exclude, path);
 
+/** Whether `path` is a test file; `factory ci coverage` uses the same pattern, so T140 moves both. */
+export const isTestFile = (path: string, config: TestConfig = LOCAL_TEST_CONFIG) =>
+  inTestPaths(config, path);
+
 // An early warning only: the check that decides, at merge, runs Vitest at base and head with
 // the JSON reporter and flags every test that passed at base but is skipped, todo or missing at
 // head (T140, T068). Any `.skip(` call counts, so `ctx.skip()` inside a test does too.
