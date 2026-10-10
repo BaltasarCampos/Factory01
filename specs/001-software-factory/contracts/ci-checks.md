@@ -27,6 +27,14 @@ PR's code runs inside CI, so every job is built to depend on nothing the PR cont
   with `--no-color`,
   `--diff-algorithm=myers` and an explicit `-U`.
 
+- Nothing in the pull request can silence a tool. Test, lint, scan and the type check run on a
+  tree written from raw blobs that leaves out every tool config and ignore file the project
+  could supply, at any depth (`tsconfig*.json`, `eslint.config.*`, `.eslintrc*`, `.eslintignore`,
+  `.semgrepignore`, `.semgrep*`, `.gitleaks.toml`, `.gitleaksignore`, the Vitest and Vite
+  configs), and get the release's configs explicitly. Inline suppression is off: ESLint runs with
+  `noInlineConfig`, so an `eslint-disable` comment silences nothing and is itself reported, and
+  `ban-ts-comment` fails every `@ts-ignore`, `@ts-nocheck` and `@ts-expect-error` (tsc itself
+  honours them, so for a type error hidden that way it is `lint` that fails).
 - Outside GitHub Actions, the pull request's install and tests run only inside a bubblewrap
   sandbox (`sandboxed()`, T164): no home folder, no agent sockets, an empty environment, no
   network for the tests and only the run's temp folder writable. Without a working bubblewrap
@@ -42,7 +50,7 @@ review is the control for test quality (spec Risks).
 
 | Workflow / job | Trigger | Passes when | Spec |
 |----------------|---------|-------------|------|
-| `ci / build-test` | PR, push to `claude/**` | `factory ci test` (build, type check, Vitest with the release's config) and `factory ci lint` green | QG-1, QG-4 |
+| `ci / build-test` | PR, push to `claude/**` | `factory ci test <head>` (the factory's tsc with the release's `tsconfig.json`, then the factory's Vitest with the release's test paths and coverage of every file under `src/`; it writes `coverage/lcov.info`, with repository-relative paths, and `coverage/vitest-results.json`) and `factory ci lint <head>` (the factory's ESLint with the release's `eslint.config.mjs` on every TypeScript file outside `node_modules/` and `dist/`, which the type check covers too; every message counts, and any `.js`, `.mjs`, `.cjs`, `.jsx` or `.tsx` file there is a finding: the profile takes TypeScript only, without JSX) green | QG-1, QG-4 |
 | `ci / coverage` | PR | `factory ci coverage` ≥ the stricter of the release's floor and `coverage_min` in main's config, on changed lines | QG-3 |
 | `ci / red-green` | PR | Every checked acceptance criterion (below) has at least one test tagged with its `AC-###` that fails against the code at the merge base and passes at the head (for a changed test, its head version is run against the base code). Skipped when the diff touches only the release's test code (`paths` in `test-paths.json`), apart from the item's own feature folder and `.specify/feature.json`. A tagged test is red at the base when it fails or its file fails to load, never when skipped; it must pass at the head on its first try and not in `fails` mode. A refactor passes only with a verified `gate:red-green` waiver whose `head` is the current head | FR-042, AC-012, AC-089 |
 | `ci / weakened` | PR | No test that passed at the merge base (base tests on base sources) is skipped, todo or missing at the head (head tests on head sources), or there runs in `fails` mode or passes only after a retry; each finding names its `test:<path>#<title>` target, a deleted test file its `test:<path>` | AC-061 |

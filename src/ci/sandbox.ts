@@ -21,8 +21,12 @@ const SPAWN = { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 30 * 60
 /** `factory ci <check>` runs pull request code unsandboxed only on GitHub's runner. */
 export const inGithubActions = (env: NodeJS.ProcessEnv) => env.GITHUB_ACTIONS === 'true';
 
-/** The factory's own folder: its built CLI (`dist/`) and its dependencies, Vitest among them. */
-const factoryRoot = () => fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
+/**
+ * The factory's own folder: its built CLI (`dist/`), its dependencies (Vitest, tsc and ESLint
+ * among them) and the release's configs (`factory/`).
+ */
+export const factoryRoot = () =>
+  fileURLToPath(new URL('../..', import.meta.url)).replace(/\/$/, '');
 
 /** The npm package that `npm` beside Node resolves to, as nvm or a system install lays it out. */
 export function npmCli(): string {
@@ -65,6 +69,7 @@ export function sandboxArgs(work: string, cwd: string, network: boolean): string
     ...ro(node),
     ...ro(dirname(dirname(npmCli()))),
     ...['--ro-bind-try', join(root, 'dist'), join(root, 'dist')],
+    ...ro(join(root, 'factory')),
     ...ro(join(root, 'node_modules')),
     ...['--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp'],
     ...['--bind', work, work],

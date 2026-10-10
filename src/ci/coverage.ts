@@ -8,7 +8,8 @@ import { isAbsolute, posix, relative } from 'node:path';
 import type { FileChange } from '../git/diff.js';
 import { isTestFile, TEST_CONFIG } from '../stations/edges.js';
 
-/** Sources the TypeScript profile measures. */
+/** Sources the TypeScript profile measures; `factory ci test` reports every file they match. */
+export const SOURCE_GLOBS = ['src/**'];
 const SOURCE = /^src\/.+\.(?:ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
 const DECLARATION = /\.d\.[mc]?ts$/;
 /** Named like a test, wherever it is. */
