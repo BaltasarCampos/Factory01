@@ -1,0 +1,73 @@
+#!/usr/bin/env node
+// A stand-in for the pinned semgrep in the scan tests (T136), checked against semgrep 1.180.0.
+// It does what the real tool does by default with each lever: its config is --config, else
+// `.semgrep.yml` in the folder; `.semgrepignore` files apply at any depth, and with none at the
+// root a default list skips tests/; a `nosem` or `nosemgrep` comment hides its line unless
+// --disable-nosem; inside a git work tree only the files git lists count, so git's ignore rules
+// apply, unless --no-git-ignore. It knows one rule, `no-eval`, when the config names it.
+import { spawnSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
+
+const args = process.argv.slice(2);
+const pins = new URL('../../../factory/profiles/typescript/ci/tools.json', import.meta.url);
+if (args[0] === '--version') {
+  console.log(process.env.FAKE_SEMGREP_VERSION ?? JSON.parse(readFileSync(pins, 'utf8')).semgrep);
+  process.exit(0);
+}
+const option = (name) => (args.includes(name) ? args[args.indexOf(name) + 1] : undefined);
+const config = option('--config') ?? (existsSync('.semgrep.yml') ? '.semgrep.yml' : undefined);
+const rules = config === undefined ? '' : readFileSync(config, 'utf8');
+const nosem = !args.includes('--disable-nosem');
+const listed = args.includes('--no-git-ignore')
+  ? null
+  : spawnSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z'], {
+      encoding: 'utf8',
+    });
+const gitFiles = listed?.status === 0 ? new Set(listed.stdout.split('\0')) : null;
+
+const glob = (p) =>
+  new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '[^/]*')}$`);
+/** Whether a .semgrepignore line in `dir` ignores `path` (both relative to the root). */
+function ignores(line, dir, path) {
+  const rel = dir === '' ? path : path.startsWith(`${dir}/`) ? path.slice(dir.length + 1) : null;
+  if (rel === null || line === '' || line.startsWith('#')) return false;
+  const parts = rel.split('/');
+  if (line.endsWith('/')) return parts.slice(0, -1).some((p) => glob(line.slice(0, -1)).test(p));
+  return line.includes('/')
+    ? glob(line.replace(/^\//, '')).test(rel)
+    : glob(line).test(parts.at(-1));
+}
+
+const files = [];
+const ignoreFiles = existsSync('.semgrepignore') ? [] : [['', 'tests/\nnode_modules/\ndist/']];
+(function walk(dir) {
+  for (const name of readdirSync(dir).sort()) {
+    const full = join(dir, name);
+    if (name === '.semgrepignore')
+      ignoreFiles.push([relative('.', dir), readFileSync(full, 'utf8')]);
+    else if (statSync(full).isDirectory()) walk(full);
+    else if (/\.[cm]?[jt]sx?$/.test(name)) files.push(relative('.', full));
+  }
+})('.');
+
+const results = [];
+for (const path of files) {
+  const skip = ignoreFiles.some(([dir, text]) =>
+    text.split('\n').some((line) => ignores(line.trim(), dir, path)),
+  );
+  if (skip || gitFiles?.has(path) === false || !/^\s*- id: no-eval$/m.test(rules)) continue;
+  const text = readFileSync(path, 'utf8');
+  for (const m of text.matchAll(/\beval\([^)]*\)/g)) {
+    const line = text.slice(0, m.index).split('\n').length;
+    if (nosem && /\bnosem(grep)?\b/.test(text.split('\n')[line - 1])) continue;
+    results.push({
+      check_id: `fake.config.path.no-eval`,
+      path,
+      start: { line, offset: m.index },
+      end: { offset: m.index + m[0].length },
+      extra: { message: 'eval runs a string as code', lines: 'requires login' },
+    });
+  }
+}
+console.log(JSON.stringify({ results, errors: [] }));

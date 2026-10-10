@@ -7,6 +7,7 @@ import { checkAppendOnly, LOG_BRANCH } from '../ci/append-only.js';
 import { meetsThreshold, measureCoverage, parseLcov } from '../ci/coverage.js';
 import { lintHead } from '../ci/lint.js';
 import { redGreen } from '../ci/red-green.js';
+import { scanGitleaks, scanMarkers, scanSemgrep } from '../ci/scan.js';
 import { inGithubActions } from '../ci/sandbox.js';
 import { measureSize } from '../ci/size.js';
 import { testHead } from '../ci/test.js';
@@ -204,6 +205,23 @@ function lintCheck(ctx: CommandContext, args: readonly string[]): number {
   return report(ctx, 'lint', result.findings, [`${String(result.files)} files linted`]);
 }
 
+function scanCheck(ctx: CommandContext, args: readonly string[]): number {
+  const [tool = '', ...rest] = args;
+  const [base, head] = range(rest, 'scan <semgrep|gitleaks|markers> <base> <head>');
+  const check = `scan ${tool}`;
+  if (tool === 'semgrep') {
+    const r = scanSemgrep(ctx.cwd, base, head, ctx.env);
+    const summary = `${String(r.head)} matches at the head, ${String(r.base)} at the merge base`;
+    return report(ctx, check, r.findings, [summary]);
+  }
+  if (tool === 'gitleaks') {
+    const r = scanGitleaks(ctx.cwd, base, head, ctx.env);
+    return report(ctx, check, r.findings, [`${String(r.commits)} commits scanned`]);
+  }
+  if (tool === 'markers') return report(ctx, check, scanMarkers(ctx.cwd, base, head, ctx.env));
+  throw new UsageError('usage: factory ci scan <semgrep|gitleaks|markers> <base> <head>');
+}
+
 const CHECKS: Readonly<Record<string, (ctx: CommandContext, args: readonly string[]) => number>> = {
   'append-only': appendOnlyCheck,
   size: sizeCheck,
@@ -213,6 +231,7 @@ const CHECKS: Readonly<Record<string, (ctx: CommandContext, args: readonly strin
   weakened: weakenedCheck,
   test: testCheck,
   lint: lintCheck,
+  scan: scanCheck,
 };
 
 export function ci(ctx: CommandContext): Promise<number> {

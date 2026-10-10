@@ -5,13 +5,15 @@
 // Off GitHub Actions they run in the laptop sandbox, which installs the head's dependencies.
 import {
   existsSync,
+  readdirSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { repoRelative } from '../../src/ci/test.js';
 import { writeTree } from '../../src/ci/vitest-run.js';
@@ -63,6 +65,8 @@ async function ci(repo: TestRepo, args: string[], env = laptop) {
     cwd: repo.path,
     unreadAlerts: () => Promise.reject(new Error('ci must not read the inbox')),
   });
+  // The checks block the worker while their tools run; Vitest's own messages need a turn.
+  await new Promise((resolve) => setImmediate(resolve));
   return { code, output: out.join('') };
 }
 
@@ -295,6 +299,31 @@ describe('factory ci test and lint in GitHub Actions, on the job’s install (T1
 
       expect(lint.code).toBe(1);
       expect(lint.output).toContain('src/calc.ts:3: @typescript-eslint/no-explicit-any');
+    },
+    RUN,
+  );
+});
+
+describe('the profile skeleton (T047, T130)', () => {
+  it(
+    'a project made from the skeleton as shipped passes factory ci test and lint',
+    async () => {
+      const skeleton = fileURLToPath(
+        new URL('../../factory/profiles/typescript/skeleton', import.meta.url),
+      );
+      const files = readdirSync(skeleton, { recursive: true, withFileTypes: true })
+        .filter((e) => e.isFile())
+        .map((e) => relative(skeleton, join(e.parentPath, e.name)));
+      const repo = makeRepo({
+        files: Object.fromEntries(files.map((f) => [f, readFileSync(join(skeleton, f), 'utf8')])),
+      });
+      // Its dependencies (@types/node, typescript, vitest) at the factory's own versions.
+      const install = fileURLToPath(new URL('../../node_modules', import.meta.url));
+
+      for (const check of ['test', 'lint'])
+        expect(await ci(repo, [check, 'HEAD', '--install', install], actions)).toMatchObject({
+          code: 0,
+        });
     },
     RUN,
   );

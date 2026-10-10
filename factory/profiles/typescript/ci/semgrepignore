@@ -1,0 +1,4 @@
+# Written into each tree as its only .semgrepignore, in place of Semgrep's default list, which
+# skips tests/: test code is pull request code too.
+node_modules/
+dist/
