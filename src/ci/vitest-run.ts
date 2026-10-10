@@ -2,10 +2,11 @@
 // is written from raw git blobs (`ls-tree -r -z` and `cat-file --batch` through `safeGit`), never
 // by checkout or `git archive`, which apply `export-ignore` and `export-subst`; the project's
 // install is linked in as `node_modules`; and the tests run under the Vitest the factory CLI was
-// built with, with a config written here from the release's test paths. Nothing from the
-// project's Vitest or Vite config loads, and `import … from 'vitest'` resolves to the runner's own
-// copy. The tests themselves are the pull request's code: outside GitHub Actions they and their
-// install run only in the sandbox (T164).
+// built with, with a config written here from the release's test paths. No tool config or ignore
+// file of the project's is written into a tree (Owner decision 2026-10-10), and `import … from
+// 'vitest'` resolves to the runner's own copy. The tests themselves are the pull request's code:
+// outside GitHub Actions they and their install run only in the sandbox (T164).
+import type { SpawnSyncReturns } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
   chmodSync,
@@ -23,11 +24,16 @@ import { dirname, join, posix, relative } from 'node:path';
 import { RefusedError } from '../cli/env.js';
 import { safeGit } from '../git/diff.js';
 import type { TestConfig } from '../stations/edges.js';
+import { SOURCE_GLOBS } from './coverage.js';
 import { npmCli, sandboxed, unsandboxed, type Runner } from './sandbox.js';
 
-/** Project config files Vitest or Vite would read at the root; never written into a tree. */
-const PROJECT_CONFIG =
-  /^(?:vitest|vite)\.config\.[cm]?[jt]s$|^vitest\.(?:workspace|projects)\.(?:[cm]?[jt]s|json)$/;
+/**
+ * Configs and ignore files Vitest, Vite, tsc, ESLint, Semgrep or gitleaks would read: a path with
+ * any part named so is never written into a tree. The release passes its own configs.
+ */
+const TOOL_CONFIG =
+  /^(?:(?:vitest|vite)\.config\.[cm]?[jt]s|vitest\.(?:workspace|projects)\.(?:[cm]?[jt]s|json)|tsconfig.*\.json|eslint\.config\..*|\.eslintrc.*|\.eslintignore|\.semgrep.*|\.gitleaks\.toml|\.gitleaksignore)$/;
+const toolConfig = (path: string) => path.split('/').some((part) => TOOL_CONFIG.test(part));
 
 /** A path git would never check out: absolute, or with an empty, `.`, `..` or `.git` part. */
 export function unsafePath(path: string): boolean {
@@ -72,7 +78,7 @@ export function writeTree(
     (e) =>
       e.mode !== '160000' &&
       keep(e.path) &&
-      !PROJECT_CONFIG.test(e.path) &&
+      !toolConfig(e.path) &&
       e.path.split('/')[0] !== 'node_modules',
   );
   if (written.length === 0) return [];
@@ -138,8 +144,12 @@ export type Isolation = { sandbox: true } | { sandbox: false; install: string };
 export interface Workspace {
   /** Writes `commit`'s files for which `keep` holds into the named tree; returns their paths. */
   write(name: string, commit: string, keep?: (path: string) => boolean): string[];
-  /** Links the install into the named tree and runs its tests. */
-  test(name: string): TestRun;
+  /** The named tree's folder, inside the named run's folder. */
+  tree(name: string): string;
+  /** Runs `argv` in the named tree, with the install linked in. */
+  run(name: string, argv: readonly string[]): SpawnSyncReturns<string>;
+  /** Runs the named tree's tests; with `coverage`, lcov.info lands in the run's `coverage/`. */
+  test(name: string, coverage?: boolean): TestRun;
 }
 
 /** Runs `fn` in a fresh temp folder, removed afterwards, with the head's install ready. */
@@ -155,24 +165,37 @@ export function inWorkspace<T>(
     const run = isolation.sandbox ? sandboxed(work, env) : unsandboxed(env);
     const install = isolation.sandbox ? installHead(repo, head, work, run, env) : isolation.install;
     const tree = (name: string) => join(work, name, 'tree');
+    const linked = new Set<string>();
+    const ready = (name: string) => {
+      mkdirSync(tree(name), { recursive: true });
+      if (!linked.has(name)) linkInstall(tree(name), install);
+      linked.add(name);
+      return tree(name);
+    };
     return fn({
       write: (name, commit, keep = () => true) => writeTree(repo, commit, tree(name), keep, env),
-      test: (name) => {
-        mkdirSync(tree(name), { recursive: true });
-        linkInstall(tree(name), install);
-        return runTests(tree(name), join(work, name), options.config, run);
-      },
+      tree,
+      run: (name, argv) => run(argv, ready(name)),
+      test: (name, coverage = false) =>
+        runTests(ready(name), join(work, name), options.config, run, coverage),
     });
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
 }
 
-/** The Vitest this CLI was built with: its entry (for the alias) and its command. */
+/** The Vitest this CLI was built with: its entry (for the alias), command and coverage provider. */
 function factoryVitest() {
+  const require = createRequire(import.meta.url);
   // The package's CommonJS entry names its folder; the ES entry and the command sit beside it.
-  const root = dirname(createRequire(import.meta.url).resolve('vitest'));
-  return { entry: join(root, 'dist', 'index.js'), bin: join(root, 'vitest.mjs') };
+  const root = dirname(require.resolve('vitest'));
+  return {
+    entry: join(root, 'dist', 'index.js'),
+    bin: join(root, 'vitest.mjs'),
+    // Aliased like Vitest: by name, Vitest and its workers would load the provider from the
+    // tree, where the project's install could hold its own.
+    coverage: require.resolve('@vitest/coverage-v8'),
+  };
 }
 
 export interface TestOutcome {
@@ -221,8 +244,17 @@ export interface TestRun {
   loadFailed: Set<string>;
 }
 
-/** Runs the tree's tests under the factory's Vitest and the release's test paths. */
-export function runTests(dir: string, work: string, config: TestConfig, run: Runner): TestRun {
+/**
+ * Runs the tree's tests under the factory's Vitest and the release's test paths. With `coverage`,
+ * `work/coverage/lcov.info` lists every source file, loaded by a test or not.
+ */
+export function runTests(
+  dir: string,
+  work: string,
+  config: TestConfig,
+  run: Runner,
+  coverage = false,
+): TestRun {
   const vitest = factoryVitest();
   const configDir = join(work, 'config');
   const out = join(work, 'results.json');
@@ -230,7 +262,12 @@ export function runTests(dir: string, work: string, config: TestConfig, run: Run
   const options = {
     root: dir,
     cacheDir: join(work, 'cache'),
-    resolve: { alias: [{ find: '^vitest$', replacement: vitest.entry }] },
+    resolve: {
+      alias: [
+        { find: '^vitest$', replacement: vitest.entry },
+        { find: '^@vitest/coverage-v8$', replacement: vitest.coverage },
+      ],
+    },
     test: {
       include: config.include,
       exclude: ['**/node_modules/**', ...config.exclude],
@@ -240,10 +277,18 @@ export function runTests(dir: string, work: string, config: TestConfig, run: Run
       retry: 0,
       passWithNoTests: true,
       watch: false,
+      coverage: {
+        enabled: coverage,
+        provider: 'v8',
+        include: SOURCE_GLOBS,
+        reporter: ['lcov'],
+        reportOnFailure: true,
+        reportsDirectory: join(work, 'coverage'),
+      },
     },
   };
-  // The alias pattern goes in as text and becomes a RegExp in the config module.
-  const text = `const o = ${JSON.stringify(options)};\no.resolve.alias[0].find = new RegExp(o.resolve.alias[0].find);\nexport default o;\n`;
+  // The alias patterns go in as text and become RegExps in the config module.
+  const text = `const o = ${JSON.stringify(options)};\nfor (const a of o.resolve.alias) a.find = new RegExp(a.find);\nexport default o;\n`;
   writeFileSync(join(configDir, 'vitest.config.mjs'), text);
   writeFileSync(join(configDir, 'reporter.mjs'), REPORTER(out));
   const result = run(

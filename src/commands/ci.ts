@@ -5,9 +5,11 @@ import { join, resolve } from 'node:path';
 import { checkAcMap, checkedSet, passingTitles } from '../ci/ac-map.js';
 import { checkAppendOnly, LOG_BRANCH } from '../ci/append-only.js';
 import { meetsThreshold, measureCoverage, parseLcov } from '../ci/coverage.js';
+import { lintHead } from '../ci/lint.js';
 import { redGreen } from '../ci/red-green.js';
 import { inGithubActions } from '../ci/sandbox.js';
 import { measureSize } from '../ci/size.js';
+import { testHead } from '../ci/test.js';
 import type { Isolation } from '../ci/vitest-run.js';
 import { weakened } from '../ci/weakened.js';
 import type { CommandContext } from '../cli/commands.js';
@@ -181,6 +183,27 @@ function weakenedCheck(ctx: CommandContext, args: readonly string[]): number {
   return report(ctx, 'weakened', result.findings, [summary]);
 }
 
+/** `<head>`, or a usage error naming the check. */
+function headArg(args: readonly string[], check: string): string {
+  const [head] = args;
+  if (args.length !== 1 || head === undefined)
+    throw new UsageError(`usage: factory ci ${check} <head>`);
+  return head;
+}
+
+function testCheck(ctx: CommandContext, args: readonly string[]): number {
+  const head = headArg(args, 'test');
+  const result = testHead(ctx.cwd, head, { isolation: isolation(ctx), env: ctx.env });
+  const summary = `${String(result.passed)} of ${String(result.total)} tests passed, ${String(result.typeErrors)} type errors`;
+  return report(ctx, 'test', result.findings, [summary]);
+}
+
+function lintCheck(ctx: CommandContext, args: readonly string[]): number {
+  const head = headArg(args, 'lint');
+  const result = lintHead(ctx.cwd, head, { isolation: isolation(ctx), env: ctx.env });
+  return report(ctx, 'lint', result.findings, [`${String(result.files)} files linted`]);
+}
+
 const CHECKS: Readonly<Record<string, (ctx: CommandContext, args: readonly string[]) => number>> = {
   'append-only': appendOnlyCheck,
   size: sizeCheck,
@@ -188,6 +211,8 @@ const CHECKS: Readonly<Record<string, (ctx: CommandContext, args: readonly strin
   'ac-map': acMapCheck,
   'red-green': redGreenCheck,
   weakened: weakenedCheck,
+  test: testCheck,
+  lint: lintCheck,
 };
 
 export function ci(ctx: CommandContext): Promise<number> {
