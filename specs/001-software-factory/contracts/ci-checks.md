@@ -40,6 +40,10 @@ PR's code runs inside CI, so every job is built to depend on nothing the PR cont
   network for the tests and only the run's temp folder writable. Without a working bubblewrap
   the check refuses to run them. `factory merge` and `factory approve` always sandbox.
 
+`semgrep` and `gitleaks` come from PATH; each must report the version pinned in the release's
+`tools.json` (`--version`), or the check refuses, and a missing tool fails it. Every `scan`
+finding names the `finding:<rule>@<path>:<line>` waiver that would cover it.
+
 What remains: test files are PR code. A test can assert nothing, or fail at the base for an
 irrelevant reason, and still count. Test code runs with the job's permissions (on the laptop, the
 sandbox's), so it can also reach and rewrite the results files the checks read (accepted,
@@ -57,9 +61,9 @@ review is the control for test quality (spec Risks).
 | `ci / ac-map` | PR | Every checked acceptance criterion has a passing tagged test | QG-2 |
 | `ci / size` | PR | Changed lines ≤ the stricter of the release's limit and `size_limit_lines` in main's config | QG-6 |
 | `ci / formal` | PR touching `formal/**` or tier 3 | TLC / Dafny checks pass | QG-7 |
-| `security / semgrep` | PR, weekly on main | `factory ci scan semgrep` with the release's rules: no new findings | FR-049 |
+| `security / semgrep` | PR, weekly on main | `factory ci scan semgrep <base> <head>`: the release's rules (`semgrep.yml`, and its `semgrepignore` as each tree's only `.semgrepignore`, so `tests/` is scanned) with `--disable-nosem` and `--no-git-ignore`, on raw-blob trees of the merge base and the head that hold no `.gitignore`; a match is new when its rule, path and matched text appear more often at the head than at the base. And `factory ci scan markers <base> <head>`: no added line outside `specs/` and Markdown holds `gitleaks:allow`, `nosem`/`nosemgrep`, `eslint-disable`, `@ts-ignore`, `@ts-nocheck` or `@ts-expect-error` | FR-049 |
 | `security / npm-audit` | PR | No known-vulnerable deps at/above threshold | FR-049 |
-| `security / gitleaks` | PR, weekly full history | `factory ci scan gitleaks` with the release's config: no secrets | FR-049 |
+| `security / gitleaks` | PR, weekly full history | `factory ci scan gitleaks <base> <head>`: the release's config, with `--ignore-gitleaks-allow` and an empty ignore path, over every commit from the merge base to the head: each commit's added lines (for a merge, only those new against every parent, as `--cc` shows them), in order, as `<sha>/<path>`, and again as `<sha>/<n>`, since the default config's global path allowlist (lockfiles, `node_modules`, any path containing `gitleaks.toml`) cannot be switched off and the pull request names its files; no secrets | FR-049 |
 | `security / licences` | PR changing deps | All licences on the release's allowed list | FR-049 |
 | `security / new-deps` | PR adding deps | Gate checks pass; job stays failed until a signed Owner waiver for the dependency | FR-050, AC-045 |
 | `guardrail-change` | PR | Item and Define PRs: no protected path, `.gitattributes`, `.gitmodules` or `.factory/config` touched (no waiver can allow it). Upgrade PRs: protected set equals the manifest of the signed release named in the PR | FR-048, AC-020, AC-086 |

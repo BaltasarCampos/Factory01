@@ -1,0 +1,70 @@
+#!/usr/bin/env node
+// A stand-in for the pinned gitleaks in the scan tests (T136), checked against gitleaks 8.30.1.
+// It does what the real tool does by default with each lever: its config is --config, else
+// $GITLEAKS_CONFIG, else `.gitleaks.toml` in the scanned folder, else the default; ignored
+// fingerprints come from the --gitleaks-ignore-path file or folder (default: the working folder)
+// and from the scanned folder; `gitleaks:allow` hides its line unless --ignore-gitleaks-allow.
+// It knows two default rules, `github-pat` by content and `pkcs12-file` by path, and part of
+// the default global path allowlist.
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+const args = process.argv.slice(2);
+const pins = new URL('../../../factory/profiles/typescript/ci/tools.json', import.meta.url);
+if (args[0] === '--version') {
+  const version =
+    process.env.FAKE_GITLEAKS_VERSION ?? JSON.parse(readFileSync(pins, 'utf8')).gitleaks;
+  console.log(`gitleaks version ${version}`);
+  process.exit(0);
+}
+const option = (...names) => {
+  const i = args.findIndex((a) => names.includes(a));
+  return i === -1 ? undefined : args[i + 1];
+};
+const source = args[1];
+const configPath =
+  option('-c', '--config') ??
+  process.env.GITLEAKS_CONFIG ??
+  (existsSync(join(source, '.gitleaks.toml')) ? join(source, '.gitleaks.toml') : undefined);
+const config = configPath === undefined ? 'useDefault = true' : readFileSync(configPath, 'utf8');
+const useDefault = /^\s*useDefault\s*=\s*true/m.test(config);
+const allow = [...config.matchAll(/'''(.*?)'''/g)].map((m) => new RegExp(m[1]));
+if (useDefault)
+  allow.push(/gitleaks\.toml/, /(?:^|\/)node_modules(?:\/.*)?$/, /(?:^|\/)package-lock\.json$/);
+
+const ignored = new Set();
+const ignorePath = option('-i', '--gitleaks-ignore-path') ?? '.';
+for (const candidate of [
+  ignorePath,
+  join(ignorePath, '.gitleaksignore'),
+  join(source, '.gitleaksignore'),
+])
+  if (existsSync(candidate) && statSync(candidate).isFile())
+    for (const line of readFileSync(candidate, 'utf8').split('\n')) ignored.add(line.trim());
+
+const leaks = [];
+(function walk(dir) {
+  for (const name of readdirSync(dir).sort()) {
+    const file = join(dir, name);
+    if (statSync(file).isDirectory()) {
+      walk(file);
+      continue;
+    }
+    if (!useDefault || allow.some((re) => re.test(file))) continue;
+    const found = (RuleID, StartLine) => {
+      const Fingerprint = `${file}:${RuleID}:${String(StartLine)}`;
+      if (!ignored.has(Fingerprint))
+        leaks.push({ RuleID, File: file, StartLine, Fingerprint, Secret: 'REDACTED' });
+    };
+    if (/\.p(?:12|fx)$/i.test(name)) found('pkcs12-file', 0);
+    readFileSync(file, 'utf8')
+      .split('\n')
+      .forEach((text, i) => {
+        if (!/ghp_[A-Za-z0-9]{36}/.test(text)) return;
+        if (text.includes('gitleaks:allow') && !args.includes('--ignore-gitleaks-allow')) return;
+        found('github-pat', i + 1);
+      });
+  }
+})(source);
+writeFileSync(option('-r', '--report-path'), JSON.stringify(leaks));
+process.exit(leaks.length > 0 ? Number(option('--exit-code') ?? 1) : 0);

@@ -1,0 +1,9 @@
+# The release's gitleaks config (T141): `factory ci scan gitleaks` passes it with --config. The
+# default rules' path conditions are written `(?:^|/)…` or as suffixes, so they hold under the
+# `<sha>/` prefix the check adds. Their global path allowlist (lockfiles, node_modules, any path
+# containing gitleaks.toml) cannot be switched off from here, so the check also scans every file
+# under a neutral name.
+title = "factory release"
+
+[extend]
+useDefault = true

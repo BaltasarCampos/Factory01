@@ -1,0 +1,19 @@
+# The release's Semgrep rules for TypeScript projects (T141): `factory ci scan semgrep` passes them
+# with --config and --disable-nosem, on trees without the project's Semgrep files. Rule ids have
+# no dots: semgrep prefixes each id with the config's path, and the check keeps the last part.
+rules:
+  - id: no-eval
+    languages: [typescript]
+    severity: ERROR
+    message: eval runs a string as code
+    pattern: eval(...)
+  - id: no-new-function
+    languages: [typescript]
+    severity: ERROR
+    message: new Function runs a string as code
+    pattern: new Function(...)
+  - id: no-tls-reject-unauthorized
+    languages: [typescript]
+    severity: ERROR
+    message: turning off TLS certificate checks lets anyone on the network read and change traffic
+    pattern: process.env.NODE_TLS_REJECT_UNAUTHORIZED = ...
