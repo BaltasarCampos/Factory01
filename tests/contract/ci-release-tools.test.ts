@@ -117,6 +117,8 @@ describe('factory ci test (T141, QG-1)', () => {
           'src/calc.ts': `${CALC}export const loose = (a) => a;\nexport function unused(): number {\n  return 2;\n}\n`,
           'tests/calc.test.ts': `${TESTS}it('breaks', () => { expect(add(2, 2)).toBe(5); });\n`,
           'tests/broken.test.ts': "import { gone } from '../src/gone.js';\ngone();\n",
+          // Type-checked wherever it sits, not only under src/ and tests/.
+          'lib/util.ts': "export const n: number = 'x';\n",
         },
         'lower the bar',
       );
@@ -129,6 +131,7 @@ describe('factory ci test (T141, QG-1)', () => {
       expect(r.output).toMatch(
         /src\/calc\.ts:2: TS7006 Parameter 'a' implicitly has an 'any' type/,
       );
+      expect(r.output).toMatch(/lib\/util\.ts:1: TS2322 /);
       expect(r.output).toContain('1 of 2 tests passed');
       expect(r.output).not.toContain('test:tests/calc.test.ts#adds');
 
@@ -213,6 +216,35 @@ describe('factory ci lint (T141, QG-4)', () => {
       expect(r.output).toContain('src/calc.ts:2: @typescript-eslint/ban-ts-comment');
       expect(r.output).toContain('src/other.ts:1: @typescript-eslint/ban-ts-comment');
       expect(r.output).toContain('src/third.ts:1: @typescript-eslint/ban-ts-comment');
+    },
+    RUN,
+  );
+});
+
+describe('factory ci lint covers the whole tree (T141)', () => {
+  it(
+    'every TypeScript file is linted wherever it sits; a JavaScript or .tsx file is a finding, even beside a .d.ts',
+    async () => {
+      const { repo } = project();
+      const head = repo.commit(
+        {
+          'lib/helper.ts': ANY,
+          'src/helper.js': 'export const loose = 1;\n',
+          'src/helper.d.ts': 'export declare const loose: number;\n',
+          'src/view.tsx': 'export const view = 1;\n',
+          'scripts/build.mjs': 'export default 1;\n',
+          'dist/server.js': 'export {};\n',
+        },
+        'outside src',
+      );
+
+      const r = await ci(repo, ['lint', head]);
+
+      expect(r.code).toBe(1);
+      expect(r.output).toContain('lib/helper.ts:1: @typescript-eslint/no-explicit-any');
+      for (const path of ['src/helper.js', 'src/view.tsx', 'scripts/build.mjs'])
+        expect(r.output).toContain(`${path}: the TypeScript profile takes TypeScript only`);
+      expect(r.output).not.toMatch(/dist\/server\.js|src\/helper\.d\.ts/);
     },
     RUN,
   );
