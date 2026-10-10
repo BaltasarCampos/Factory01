@@ -17,6 +17,10 @@ concurrency:
 env:
   TLA2TOOLS_URL: https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
   TLA2TOOLS_SHA256: 936a262061c914694dfd669a543be24573c45d5aa0ff20a8b96b23d01e050e88
+  # The versions pinned in factory/profiles/typescript/ci/tools.json; `factory ci scan` refuses others.
+  SEMGREP_VERSION: 1.180.0
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
 
 jobs:
   build-test:
@@ -49,6 +53,18 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+      # The scan tests run their lever cases against the real pinned tools too: with CI=true
+      # they fail, never skip, without them (T136).
+      - name: Install semgrep and gitleaks (pinned)
+        run: |
+          pipx install "semgrep==$SEMGREP_VERSION"
+          url="https://github.com/gitleaks/gitleaks/releases/download/v$GITLEAKS_VERSION/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSLf -o gitleaks.tar.gz "$url"
+          echo "$GITLEAKS_SHA256  gitleaks.tar.gz" | sha256sum -c -
+          sudo tar -xzf gitleaks.tar.gz -C /usr/local/bin gitleaks
+          rm gitleaks.tar.gz
+          semgrep --version
+          gitleaks version
       - name: Test
         run: npm test
 
