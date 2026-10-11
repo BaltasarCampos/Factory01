@@ -53,6 +53,9 @@ export const GATE_PARTS: Readonly<Record<SummaryGate, Readonly<Record<SummaryPar
   resume: { changed: R, mapping: NA, results: NA, usage: NA, risks: R },
 };
 
+/** Why `factory merge` refuses a tier 3 item or a change under `formal/` (T066, T068). */
+export const NO_FORMAL = 'the formal check is not in this release';
+
 /** Code gates whose check this release runs; a waiver for any other has nothing to skip. */
 export const CODE_CHECKS: ReadonlySet<string> = new Set();
 
@@ -267,19 +270,23 @@ function risks(f: SummaryFacts, gate: SummaryGate): Part {
   }
   if (f.tier === undefined)
     return { missing: 'no tier (give one with --tier or a single proposed tier: label)' };
-  const tier = `Tier ${String(f.tier)}`;
-  if (gate === 'admission') return [tier, ...labels];
+  // Until a release has `factory ci formal`, merge refuses a tier 3 item (Owner 2026-10-11).
+  const tier = [
+    `Tier ${String(f.tier)}`,
+    ...(f.tier === 3 ? [`${NO_FORMAL}: factory merge refuses a tier 3 item`] : []),
+  ];
+  if (gate === 'admission') return [...tier, ...labels];
   if (gate === 'waiver-code')
     return {
       missing: `what the waiver lets through comes from the ${checkName(f)} check, which this release does not have yet`,
     };
-  if (gate === 'waiver-prebuild') return [tier];
+  if (gate === 'waiver-prebuild') return tier;
   const spec = f.files?.spec;
   if (spec === undefined) return noSpec(f);
   const listed = specSection(spec, 'Risks');
-  if (listed.length > 0) return [tier, ...quoted(source(f), listed)];
+  if (listed.length > 0) return [...tier, ...quoted(source(f), listed)];
   if (f.tier === 3) return { missing: 'tier 3 needs a Risks section in spec.md' };
-  return [tier, 'none identified (spec.md has no Risks section; required only at tier 3)'];
+  return [...tier, 'none identified (spec.md has no Risks section; required only at tier 3)'];
 }
 
 const PARTS: Readonly<Record<SummaryPart, (f: SummaryFacts, gate: SummaryGate) => Part>> = {

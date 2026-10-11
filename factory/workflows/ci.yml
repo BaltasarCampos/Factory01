@@ -1,0 +1,343 @@
+# Project CI (contracts/ci-checks.md, T066). Every job checks out the factory at the commit pinned
+# in main's .factory/config (an upgrade PR's own pin on factory/upgrade-*), builds the CLI from it
+# and calls only `factory ci <check>`, which uses the release's configs, never the project's.
+# Steps that run no pull request code come first: test code runs with the job's rights and can
+# change what later steps of the same job read. Inputs reach scripts only through env.
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: ['claude/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The release names its own source; checked out by the full pinned SHA only.
+  FACTORY_REPO: BaltasarCampos/Factory01
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  HEAD_REF: ${{ github.head_ref || github.ref_name }}
+
+defaults:
+  run:
+    shell: bash
+    working-directory: project
+
+jobs:
+  # The item's issue and its tier: label, read without checking out anything. The label is
+  # unverified: it selects the CI rule only, never what `factory merge` checks.
+  item:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: read
+    outputs:
+      issue: ${{ steps.item.outputs.issue }}
+      tier: ${{ steps.item.outputs.tier }}
+    steps:
+      - name: Item issue and tier label
+        id: item
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$HEAD_REF" =~ ^claude/([0-9]+)-[a-z0-9-]+$ ]]; then
+            issue=${BASH_REMATCH[1]}
+            labels=$(gh issue view "$issue" --repo "$GITHUB_REPOSITORY" --json labels --jq '.labels[].name')
+            tiers=$(grep -E '^tier:[123]$' <<<"$labels" || true)
+            tier=""
+            if [ -n "$tiers" ] && [ "$(wc -l <<<"$tiers")" -eq 1 ]; then tier=${tiers#tier:}; fi
+            echo "issue=$issue" >> "$GITHUB_OUTPUT"
+            echo "tier=$tier" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install the project's dependencies (scripts disabled)
+        run: npm ci --ignore-scripts
+      - name: Lint
+        run: factory ci lint "$HEAD_SHA" --install node_modules
+      - name: Test
+        run: factory ci test "$HEAD_SHA" --install node_modules
+
+  coverage:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install the project's dependencies (scripts disabled)
+        run: npm ci --ignore-scripts
+      # Both checks refuse a report committed at the head; build-test reports failing tests.
+      - name: Test, for the report
+        run: |
+          rm -rf coverage
+          factory ci test "$HEAD_SHA" --install node_modules || echo "tests failed; see build-test"
+      - name: Coverage
+        run: factory ci coverage "$BASE_SHA" "$HEAD_SHA"
+
+  ac-map:
+    needs: item
+    if: needs.item.outputs.issue != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      TIER: ${{ needs.item.outputs.tier }}
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install the project's dependencies (scripts disabled)
+        run: npm ci --ignore-scripts
+      - name: Test, for the report
+        run: |
+          rm -rf coverage
+          factory ci test "$HEAD_SHA" --install node_modules || echo "tests failed; see build-test"
+      - name: AC map
+        run: factory ci ac-map "$BASE_SHA" "$HEAD_SHA" --branch "$HEAD_REF" ${TIER:+--tier "$TIER"}
+
+  red-green:
+    needs: item
+    if: needs.item.outputs.issue != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      TIER: ${{ needs.item.outputs.tier }}
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install the project's dependencies (scripts disabled)
+        run: npm ci --ignore-scripts
+      - name: Red-green
+        run: |
+          factory ci red-green "$BASE_SHA" "$HEAD_SHA" --branch "$HEAD_REF" ${TIER:+--tier "$TIER"} --install node_modules
+
+  weakened:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install the project's dependencies (scripts disabled)
+        run: npm ci --ignore-scripts
+      - name: Weakened tests
+        run: factory ci weakened "$BASE_SHA" "$HEAD_SHA" --install node_modules
+
+  size:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Size
+        run: factory ci size "$BASE_SHA" "$HEAD_SHA"

@@ -1,0 +1,77 @@
+# Append-only (contracts/ci-checks.md, T066): early feedback on the event log; `factory merge`
+# repeats the check on the laptop and trusts only its own result. Built from the factory commit
+# pinned in main's .factory/config, as every project workflow is. Inputs reach scripts only
+# through env.
+name: append-only
+
+on:
+  push:
+    branches: [claude/factory-log]
+  pull_request:
+    paths: ['**/events.jsonl']
+
+permissions:
+  contents: read
+
+env:
+  # The release names its own source; checked out by the full pinned SHA only.
+  FACTORY_REPO: BaltasarCampos/Factory01
+  BASE_SHA: ${{ github.event.pull_request.base.sha }}
+  HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+  HEAD_REF: ${{ github.head_ref || github.ref_name }}
+
+defaults:
+  run:
+    shell: bash
+    working-directory: project
+
+jobs:
+  append-only:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The full history: a shallow checkout fails the merge-base and ancestor checks.
+      - name: Check out the history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Append-only (push)
+        if: github.event_name == 'push'
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.event.after }}
+        run: factory ci append-only "$BEFORE" "$AFTER" --branch claude/factory-log --push
+      - name: Append-only (pull request)
+        if: github.event_name == 'pull_request'
+        run: factory ci append-only "$BASE_SHA" "$HEAD_SHA" --branch "$HEAD_REF"
