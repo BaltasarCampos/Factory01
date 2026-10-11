@@ -5,7 +5,8 @@
 // The dispatcher is itself an agent session with a shell, so its decisions are advisory
 // (data-model.md § State machine): only signed records, signed commits and the laptop's checks
 // decide what reaches main. Station evidence (T060) and the signed-history audit (T139) are
-// supplied by the caller. On `new → triaged` the pass creates the item branch, and before a session
+// supplied by the caller: a first-parent commit the Owner did not sign halts the line with an
+// urgent tampering alert, and an item branch pushed again after its merge raises one. On `new → triaged` the pass creates the item branch, and before a session
 // on it (stations 2–6) it opens the item's one draft PR and commits `.station.json`. Nothing is
 // admitted before main has the Owner-signed Define merge, and when main's key lists or
 // `git verify-commit` cannot be read or run the pass admits nothing, moves nothing and alerts the
@@ -13,6 +14,7 @@
 import { checkSecondCopy, type KeyCheck, type ReleaseKeys } from '../approvals/keys.js';
 import { verifyGate, type PostedComment, type Verdict } from '../approvals/verify.js';
 import { RefusedError } from '../cli/env.js';
+import type { KeysFor } from '../git/history.js';
 import { briefMerged, verifiedMerges, type MainMerges } from '../git/merges.js';
 import { listComments } from '../github/comments.js';
 import type { GhOptions } from '../github/gh.js';
@@ -25,7 +27,6 @@ import {
   type AgentsMode,
   type Event,
   type ProjectConfig,
-  type ReleasePin,
   type RoleName,
   type State,
   type Station,
@@ -35,6 +36,7 @@ import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/in
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
 import { createItemBranch, ensureDraftPr, type ItemRef } from './branch.js';
+import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
 import { LaunchRefused, type Launchers } from './launcher/types.js';
 import { writeStationManifest } from './manifest.js';
@@ -71,11 +73,12 @@ export interface DispatchContext {
   projectDir: string;
   /** Default `origin/main`. */
   mainRef?: string;
-  /** Key lists of the release pinned on main (src/approvals/keys.ts `releaseKeys`). */
-  keysFor: (pin: ReleasePin) => ReleaseKeys;
+  /** Key lists of a release pinned on main (src/approvals/keys.ts `releaseKeysFor`). */
+  keysFor: KeysFor;
   secondCopy: string | undefined;
   previousNewest?: string;
-  historySigned: (config: ProjectConfig) => Promise<boolean>;
+  /** src/dispatcher/history-audit.ts `auditMain` over the pass's walk of main. */
+  auditHistory: (config: ProjectConfig, main: MainMerges) => Promise<HistoryAudit>;
   gatherEvidence: (
     item: Candidate,
     config: ProjectConfig,
@@ -173,22 +176,41 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     posted.push({ id: '', urgency: input.urgency, kind: input.kind, text: input.text });
   };
 
-  let keys: ReleaseKeys;
-  let keyCheck: KeyCheck;
-  let brief: boolean;
-  let history: MainMerges;
-  try {
-    keys = ctx.keysFor(config.factory_release);
-    keyCheck = checkSecondCopy(keys, ctx.secondCopy, ctx.previousNewest);
-    history = verifiedMerges(ctx.projectDir, keys, {
-      ref: ctx.mainRef ?? 'origin/main',
-      baseline: config.baseline,
-    });
-    brief = briefMerged(history);
-  } catch (err) {
+  /** Main cannot be checked: admit nothing, move nothing, alert the Owner once. */
+  const unverifiable = async (err: unknown): Promise<PassResult> => {
     const reason = `cannot verify main, so nothing is admitted: ${err instanceof Error ? err.message : String(err)}`;
     await alertOnce({ urgency: 'urgent', kind: 'unverifiable', text: `line stopped: ${reason}` });
     return { ...result, halted: reason };
+  };
+  let history: MainMerges;
+  let audit: HistoryAudit;
+  try {
+    history = verifiedMerges(ctx.projectDir, ctx.keysFor, {
+      ref: ctx.mainRef ?? 'origin/main',
+      baseline: config.baseline,
+    });
+    audit = await ctx.auditHistory(config, history);
+  } catch (err) {
+    return unverifiable(err);
+  }
+  if (audit.unsigned !== undefined) {
+    const text = `line stopped: ${audit.unsigned}`;
+    await alertOnce({ urgency: 'urgent', kind: 'tampering', text });
+    return { ...result, halted: audit.unsigned };
+  }
+  for (const branch of audit.recreated) {
+    const text = `${branch} was pushed again after #${String(itemOf(branch))} was merged`;
+    await alertOnce({ urgency: 'urgent', kind: 'tampering', text });
+  }
+  const brief = briefMerged(history);
+  // The tip's pin is read only now that every commit up to the tip is Owner-signed.
+  let keys: ReleaseKeys;
+  let keyCheck: KeyCheck;
+  try {
+    keys = ctx.keysFor(config.factory_release);
+    keyCheck = checkSecondCopy(keys, ctx.secondCopy, ctx.previousNewest);
+  } catch (err) {
+    return unverifiable(err);
   }
   if (keyCheck.status !== 'ok') {
     const kind = keyCheck.status === 'rotation-pending' ? 'rotation-pending' : 'tampering';
@@ -203,8 +225,6 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     inboxIssue: config.inbox_issue,
   });
   const pause = derivePause(await timeline(repo, config.inbox_issue, options), resumes);
-  if (!(await ctx.historySigned(config)))
-    return { ...result, halted: 'main has a first-parent commit not signed by the Owner' };
   if (pause.line) return { ...result, halted: 'pause:line in effect' };
 
   const git = { projectDir: ctx.projectDir, now: ctx.now ?? (() => new Date()) };

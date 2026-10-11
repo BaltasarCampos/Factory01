@@ -355,7 +355,7 @@ describe('dispatcher waits for the Define merge (AC-006, AC-064)', { timeout: 60
       projectDir: r.path,
       keysFor: () => keys,
       secondCopy: owner.publicKey,
-      historySigned: () => Promise.resolve(true),
+      auditHistory: () => Promise.resolve({ recreated: [] }),
       gatherEvidence: () => Promise.resolve({ needsSession: true, intakeComplete: true }),
       launchers: { local, cloud: new FakeLauncher('cloud') },
       logEvent: () => Promise.resolve(),

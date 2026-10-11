@@ -7,14 +7,14 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factorySource, releaseKeys, secondCopy } from '../approvals/keys.js';
+import { factorySource, releaseKeysFor, secondCopy } from '../approvals/keys.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { dispatchOnce, type DispatchContext, type PassResult } from '../dispatcher/dispatch.js';
 import { gatherEvidence } from '../dispatcher/evidence.js';
+import { auditMain } from '../dispatcher/history-audit.js';
 import { CloudLauncher } from '../dispatcher/launcher/cloud.js';
 import { LocalLauncher } from '../dispatcher/launcher/local.js';
-import { verifiedMerges } from '../git/merges.js';
 import { verifiedManifest } from '../release/tag.js';
 import { projectHere } from './pause.js';
 
@@ -33,8 +33,7 @@ export async function projectDispatch(
   if (fetched.error !== undefined || fetched.status !== 0)
     throw new RefusedError(`cannot fetch main: ${fetched.stderr.trim() || 'git fetch failed'}`);
   const dir = mkdtempSync(join(tmpdir(), 'factory-keys-'));
-  const keysFor: DispatchContext['keysFor'] = (pin) =>
-    releaseKeys(factorySource(ctx.env), pin.sha, dir);
+  const keysFor = releaseKeysFor(ctx.env, dir);
   const out = ctx.io.stdout;
   const local = new LocalLauncher({
     project: ctx.cwd,
@@ -47,18 +46,8 @@ export async function projectDispatch(
     projectDir: ctx.cwd,
     keysFor,
     secondCopy: secondCopy(ctx.env, project.home),
-    historySigned: (config) => {
-      const head = spawnSync('git', ['-C', ctx.cwd, 'rev-parse', 'origin/main'], {
-        encoding: 'utf8',
-      }).stdout.trim();
-      try {
-        const keys = keysFor(config.factory_release);
-        const history = verifiedMerges(ctx.cwd, keys, { baseline: config.baseline, env: ctx.env });
-        return Promise.resolve(history.lastVerified === head);
-      } catch {
-        return Promise.resolve(false);
-      }
-    },
+    auditHistory: (_config, history) =>
+      Promise.resolve(auditMain(ctx.cwd, 'origin/main', history, ctx.env)),
     gatherEvidence: gatherEvidence({ projectDir: ctx.cwd, gh: { env: ctx.env } }),
     launchers:
       Object.keys(ctx.launchers).length > 0 ? ctx.launchers : { local, cloud: new CloudLauncher() },

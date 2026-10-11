@@ -58,6 +58,8 @@ needed to stay near 400.
 | 18 Safe diff + CI checks | T133, T138, T051–T052, T065 | 650 | 600 | 1,250 | 4 |
 | 19 Red-green, release CI, workflows | T135–T136, T140–T141, T066 | 850 | 500 | 1,350 | 4 |
 | 20 Signed history + `config set` | T134, T137, T139, T142 | 300 | 350 | 650 | 2 |
+| 20a (split 2026-10-11; re-estimated at cal. ~1,065) | T134, T139 | — | — | cal. ~760 | — |
+| 20b | T137, T142 | — | — | cal. ~330 | — |
 | 21–22 `factory merge` | T053, T068, T143 | 750 | 700 | 1,450 | 4 |
 | 23 `factory deploy` + backups | T069, T129–T130 | 350 | 350 | 700 | 2 |
 | 24 Role files + station prompts | T070–T072 | 870 (markdown) | 0 | 870 | 3 |

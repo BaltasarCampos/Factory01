@@ -114,7 +114,7 @@ function setup(options: Setup = {}) {
     projectDir: project.path,
     keysFor: () => keys,
     secondCopy: owner.publicKey,
-    historySigned: () => Promise.resolve(true),
+    auditHistory: () => Promise.resolve({ recreated: [] }),
     gatherEvidence: gatherEvidence({ projectDir: project.path }),
     launchers: { local, cloud: new FakeLauncher('cloud') },
     logEvent: () => Promise.resolve(),

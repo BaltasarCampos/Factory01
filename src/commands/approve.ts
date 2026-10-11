@@ -9,7 +9,13 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { mainKeys, secondCopy, type ReleaseKeys } from '../approvals/keys.js';
+import {
+  laptopKeys,
+  mainKeys,
+  releaseKeysFor,
+  secondCopy,
+  type ReleaseKeys,
+} from '../approvals/keys.js';
 import { NonceLedger, nonceLedgerPath } from '../approvals/nonces.js';
 import {
   extractFromComment,
@@ -24,6 +30,7 @@ import {
 import { ownerKeyPath, sign } from '../approvals/sign.js';
 import { specBlobSha, verifyGate, verifySignature } from '../approvals/verify.js';
 import type { CommandContext } from '../cli/commands.js';
+import { ledgerPath, type KeysFor } from '../git/history.js';
 import { briefMerged, verifiedMerges } from '../git/merges.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { listComments, postComment } from '../github/comments.js';
@@ -251,13 +258,22 @@ async function fieldsFor(
 }
 
 /** Warn while main has no Owner-signed `Factory-Merge: define`; never refuses. */
-function warnBriefUnmerged(ctx: CommandContext, project: Project, keys: () => ReleaseKeys): void {
+function warnBriefUnmerged(
+  ctx: CommandContext,
+  project: Project,
+  keys: () => ReleaseKeys,
+  keysFor: KeysFor,
+): void {
   let why: string;
   try {
-    const keyLists = keys();
+    keys(); // fetches main
     const { baseline } = configOnMain(project.cwd);
     const env = project.env ?? process.env;
-    if (briefMerged(verifiedMerges(project.cwd, keyLists, { baseline, env }))) return;
+    const laptop = {
+      ledger: ledgerPath(project.home, project.repo),
+      anchorKeys: laptopKeys(project.home),
+    };
+    if (briefMerged(verifiedMerges(project.cwd, keysFor, { baseline, env, ...laptop }))) return;
     why = 'main has no Owner-signed Factory-Merge: define';
   } catch (err) {
     why = `cannot tell whether the brief is merged (${err instanceof Error ? err.message : String(err)})`;
@@ -289,11 +305,13 @@ export async function approve(ctx: CommandContext): Promise<number> {
   // Main's pinned key lists, read once and only by the gates that verify a record.
   const scratch = mkdtempSync(join(tmpdir(), 'factory-keys-'));
   let keys: ReleaseKeys | undefined;
-  const mainKeyLists = () => (keys ??= mainKeys(project.cwd, project.env ?? process.env, scratch));
+  const env = project.env ?? process.env;
+  const mainKeyLists = () => (keys ??= mainKeys(project.cwd, env, scratch, project.home));
   let gathered: Gathered;
   try {
     gathered = await fieldsFor(ctx, project, issue, gate, waives, mainKeyLists);
-    if (gate === 'approved') warnBriefUnmerged(ctx, project, mainKeyLists);
+    if (gate === 'approved')
+      warnBriefUnmerged(ctx, project, mainKeyLists, releaseKeysFor(env, scratch));
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

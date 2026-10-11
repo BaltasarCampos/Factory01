@@ -5,10 +5,11 @@
 // agent can write it, must agree with that list; a mismatch right after an upgrade added a key
 // is a pending rotation rather than tampering.
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { CLOUD_MARKER, RefusedError } from '../cli/env.js';
+import { ledgerPath, walkMain, type KeysFor } from '../git/history.js';
 import { parseConfig } from '../model/config.js';
 import type { ReleasePin } from '../model/types.js';
 import { ownerKeyPath } from './sign.js';
@@ -139,8 +140,9 @@ export function pinOnMain(projectRepo: string, mainRef = 'origin/main'): Release
 
 /**
  * The laptop's own key list (`~/.factory/allowed_signers`, written by `factory keygen`) and
- * revocation list; an absent revocation list is created empty. Used only where no project pin
- * exists yet (`factory new` verifying the release tag).
+ * revocation list; an absent revocation list is created empty. Used where no project pin exists
+ * yet (`factory new` verifying the release tag), and by `mainKeys` for the first commit of main's
+ * signed history, which no earlier pin vouches for.
  */
 export function laptopKeys(home: string): ReleaseKeys {
   const dir = join(home, '.factory');
@@ -159,17 +161,47 @@ export function factorySource(env: NodeJS.ProcessEnv): string {
   return env.FACTORY_SOURCE ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 }
 
+/** Key lists by release pin, each release's files in its own folder under `dir`. */
+export function releaseKeysFor(env: NodeJS.ProcessEnv, dir: string): KeysFor {
+  return (pin) => {
+    const sub = join(dir, pin.sha);
+    mkdirSync(sub, { recursive: true });
+    return releaseKeys(factorySource(env), pin.sha, sub);
+  };
+}
+
 /**
  * The key lists of the factory release pinned on main, written into `dir`: the inputs every
  * main-side check uses. Main is fetched first and a failed fetch refuses, so a stale pin never
- * decides; a release whose lists cannot be read refuses too.
+ * decides; a release whose lists cannot be read refuses too. The pin is read at the last commit
+ * of main whose first-parent history is Owner-signed (src/git/history.ts), never at a tip an
+ * unsigned commit could have repointed. With `home`, the walk resumes from the laptop ledger and
+ * the first commit must also verify against the laptop's own key lists.
  */
-export function mainKeys(projectRepo: string, env: NodeJS.ProcessEnv, dir: string): ReleaseKeys {
+export function mainKeys(
+  projectRepo: string,
+  env: NodeJS.ProcessEnv,
+  dir: string,
+  home?: string,
+): ReleaseKeys {
   const fetched = spawnSync('git', ['-C', projectRepo, 'fetch', '-q', 'origin', 'main'], {
     env,
     encoding: 'utf8',
   });
   if (fetched.error !== undefined || fetched.status !== 0)
     throw new KeyError(`cannot fetch main: ${fetched.stderr.trim() || 'git fetch failed'}`);
-  return releaseKeys(factorySource(env), pinOnMain(projectRepo).sha, dir);
+  const text = gitShow(projectRepo, 'origin/main:.factory/config');
+  if (text === undefined) throw new KeyError('origin/main has no .factory/config');
+  const { baseline, repo } = parseConfig(text);
+  const keysFor = releaseKeysFor(env, dir);
+  const walk = walkMain(projectRepo, keysFor, {
+    baseline,
+    env,
+    ...(home === undefined ? {} : { ledger: ledgerPath(home, repo), anchorKeys: laptopKeys(home) }),
+  });
+  if (walk.lastVerified === undefined)
+    throw new KeyError(
+      `main has no Owner-signed commit${walk.rejected ? `: ${walk.rejected.reason}` : ''}`,
+    );
+  return keysFor(pinOnMain(projectRepo, walk.lastVerified));
 }
