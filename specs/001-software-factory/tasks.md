@@ -217,7 +217,7 @@ hand-off files, gates, merge re-verification, deploy health summary and the two-
 - [X] T154 [US2] One criterion-line parser in `spec.ts` (FR-042, AC-097), used by the Specify check and later by ac-map and red-green · Files: src/stations/checks/spec.ts
 - [X] T155 [US2] `factory resume` approval summary (AC-096): what was paused, when and by whom from the inbox label history, the alert raised with it if any, and the items whose `state:` label changed since the pause; refuses when it cannot read them; tests first in approve-pause.test.ts · Files: src/commands/resume.ts, src/notify/summary.ts, tests/integration/approve-pause.test.ts
 - [X] T156 [US2] Helpers only where they can weaken an existing test: flag a helper only when it exists at the base and an existing test (one at the base) reaches it, directly or through helpers; a new helper cannot weaken an earlier test, and flagging it would make every new module not yet wired in need a waiver; deleted helpers stay findings. Tests first: a new unwired module is not flagged; an existing test switched to a new no-op helper is flagged through its removed assertions · Files: src/stations/edges.ts, tests/unit/station-edges.test.ts
-- [ ] T073 [US2] End-to-end Gate A test on a throwaway private sample repo (manual trigger, real `gh`, local launcher): `factory new` → Define → approve one seed item as tier 1 → `factory run` → `factory merge` → `factory deploy`; asserts every hand-off file, ≤ 3 model sessions, health summary (AC-005, AC-006, AC-012, AC-015) · Files: tests/e2e/gate-a.test.ts (Owner decision 2026-10-07: runs only after slice 28, since no local session starts before the release ships the factory hooks; see T061. By then the PreToolUse path guard must limit a session's writes to its own clone, and block in particular the Owner's project clone, `.git/hooks` included, `~/.factory/` (the approval key and the laptop's copy of the key lists) and `~/.ssh`; it resolves symlinks (realpath) before deciding that a write stays inside the clone, for every folder, not only the protected paths (with T075's cases). T100's cross-process launch lock is a prerequisite) (Owner note 2026-10-11, slice 19c: the Gate A run on the sample repository is the workflow templates' first real run; it must confirm that every job in `ci.yml`, `security.yml` and `append-only.yml` runs and goes green there, including the `item` job reading the `tier:` label)
+- [ ] T073 [US2] End-to-end Gate A test on a throwaway private sample repo (manual trigger, real `gh`, local launcher): `factory new` → Define → approve one seed item as tier 1 → `factory run` → `factory merge` → `factory deploy`; asserts every hand-off file, ≤ 3 model sessions, health summary (AC-005, AC-006, AC-012, AC-015) · Files: tests/e2e/gate-a.test.ts (Owner decision 2026-10-07: runs only after slice 28, since no local session starts before the release ships the factory hooks; see T061. By then the PreToolUse path guard must limit a session's writes to its own clone, and block in particular the Owner's project clone, `.git/hooks` included, `~/.factory/` (the approval key and the laptop's copy of the key lists) and `~/.ssh`; it resolves symlinks (realpath) before deciding that a write stays inside the clone, for every folder, not only the protected paths (with T075's cases). T166's cross-process launch lock (split from T100) is a prerequisite) (Owner note 2026-10-11, slice 19c: the Gate A run on the sample repository is the workflow templates' first real run; it must confirm that every job in `ci.yml`, `security.yml` and `append-only.yml` runs and goes green there, including the `item` job reading the `tier:` label)
 
 **Checkpoint**: T048–T056, T129 and T133–T137 pass; US2 runs against fixtures; Gate A e2e passes on a sample repo
 
@@ -298,7 +298,7 @@ fake clock and launcher; confirm it stops at gates, caps and pause and leaves su
 - [ ] T097 [US5] Blocked / caps / usage: `state:blocked` handling and resume-to-prior-state, cap detection with a `cap` reason event and clean exit, usage-limit stop and escalation · Files: src/dispatcher/limits.ts (gap recorded 2026-10-07, slice 16a: T060's evidence has no `questionOpen` yet; this task supplies it, from an agent question open on the issue, so `→ blocked` and the resume can happen) (Owner decision 2026-10-07, stalled sessions: a pending `.station.json` on the branch tip older than a stale limit counts as stale; the dispatcher then relaunches the station, counts the stale session towards `retry_limit` and raises one alert, so a session that died without pushing cannot stall an item forever. Test, with T094's cases in `tests/integration/dispatcher.test.ts`: "a pending .station.json older than the stale limit is relaunched, counted towards retry_limit and alerted once") (Owner decision 2026-10-08: the per-item usage budget follows the same rule as retries, T096. It is counted from what the launcher reads, the usage that each `claude -p --output-format json` run reports in its result (fields confirmed by T125), never from a session's own `usage` events, so a session that logs nothing still uses up its budget. A `usage` event near the limit may still escalate an item early, since that moves it toward the Owner. Cloud sessions follow once T125 confirms how they report usage)
 - [ ] T098 [US5] Pause enforcement: routine exits at once on `pause:line`, station-pause waits, restore removed labels + alert; `advance_item` consults `derivePause` · Files: src/dispatcher/pause-enforce.ts, src/mcp/tools/advance-item.ts
 - [ ] T099 [US5] `pre-compact` hook (log, request split, instruct stop) · Files: src/hooks/pre-compact.ts, src/commands/hook.ts
-- [ ] T100 [US5] Launcher fallback to local when cloud is unavailable; parallel limit from `parallel_sessions` in main's config; per-issue summary comment after each run; integrate T096–T098 into `dispatchOnce` and `factory run` · Files: src/dispatcher/launcher/select.ts, src/dispatcher/dispatch.ts, src/commands/run.ts (gap recorded 2026-10-07, slice 16a: a launch is recorded before it starts, so no item gets two sessions at once once cloud sessions run; today only item-branch stations have a marker, the dispatcher's `.station.json` commit on the branch tip, and Intake, on main, has none. The running-session signal stays telemetry: it may prevent a second launch, never decide a merge) (Owner decision 2026-10-07: the launch lock must hold across processes: today `LocalLauncher`'s one-at-a-time check is per process, so `factory run` in one terminal and `factory dispatch` in another could delete and re-clone the same `~/.factory/work/<repo>/<name>` while a session runs in it, and Intake's clone is `main` for every item. T100 is a prerequisite of T073)
+- [ ] T100 [US5] Launcher fallback to local when cloud is unavailable; parallel limit from `parallel_sessions` in main's config; per-issue summary comment after each run; integrate T096–T098 into `dispatchOnce` and `factory run` · Files: src/dispatcher/launcher/select.ts, src/dispatcher/dispatch.ts, src/commands/run.ts (Owner decision 2026-10-11: the cross-process launch lock and the launch record moved to T166, slice 28b, since T073 needs them; T100 keeps the fallback, the parallel limit and the summaries)
 - [ ] T101 [P] [US5] Review trigger workflow template (`pull_request: opened` → routine/API trigger starting the Reviewer) and daily routine setup notes for the Owner (routine env `FACTORY_ALLOWED_SIGNERS`, repo-only access, no extra connectors). Outside pull requests never trigger an agent: the Reviewer trigger runs only when the PR's head repository is this repository (not a fork) and its author is the Owner's login, since agents act as the Owner; any other login or any fork is outside, and the routine's trigger filter is configured the same way; tests: a fork PR and a PR from another login trigger nothing (2026-10-06; moved here from T066's checklist on 2026-10-10) · Files: factory/workflows/review-trigger.yml, docs/routine-setup.md
 
 **Checkpoint**: T094–T095 pass
@@ -418,6 +418,7 @@ probes (FR-059)
 - [ ] T158 [US5] Store the dispatcher's own events (escalations, alerts, refused launches) as lines under `.factory/events/<yyyy-mm>.jsonl` on `claude/factory-log` (data-model.md § Event), committed with `Factory-Role: dispatcher` and appended only; until then `factory dispatch` prints them (slice 16b) · Files: src/dispatcher/factory-log.ts, src/commands/dispatch.ts, src/events/trace.ts (accept `dispatcher` commits limited to `.factory/events/**`), tests/integration/factory-log-events.test.ts (gap recorded 2026-10-07, slice 16a)
 - [ ] T159 [US1] `factory new` and `factory adopt` start Station 0 through the launchers (T061) in the new clone, with the Define prompt from the release (T072) instead of the inline one; `main.ts` wires the default launchers for every command · Files: src/commands/new.ts, src/commands/adopt.ts, src/cli/main.ts, src/dispatcher/launcher/types.ts (the launch names its working copy), tests/integration/new-adopt.test.ts (gap recorded 2026-10-07, slice 16a)
 - [ ] T160 [US2] Release evidence for `releasing → done`: release notes and rollback path on `claude/factory-log` (`.factory/releases/<version>.md` naming `#<issue>`), and a verified `deployed` record (T069) whose `head` contains the item's merge; T060's evidence gathers both, and Release (station 7) gets a session while the notes are missing · Files: src/dispatcher/evidence.ts, tests/integration/branch.test.ts (gap recorded 2026-10-07, slice 16a)
+- [ ] T166 [US2] Cross-process launch lock, split from T100 (Owner decision 2026-10-11), tests first: a launch is recorded before it starts, so no item gets two sessions at once once cloud sessions run; today only item-branch stations have a marker, the dispatcher's `.station.json` commit on the branch tip, and Intake, on main, has none. The running-session signal stays telemetry: it may prevent a second launch, never decide a merge (gap recorded 2026-10-07, slice 16a). The lock holds across processes: today `LocalLauncher`'s one-at-a-time check is per process, so `factory run` in one terminal and `factory dispatch` in another could delete and re-clone the same `~/.factory/work/<repo>/<name>` while a session runs in it, and Intake's clone is `main` for every item (Owner decision 2026-10-07). A prerequisite of T073 · Files: src/dispatcher/launcher/lock.ts, src/dispatcher/launcher/local.ts, src/dispatcher/dispatch.ts, tests/integration/launch-lock.test.ts
 
 ---
 
@@ -455,7 +456,7 @@ probes (FR-059)
 `src/commands/hook.ts` (T064, T086, T099) · `src/commands/ci.ts` (T065, T087, T106, T113, T140, T141) ·
 `src/commands/keygen.ts` (T032, T145) · `src/approvals/keys.ts` (T033, T145) ·
 `factory/profiles/typescript/skeleton/package.json` (T047, T130) ·
-`src/dispatcher/dispatch.ts` (T037, T059, T093, T100) · `src/commands/dispatch.ts` (T062, T088) ·
+`src/dispatcher/dispatch.ts` (T037, T059, T093, T100, T166) · `src/commands/dispatch.ts` (T062, T088) ·
 `src/dispatcher/transitions.ts` (T035, T092) · `src/commands/approve.ts` (T036, T067) ·
 `src/commands/deploy.ts` (T069, T110, T130) · `src/dispatcher/admission.ts` (T037, T104) ·
 `src/dispatcher/launcher/select.ts` (T037, T100) · `src/mcp/tools/advance-item.ts` (T063, T098) ·
@@ -575,18 +576,23 @@ when its last part lands.
 | 23b | T129–T130, T160 | Product backups, release evidence for `releasing → done` | cal. ~490 |
 | 24a | T070 | Role files: Intake, Spec, Planner, Builder, Test, Reviewer | cal. ~410 |
 | 24b | T071 | Role files: Security, Integrator, Release, Ops, Coach | cal. ~350 |
+| probe | T124 | Owner and agent step, before 24c: the Spec Kit probe on a dispatcher-created branch confirms the command naming and feature selection the station prompts use | — |
 | 24c | T072, T159 | Station prompts 1–8, Define started by `new`/`adopt` | cal. ~475 |
 | 25a | T074, T081, T082 | Role policy + settings generator | ~650 |
 | 25b | T076, T083 | Command tokenizer | ~600 |
 | 25c | T084; T075 command-guard cases | Command guard | cal. ~550 |
 | 25f | T085; T075 path- and read-guard cases | Path and read guards | cal. ~550 |
 | 27 | T077, T087 | `guardrail-change` | ~350 |
+| probe | T125 | Owner and agent step, before 28: `claude -p --agent`, `--session-id` and the JSON output's `session_id` and usage fields, the hook-input agent field, the cloud marker and the cloud invocation; slice 28 changes `localInvocation` from its results | — |
 | 28 | T078, T086 | Session-start + guard hooks | ~650 |
+| 28b | T166 | Cross-process launch lock and launch record, split from T100 (32b) because Gate A needs it (Owner decision 2026-10-11) | cal. ~300 |
 | 29 | T073 | Gate A e2e | cal. ~450 |
 | 29c | T079–T080, T088 | Injection fixtures, attack suite | cal. ~590 |
 | 29b | T157 | Rename `master` to `main`: done early (2026-10-07); its file changes ride with slice 15b, and T157 closes when the Owner's copy of `ci.yml` is on main | — |
+| probe | T126, T127 | Owner and agent steps, part of Gate A's validation with T128 after slice 29: signatures in the cloud image and a GitHub-button merge flagged (quickstart Scenario 4), the kill switch (Scenario 5) and the `owner-alert` email (Scenario 6) | — |
+| end of bootstrapping | — | Adoption follows Gate A, after slice 29c: the factory repository adopts itself (`factory adopt`), and from then on the factory's work goes through the line, each pull request under the release's 400-line limit (FR-038 / SC-007), not this table's 1,000 (Owner decision 2026-10-11) | — |
 
-Then:
+Then, through the line after adoption (the estimates are per area; Intake splits each into items under 400 lines):
 
 | Slice | Tasks | Content | Est. lines |
 |-------|-------|---------|------------|
@@ -594,14 +600,15 @@ Then:
 | 31a | T102, T104, T105 | Security findings and gates (US6) | ~650 |
 | 31b | T103, T106, T107 | New-dependency gate + security workflows (US6) | ~450 |
 | 32a | T095–T099, T158; T094 cases AC-032–AC-037 | Retry, blocked, caps, usage, pause enforcement, dispatcher events on `claude/factory-log` (US5) (cal. ~975: kept whole; split if it heads past 1,000) | ~750 |
-| 32b | T100, T101; T094 cases AC-030, AC-031, AC-038, AC-039, AC-059 | Launcher fallback, parallel limit, review trigger (US5) | ~450 |
+| 32b | T100, T101; T094 cases AC-030, AC-031, AC-038, AC-039, AC-059 | Launcher fallback, parallel limit, review trigger (US5); the launch lock moved to 28b (T166) | ~450 |
 | 33 | T108–T110 | Ops and metrics (US7) | ~700 |
 | 34a | T113, T112 lessons writer; T111 lessons and coach-scope cases | Coach lessons and coach-scope guard (US8) | cal. ~600 |
 | 34b | T149–T150, T112 replay runner; T111 replay cases | Benchmark `init`/`add` and replay (US8) | cal. ~635 |
 | 35 | T114–T115 | Upgrade (US9) | ~550 |
 | 36 | T144–T145 | Key rotation | ~550 |
+| probe | T146 | Owner and agent step, after 36: the key-rotation dry-run on the sample project (quickstart Scenario 7) | — |
 
-Polish tasks ride with the slice they verify; probes are not slices.
+Polish tasks ride with the slice they verify. Probes are not slices: they are Owner and agent steps, listed in the tables at their place in the order.
 
 ---
 
