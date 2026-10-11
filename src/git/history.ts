@@ -78,6 +78,26 @@ function runner(repo: string, env: NodeJS.ProcessEnv | undefined): Run {
   };
 }
 
+function verifiedUnder(run: Run, keys: ReleaseKeys, commit: string): boolean {
+  const verify = [
+    ...['-c', `gpg.ssh.allowedSignersFile=${keys.allowedSigners}`],
+    ...['-c', `gpg.ssh.revocationFile=${keys.revokedKeys}`],
+    ...['-c', 'gpg.ssh.program=ssh-keygen'],
+    // A good signature by a key no allowed_signers line names has trust "undefined"; require a
+    // listed key even where git would accept it.
+    ...['-c', 'gpg.minTrustLevel=fully'],
+  ];
+  return run('git', [...verify, 'verify-commit', commit]).status === 0;
+}
+
+/** Whether `commit` is signed by a key `keys` lists and does not revoke, as the walk checks it. */
+export const signedUnder = (
+  repo: string,
+  keys: ReleaseKeys,
+  commit: string,
+  env?: NodeJS.ProcessEnv,
+): boolean => verifiedUnder(runner(repo, env), keys, commit);
+
 /** Deepen a shallow clone until `ref`'s first-parent history reaches `baseline` or the root. */
 function deepen(run: Run, ref: string, baseline: string | undefined): void {
   const slash = ref.indexOf('/');
@@ -204,17 +224,7 @@ function walk(repo: string, keysFor: KeysFor, options: HistoryOptions, fetched: 
     return { ...out, rejected: { commit: recorded.commit, reason } };
   }
 
-  const signedUnder = (keys: ReleaseKeys, commit: string): boolean => {
-    const verify = [
-      ...['-c', `gpg.ssh.allowedSignersFile=${keys.allowedSigners}`],
-      ...['-c', `gpg.ssh.revocationFile=${keys.revokedKeys}`],
-      ...['-c', 'gpg.ssh.program=ssh-keygen'],
-      // A good signature by a key no allowed_signers line names has trust "undefined"; require
-      // a listed key even where git would accept it.
-      ...['-c', 'gpg.minTrustLevel=fully'],
-    ];
-    return run('git', [...verify, 'verify-commit', commit]).status === 0;
-  };
+  const signedUnder = (keys: ReleaseKeys, commit: string) => verifiedUnder(run, keys, commit);
   const keysByPin = new Map<string, ReleaseKeys>();
   const keysAt = (commit: string): ReleaseKeys => {
     const shown = run('git', ['show', `${commit}:.factory/config`]);

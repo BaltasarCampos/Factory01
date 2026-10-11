@@ -69,6 +69,26 @@ export function signedCommit(
   return head(options);
 }
 
+/**
+ * An Owner-signed commit of `tree` on `parent`, made without the index or HEAD, so nothing the
+ * working copy holds is swept in; returns its sha.
+ */
+export function signedCommitTree(
+  options: GitSignOptions,
+  tree: string,
+  parent: string,
+  message: string,
+): string {
+  assertPassphraseTerminal(options.stdinIsTTY);
+  const result = git(options, ['commit-tree', '-S', tree, '-p', parent, '-m', message]);
+  const sha = result.stdout.trim();
+  if (result.status !== 0 || !/^[0-9a-f]{40}$/.test(sha))
+    throw new SigningError(`signed commit failed: ${result.stderr.trim()}`);
+  if (!git(options, ['cat-file', 'commit', sha]).stdout.includes('-----BEGIN SSH SIGNATURE-----'))
+    throw new SigningError(`signed commit failed: git made ${sha} without a signature`);
+  return sha;
+}
+
 /** `git merge --no-ff -S` of exactly `commit` into the current branch; returns the merge sha. */
 export function signedMerge(options: GitSignOptions, commit: string, message: string): string {
   assertPassphraseTerminal(options.stdinIsTTY);

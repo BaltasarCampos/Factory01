@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factorySource, releaseKeysFor, secondCopy } from '../approvals/keys.js';
+import { factorySource, laptopKeys, releaseKeysFor, secondCopy } from '../approvals/keys.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { dispatchOnce, type DispatchContext, type PassResult } from '../dispatcher/dispatch.js';
@@ -39,8 +39,10 @@ export async function projectDispatch(
     project: ctx.cwd,
     home: project.home,
     env: ctx.env,
-    // The release's own tag, verified with main's pinned key lists before its hashes are used.
-    release: (pin) => verifiedManifest(factorySource(ctx.env), pin, keysFor(pin)),
+    // The release's own tag, verified with the laptop's own key lists before its hashes are
+    // used; the launcher runs only on the laptop, and the release's own lists would vouch for
+    // themselves.
+    release: (pin) => verifiedManifest(factorySource(ctx.env), pin, laptopKeys(project.home)),
   });
   const context: DispatchContext = {
     projectDir: ctx.cwd,

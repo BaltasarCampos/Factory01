@@ -16,6 +16,7 @@ import {
   mergeBrief,
   mergeIntoMain,
   runGit,
+  signedReleaseTag,
   type TestRepo,
 } from '../helpers/git-repo.js';
 import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
@@ -365,6 +366,7 @@ describe('signed main history: mainKeys reads the pin at the last verified commi
       files: { allowed_signers: `${owner.allowedSignersLine}\n`, revoked_keys: '' },
     });
     const first = factory.revParse('HEAD');
+    signedReleaseTag(factory, owner);
     factory.commit({ allowed_signers: `${other.allowedSignersLine}\n` }, 'another key');
     const second = factory.revParse('HEAD');
     const project = signedProject(owner, first);
@@ -387,6 +389,7 @@ describe('signed main history: mainKeys reads the pin at the last verified commi
         revoked_keys: '',
       },
     });
+    signedReleaseTag(factory, owner);
     const { project } = adopted(older, factory.revParse('HEAD'));
     const env = { ...gitEnv, FACTORY_SOURCE: factory.path };
     const run = (home: string) => mainKeys(project.path, env, tempDir('factory-keys-'), home);
@@ -396,6 +399,48 @@ describe('signed main history: mainKeys reads the pin at the last verified commi
     );
     expect(() => run(laptop([owner]))).toThrow(/the laptop's own key lists/);
     expect(existsSync(run(laptop([older, owner])).allowedSigners)).toBe(true);
+  });
+});
+
+describe('signed main history: on the laptop, a pin counts only when its release tag verifies against the laptop key lists (T139)', () => {
+  /** A factory commit whose own key lists name `signers`. */
+  const release = (signers: TestKeys[]) =>
+    makeRepo({
+      files: {
+        allowed_signers: signers.map((k) => `${k.allowedSignersLine}\n`).join(''),
+        revoked_keys: '',
+      },
+    });
+  /** `mainKeys` on the laptop `home` for a project adopted at `factory`'s commit. */
+  const keysOn = (factory: TestRepo, home: string) => () => {
+    const { project } = adopted(owner, factory.revParse('HEAD'));
+    const env = { ...gitEnv, FACTORY_SOURCE: factory.path };
+    return mainKeys(project.path, env, tempDir('factory-keys-'), home);
+  };
+
+  it('refuses a factory commit at the pinned SHA with no release tag', () => {
+    expect(keysOn(release([owner]), laptop([owner]))).toThrow(
+      /release tag v1\.0\.0 does not exist/,
+    );
+  });
+
+  it("refuses a tag signed by a key only that commit's allowed_signers lists", () => {
+    const factory = release([owner, other]);
+    signedReleaseTag(factory, other);
+
+    expect(keysOn(factory, laptop([owner]))).toThrow(
+      /not signed by a listed, non-revoked Owner key/,
+    );
+  });
+
+  it('accepts a tag by an older Owner key the laptop still lists, and refuses it once the laptop revokes that key', () => {
+    const factory = release([older, owner]);
+    signedReleaseTag(factory, older);
+
+    expect(existsSync(keysOn(factory, laptop([older, owner]))().allowedSigners)).toBe(true);
+    expect(keysOn(factory, laptop([older, owner], [older]))).toThrow(
+      /not signed by a listed, non-revoked Owner key/,
+    );
   });
 });
 

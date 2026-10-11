@@ -11,6 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { CLOUD_MARKER, RefusedError } from '../cli/env.js';
 import { ledgerPath, walkMain, type KeysFor } from '../git/history.js';
 import { parseConfig } from '../model/config.js';
+import { verifyReleaseTag } from '../release/tag.js';
 import type { ReleasePin } from '../model/types.js';
 import { ownerKeyPath } from './sign.js';
 
@@ -161,12 +162,24 @@ export function factorySource(env: NodeJS.ProcessEnv): string {
   return env.FACTORY_SOURCE ?? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 }
 
-/** Key lists by release pin, each release's files in its own folder under `dir`. */
-export function releaseKeysFor(env: NodeJS.ProcessEnv, dir: string): KeysFor {
+/**
+ * Key lists by release pin, each release's files in its own folder under `dir`. On the laptop
+ * (`laptop`, its own key lists) a pin counts only when its release tag resolves to the pinned
+ * commit and verifies against those lists; in the cloud any commit at the pinned SHA is read
+ * (tasks.md T139, known limit).
+ */
+export function releaseKeysFor(env: NodeJS.ProcessEnv, dir: string, laptop?: ReleaseKeys): KeysFor {
+  // One tag check and one copy per pin, however many commits the walk reads it at.
+  const byPin = new Map<string, ReleaseKeys>();
   return (pin) => {
+    const known = byPin.get(`${pin.tag}@${pin.sha}`);
+    if (known !== undefined) return known;
+    if (laptop !== undefined) verifyReleaseTag(factorySource(env), pin.tag, pin.sha, laptop);
     const sub = join(dir, pin.sha);
     mkdirSync(sub, { recursive: true });
-    return releaseKeys(factorySource(env), pin.sha, sub);
+    const keys = releaseKeys(factorySource(env), pin.sha, sub);
+    byPin.set(`${pin.tag}@${pin.sha}`, keys);
+    return keys;
   };
 }
 
@@ -175,8 +188,9 @@ export function releaseKeysFor(env: NodeJS.ProcessEnv, dir: string): KeysFor {
  * main-side check uses. Main is fetched first and a failed fetch refuses, so a stale pin never
  * decides; a release whose lists cannot be read refuses too. The pin is read at the last commit
  * of main whose first-parent history is Owner-signed (src/git/history.ts), never at a tip an
- * unsigned commit could have repointed. With `home`, the walk resumes from the laptop ledger and
- * the first commit must also verify against the laptop's own key lists.
+ * unsigned commit could have repointed. With `home`, the walk resumes from the laptop ledger,
+ * the first commit must also verify against the laptop's own key lists, and so must every pin's
+ * release tag.
  */
 export function mainKeys(
   projectRepo: string,
@@ -193,11 +207,14 @@ export function mainKeys(
   const text = gitShow(projectRepo, 'origin/main:.factory/config');
   if (text === undefined) throw new KeyError('origin/main has no .factory/config');
   const { baseline, repo } = parseConfig(text);
-  const keysFor = releaseKeysFor(env, dir);
+  const laptop = home === undefined ? undefined : laptopKeys(home);
+  const keysFor = releaseKeysFor(env, dir, laptop);
   const walk = walkMain(projectRepo, keysFor, {
     baseline,
     env,
-    ...(home === undefined ? {} : { ledger: ledgerPath(home, repo), anchorKeys: laptopKeys(home) }),
+    ...(home === undefined || laptop === undefined
+      ? {}
+      : { ledger: ledgerPath(home, repo), anchorKeys: laptop }),
   });
   if (walk.lastVerified === undefined)
     throw new KeyError(
