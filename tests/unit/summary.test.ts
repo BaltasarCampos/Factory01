@@ -199,9 +199,13 @@ describe('spec approval (AC-092)', () => {
     const t = text(facts({ tier: 3, files: { spec: risky, events: EVENTS } }));
     expect(part(t, 'Known risks')).toEqual([
       'Tier 3',
+      'the formal check is not in this release: factory merge refuses a tier 3 item',
       `quoted from specs/42-add-login/spec.md at ${COMMIT.slice(0, 12)}:`,
       '> Lockout logic could block real users.',
     ]);
+    expect(part(text(facts({ gate: 'approved', tier: 3 })), 'Known risks')).toContain(
+      'the formal check is not in this release: factory merge refuses a tier 3 item',
+    );
     expect(part(text(facts()), 'Known risks')).toEqual([
       'Tier 2',
       'none identified (spec.md has no Risks section; required only at tier 3)',
