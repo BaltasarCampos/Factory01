@@ -40,7 +40,7 @@ async function pauseFacts(
   const env = project.env ?? process.env;
   const scratch = mkdtempSync(join(tmpdir(), 'factory-keys-'));
   try {
-    const keys = mainKeys(project.cwd, env, scratch);
+    const keys = mainKeys(project.cwd, env, scratch, project.home);
     const comments = await listComments(repo, inbox, project);
     const check = { keys, secondCopy: secondCopy(env, project.home), repo, inboxIssue: inbox };
     const lifts = resumeEntries(comments, check)

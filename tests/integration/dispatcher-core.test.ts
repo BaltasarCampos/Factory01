@@ -180,7 +180,7 @@ function setup(items: ItemSeed[], options: Setup = {}) {
     projectDir: project.path,
     keysFor: () => keys,
     secondCopy: options.secondCopy?.() ?? owner.publicKey,
-    historySigned: () => Promise.resolve(true),
+    auditHistory: () => Promise.resolve({ recreated: [] }),
     gatherEvidence: () => Promise.resolve({ needsSession: true, intakeComplete: true }),
     launchers: { cloud, local },
     logEvent: (n, event) => {
@@ -397,8 +397,9 @@ describe('dispatcher core: nothing is admitted before the brief is merged (AC-00
     expect(t.project.git([...listed, 'log', '-1', '--format=%G?', merge])).toBe('U');
     const trailer = '--format=%(trailers:key=Factory-Merge,valueonly)';
     expect(t.project.git(['log', '-1', trailer, merge])).toBe('define');
-    expect(verifiedMerges(t.project.path, t.keys, { ref: 'main' })).toEqual({
+    expect(verifiedMerges(t.project.path, () => t.keys, { ref: 'main' })).toEqual({
       lastVerified: t.project.revParse('main^1'),
+      rejected: { commit: merge, reason: expect.stringContaining(merge) as string },
       merges: [],
     });
   });
@@ -415,12 +416,13 @@ describe('dispatcher core: nothing is admitted before the brief is merged (AC-00
   it('reads trailers only up to the first commit git verify-commit rejects, and names the last verified one', () => {
     const t = setup([], { brief: 'after an unsigned commit' });
     const root = t.project.revParse('main~2');
-    expect(verifiedMerges(t.project.path, t.keys, { ref: 'main' })).toEqual({
+    expect(verifiedMerges(t.project.path, () => t.keys, { ref: 'main' })).toEqual({
       lastVerified: root,
+      rejected: { commit: t.project.revParse('main~1'), reason: expect.any(String) as string },
       merges: [],
     });
     const merged = setup([]).project;
-    expect(verifiedMerges(merged.path, t.keys, { ref: 'main' })).toEqual({
+    expect(verifiedMerges(merged.path, () => t.keys, { ref: 'main' })).toEqual({
       lastVerified: merged.revParse('main'),
       merges: [{ commit: merged.revParse('main'), value: 'define' }],
     });
@@ -457,7 +459,7 @@ describe('dispatcher core: fails closed when main cannot be verified (AC-006)', 
   ] as const)('refuses to read trailers when %s cannot run', (program, path) => {
     const t = setup([]);
     const env = { ...gitEnv, PATH: path() };
-    expect(() => verifiedMerges(t.project.path, t.keys, { ref: 'main', env })).toThrow(
+    expect(() => verifiedMerges(t.project.path, () => t.keys, { ref: 'main', env })).toThrow(
       new RegExp(`cannot run ${program}`),
     );
   });

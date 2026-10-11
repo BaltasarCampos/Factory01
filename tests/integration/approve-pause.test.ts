@@ -166,12 +166,16 @@ function setup(options: Setup = {}) {
     },
   });
   const pin = options.unknownRelease ? 'a'.repeat(40) : factory.revParse('HEAD');
-  const project = makeRepo({ files: { '.factory/config': config(pin) }, signWith: owner });
-  if (!options.briefUnmerged) mergeBrief(project, { signWith: owner });
+  // Main stays signed by a key the release does not revoke (src/git/history.ts).
+  const mainKey = options.revoke === 'owner' ? old : owner;
+  const project = makeRepo({ files: { '.factory/config': config(pin) }, signWith: mainKey });
+  if (!options.briefUnmerged) mergeBrief(project, { signWith: mainKey });
   options.project?.(project);
   const home = tempDir('factory-home-');
   mkdirSync(join(home, '.factory', 'keys'), { recursive: true });
-  writeFileSync(join(home, '.factory', 'allowed_signers'), `${owner.allowedSignersLine}\n`);
+  // The laptop's own key lists (`factory keygen`), which list every key the Owner has used.
+  const laptopSigners = `${old.allowedSignersLine}\n${owner.allowedSignersLine}\n`;
+  writeFileSync(join(home, '.factory', 'allowed_signers'), laptopSigners);
   if (!options.noKey) {
     copyFileSync(owner.privateKey, ownerKeyPath(home));
     chmodSync(ownerKeyPath(home), 0o600);
