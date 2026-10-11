@@ -95,6 +95,10 @@ export interface SummaryFacts {
   pause?: PauseFacts | undefined;
   /** Spec re-approval: the last approved blob and the diff from it (undefined: not available). */
   previousSpec?: { blob: string; diff: string | undefined } | undefined;
+  /** A `test:` waiver: the weakened findings at `commit` it covers, from the laptop's own run. */
+  covered?: readonly { target: string; what: string }[] | undefined;
+  /** Re-signing a head-bound waiver: the earlier waiver's head and what changed since (T151). */
+  resign?: { head: string; kind: 'diff' | 'interdiff' | 'gone'; text: string } | undefined;
 }
 
 export type Summary = { ok: true; text: string } | { ok: false; missing: string[] };
@@ -104,6 +108,15 @@ type Part = string[] | { missing: string };
 
 /** Removes control (Cc), format (Cf), line (Zl) and paragraph (Zp) characters, except newline. */
 export const clean = (text: string) => text.replace(/(?!\n)[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu, '');
+/**
+ * Untrusted text (test titles, diff lines) with every control, format, line and paragraph
+ * character, and every space but U+0020, shown as an escape, a newline as `\n`, so no text can
+ * hide or fake a line or pass for other text.
+ */
+export const visible = (text: string) =>
+  text.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|(?! )\p{Zs}/gu, (c) =>
+    c === '\n' ? '\\n' : `\\u{${(c.codePointAt(0) ?? 0).toString(16)}}`,
+  );
 const plain = (line: string) => line.replace(/^\s*(?:[-*]|\d+\.)\s+/, '').trim();
 const short = (sha: string) => sha.slice(0, 12);
 const plural = (n: number, word: string) => `${String(n)} ${word}${n === 1 ? '' : 's'}`;
@@ -175,7 +188,15 @@ function changed(f: SummaryFacts, gate: SummaryGate): Part {
   }
   if (gate.startsWith('waiver')) lines.push(`Waives ${f.waives ?? ''}`);
   if (f.head !== undefined) lines.push(`PR head ${f.head}`);
-  return lines;
+  const r = f.resign;
+  if (r === undefined) return lines;
+  const label = {
+    diff: `diff since the waived head ${r.head}:`,
+    interdiff: `interdiff since the waived head ${r.head}:`,
+    gone: `the waived head ${r.head} is gone, so this is the full diff from the merge base:`,
+  }[r.kind];
+  const diff = r.text.replace(/\n$/, '').split('\n');
+  return [...lines, label, ...diff.map((l) => `> ${visible(l)}`)];
 }
 
 function mapping(f: SummaryFacts, gate: SummaryGate): Part {
@@ -201,7 +222,16 @@ function mapping(f: SummaryFacts, gate: SummaryGate): Part {
   });
 }
 
+const isTestWaiver = (f: SummaryFacts) => (f.waives ?? '').startsWith('test:');
+
 function results(f: SummaryFacts, gate: SummaryGate): Part {
+  if (isTestWaiver(f)) {
+    const covered = f.covered ?? [];
+    if (covered.length === 0)
+      return { missing: `${f.waives ?? ''} covers no weakened test at ${short(f.commit ?? '')}` };
+    const head = `weakened tests at ${short(f.commit ?? '')} this waiver covers (run on this laptop):`;
+    return [head, ...covered.map((c) => `${visible(c.target)}: ${c.what}`)];
+  }
   if (gate === 'waiver-code' && !CODE_CHECKS.has(checkName(f)))
     return {
       missing: `this release has no ${checkName(f)} check yet, so there is nothing to waive`,
@@ -276,6 +306,10 @@ function risks(f: SummaryFacts, gate: SummaryGate): Part {
     ...(f.tier === 3 ? [`${NO_FORMAL}: factory merge refuses a tier 3 item`] : []),
   ];
   if (gate === 'admission') return [...tier, ...labels];
+  if (gate === 'waiver-code' && isTestWaiver(f)) {
+    const n = (f.covered ?? []).length;
+    return [...tier, `What it lets through: ${plural(n, 'weakened test')}, listed above`];
+  }
   if (gate === 'waiver-code')
     return {
       missing: `what the waiver lets through comes from the ${checkName(f)} check, which this release does not have yet`,

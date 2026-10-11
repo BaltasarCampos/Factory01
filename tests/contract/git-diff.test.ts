@@ -2,10 +2,10 @@
 // checks): nothing the compared commits or the repository's config hold can change what it
 // reports, renames are a deletion plus an addition, and every file type is named as it is.
 import { execFileSync } from 'node:child_process';
-import { chmodSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { appendOnly, safeDiff, type FileChange } from '../../src/git/diff.js';
+import { appendOnly, resignView, safeDiff, type FileChange } from '../../src/git/diff.js';
 import { gitEnv, makeRepo, runGit, type TestRepo } from '../helpers/git-repo.js';
 import { tempDir } from '../helpers/keys.js';
 
@@ -224,5 +224,97 @@ describe('appendOnly (T138, AC-082)', () => {
     const found = change(repo, 'café\n', 'café\nmore\n');
     expect(appendOnly(repo.path, found)).toBe(false);
     expect(runGit(repo.path, ['status', '--porcelain'])).toBe('');
+  });
+});
+
+describe('resignView: what changed since a waived head (T151)', () => {
+  const ITEM = 'claude/7-add-login';
+
+  /** main with SOURCE, an item branch whose first commit is the waived head. */
+  function waived(extra: Record<string, string> = {}) {
+    const { repo } = repoWith({ 'src/a.ts': SOURCE });
+    repo.checkout(ITEM, { create: true });
+    const head = repo.commit({ 'src/a.ts': CHANGED, ...extra }, 'item change');
+    return { repo, waivedHead: head };
+  }
+
+  it('the base did not move: the plain diff since the waived head shows a later commit in full', () => {
+    const { repo, waivedHead } = waived();
+    const head = repo.commit({ 'src/b.ts': 'export const later = true;\n' }, 'after the waiver');
+
+    const view = resignView(repo.path, 'main', waivedHead, head);
+
+    expect(view.kind).toBe('diff');
+    expect(view.text).toContain('+export const later = true;');
+    expect(view.text).not.toContain('export const c = 4;');
+  });
+
+  it('after a rebase onto a moved main, the interdiff shows the item’s own changes, not main’s', () => {
+    const { repo, waivedHead } = waived();
+    repo.checkout('main');
+    repo.commit({ 'src/main-only.ts': 'export const fromMain = 1;\n' }, 'main moves');
+    repo.checkout(ITEM);
+    repo.git(['rebase', '-q', 'main']);
+    const head = repo.commit({ 'src/b.ts': 'export const later = true;\n' }, 'after the waiver');
+
+    const view = resignView(repo.path, 'main', waivedHead, head);
+
+    expect(view.kind).toBe('interdiff');
+    expect(view.text).toContain('+export const later = true;');
+    expect(view.text).not.toContain('fromMain');
+  });
+
+  it.each(['diff', 'interdiff'] as const)(
+    'a -diff attribute in the pull request hides no line (%s)',
+    (kind) => {
+      const { repo, waivedHead } = waived({ '.gitattributes': '*.ts -diff\n*.patch -diff\n' });
+      repo.git(['config', 'diff.external', 'true']);
+      if (kind === 'interdiff') {
+        repo.checkout('main');
+        repo.commit({ 'src/main-only.ts': 'x\n' }, 'main moves');
+        repo.checkout(ITEM);
+        repo.git(['rebase', '-q', 'main']);
+      }
+      const head = repo.commit({ 'src/a.ts': `${CHANGED}export const hidden = 5;\n` }, 'more');
+
+      const view = resignView(repo.path, 'main', waivedHead, head);
+
+      expect(view.kind).toBe(kind);
+      expect(view.text).toContain('export const hidden = 5;');
+      expect(view.text).not.toMatch(/Binary files/);
+    },
+  );
+
+  it('the default global attributes file cannot hide the comparison of the two patches', () => {
+    // Two protections cover this: --text, and comparing with core.attributesFile=/dev/null
+    // outside any repository. Either alone is enough; the test fails only when both are gone.
+    const { repo, waivedHead } = waived();
+    repo.checkout('main');
+    repo.commit({ 'src/main-only.ts': 'x\n' }, 'main moves');
+    repo.checkout(ITEM);
+    repo.git(['rebase', '-q', 'main']);
+    const head = repo.commit({ 'src/b.ts': 'export const later = true;\n' }, 'after the waiver');
+    // Git reads $XDG_CONFIG_HOME/git/attributes whenever core.attributesFile is not set.
+    const xdg = tempDir();
+    mkdirSync(join(xdg, 'git'));
+    writeFileSync(join(xdg, 'git', 'attributes'), '* -diff\n');
+
+    const view = resignView(repo.path, 'main', waivedHead, head, {
+      ...gitEnv,
+      XDG_CONFIG_HOME: xdg,
+    });
+
+    expect(view.kind).toBe('interdiff');
+    expect(view.text).toContain('+export const later = true;');
+  });
+
+  it('when the waived head is gone, the full diff from the merge base, labelled as such', () => {
+    const { repo } = waived();
+    const head = repo.revParse('HEAD');
+
+    const view = resignView(repo.path, 'main', 'f'.repeat(40), head);
+
+    expect(view.kind).toBe('gone');
+    expect(view.text).toContain('+export const c = 4;');
   });
 });

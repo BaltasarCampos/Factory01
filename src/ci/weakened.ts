@@ -8,21 +8,44 @@ import { mergeBase, resolveCommit } from '../git/diff.js';
 import { TEST_CONFIG, type TestConfig } from '../stations/edges.js';
 import { cleanPass, inWorkspace, type Isolation, type TestRun } from './vitest-run.js';
 
+/** A test that passed at the base and did not run cleanly at the head. */
+export interface WeakFinding {
+  /** `test:<path>#<title>`, or `test:<path>` for a deleted file: the waiver that names it. */
+  target: string;
+  /** The path and title apart, so a `#` in either is never read as the split. */
+  file: string;
+  title?: string;
+  what: string;
+}
+
+/**
+ * Whether a `test:` waiver covers a finding: its target exactly, or exactly `test:<path>` of the
+ * finding's own path. No prefixes or patterns (T151).
+ */
+export const covers = (waives: string, finding: WeakFinding): boolean =>
+  waives === finding.target || waives === `test:${finding.file}`;
+
+/** The line CI prints for a finding, naming the waiver that would cover it. */
+export const findingLine = (f: WeakFinding, headSha: string): string =>
+  `${f.target}: ${f.what}; a ${f.target} waiver for ${headSha} covers it`;
+
 /** Findings for tests that passed in `base` and did not run in `head`. */
 export function judgeWeakened(
   base: TestRun,
   head: TestRun,
   headFiles: ReadonlySet<string>,
-  headSha: string,
-): string[] {
-  const findings: string[] = [];
+): WeakFinding[] {
+  const findings: WeakFinding[] = [];
   const deleted = new Set<string>();
-  const finding = (target: string, what: string) =>
-    findings.push(`${target}: ${what}; a ${target} waiver for ${headSha} covers it`);
   // A test already in `fails` mode at the base did not pass there, so it is never counted again.
   for (const t of base.tests.filter((b) => b.status === 'passed' && !b.fails)) {
     if (!headFiles.has(t.file)) {
-      if (!deleted.has(t.file)) finding(`test:${t.file}`, 'passed at the base, file deleted');
+      if (!deleted.has(t.file))
+        findings.push({
+          target: `test:${t.file}`,
+          file: t.file,
+          what: 'passed at the base, file deleted',
+        });
       deleted.add(t.file);
       continue;
     }
@@ -37,7 +60,12 @@ export function judgeWeakened(
           : now.retries > 0
             ? `passed only after ${String(now.retries)} ${now.retries === 1 ? 'retry' : 'retries'}`
             : now.status;
-    finding(`test:${t.file}#${t.name}`, `passed at the base, ${state} at the head`);
+    findings.push({
+      target: `test:${t.file}#${t.name}`,
+      file: t.file,
+      title: t.name,
+      what: `passed at the base, ${state} at the head`,
+    });
   }
   return findings;
 }
@@ -47,7 +75,7 @@ export function weakened(
   base: string,
   head: string,
   options: { isolation: Isolation; env: NodeJS.ProcessEnv; config?: TestConfig },
-): { findings: string[]; passed: number } {
+): { findings: WeakFinding[]; head: string; passed: number } {
   const { env } = options;
   const config = options.config ?? TEST_CONFIG;
   const to = resolveCommit(repo, head, env);
@@ -56,9 +84,10 @@ export function weakened(
     const headFiles = new Set(ws.write('head', to));
     ws.write('base', start);
     const baseRun = ws.test('base');
-    const findings = judgeWeakened(baseRun, ws.test('head'), headFiles, to);
+    const findings = judgeWeakened(baseRun, ws.test('head'), headFiles);
     return {
       findings,
+      head: to,
       passed: baseRun.tests.filter((t) => t.status === 'passed' && !t.fails).length,
     };
   });
