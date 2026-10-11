@@ -171,10 +171,27 @@ nothing in the pull request or the user's git settings changes which lines count
 |-------------|-------------------------------------|--------|
 | `claude/<issue>-<slug>` (work item) | Full approval chain verifies; no earlier Owner-signed merge with `Factory-Merge: #<issue>` on main; checked set of acceptance criteria not empty and every criterion line has an ID (FR-042); no weakened test without a covering waiver (AC-061); no protected path, `.gitattributes`, `.gitmodules` or `.factory/config` touched; required CI checks green on the checked commit | Item merged, once |
 | `claude/define` | Same path rule as items; CI green; Define output check passes | Brief merged (`Factory-Merge: define`): from now on the dispatcher admits items, each still needing its own `owner:approved` |
-| `factory/upgrade-<tag>` | Tag carries a valid Owner signature (verified with main's pinned `allowed_signers`) and still resolves to `<sha>`; a verified `check:guardrail-change@<tag>@<sha>` waiver; the full protected set at the PR head equals the manifest of `<tag>@<sha>` (every file present with its hash, no extra protected file); `.factory/config` differs from main only in the `factory_release` line, set to `<tag>@<sha>` | New factory release pinned |
+| `factory/upgrade-<tag>` | Tag carries a valid Owner signature (verified with main's pinned `allowed_signers` and with the laptop's own key lists) and still resolves to `<sha>`; the `<tag>` in the branch name equals the tag in the new pin; a verified `check:guardrail-change@<tag>@<sha>` waiver; the full protected set at the PR head equals the manifest of `<tag>@<sha>` (every file present with its hash, no extra protected file); `.factory/config` differs from main only in the `factory_release` line, set to `<tag>@<sha>`; nothing outside the protected set and `.factory/config` changes | New factory release pinned |
 | `claude/factory-log` | Only additions; in an existing file, new lines only after the old ones; every touched path under `.factory/events/`, `.factory/ops/`, `.factory/lessons/` or `.factory/releases/`; regular text files only (no binary, symlink, executable bit, gitlink or `.git*` file); no protected path (no waiver can allow one) | Weekly log merge |
 
-A pull request from any other branch with no work item is refused. For every merge,
+A pull request from any other branch with no work item is refused.
+
+**The factory repository** (FR-016g) is identified positively: the project's `origin`, normalised
+to `owner/repo` from its SSH or HTTPS form, must equal exactly the repository the trusted release
+names as its own source (`FACTORY_REPO` in its workflow templates). An origin that does not match,
+a fork included, or cannot be parsed is a project and gets the project rules, so a mistake lands
+on the stricter side. Before the factory repository adopts itself, every branch there gets the
+factory-repository rule. Once its verified main has `.factory/config`, the project rules come
+first: `claude/<issue>-<slug>` is an item (with the full approval chain), `claude/define`,
+`factory/upgrade-<tag>` and `claude/factory-log` get their own rules, and any other `claude/`
+branch is refused; the factory-repository rule covers only the remaining branches
+(`coach/<yyyy-Www>` and the Owner's own). That rule refuses every path `isProtected` covers,
+`.gitattributes`, `.gitmodules` and `.specify/memory/**` (the design and the constitution): the
+factory's own workflows and self-protection files, which the Owner copies into place with a
+signed commit; `factory/self/` stays ordinary files. The merge result names the rule that
+applied (Owner decision 2026-10-11, slice 21).
+
+For every merge,
 `factory merge` warns while the dispatcher shows a session for that item running and continues
 only after the Owner confirms (the signal is telemetry, so it must never block a merge), shows
 the approval summary (§ Approval summary), then:
