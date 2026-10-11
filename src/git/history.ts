@@ -15,8 +15,9 @@
 //
 // A shallow clone is deepened until the walk reaches `baseline` or the root. On the laptop the
 // ledger `~/.factory/verified/<repo>` holds the last commit verified and the baseline: commits up
-// to it are not checked again, and a main that no longer contains it was rewritten, or names
-// another baseline, which fails.
+// to it are not checked again. A clone whose main is behind it fetches and walks once more; a
+// main that neither contains it nor is behind it was rewritten, and one that names another
+// baseline fails too. Only `origin/main` may be walked with the ledger.
 //
 // Everything fails closed: when git or ssh-keygen cannot run, a key list or a pin cannot be
 // read, or the history cannot be deepened, the walk throws instead of reporting a result.
@@ -154,9 +155,16 @@ function readLedger(path: string): Ledger | undefined {
 
 /** Walk main's first-parent history after `baseline`, oldest first, verifying each commit. */
 export function walkMain(repo: string, keysFor: KeysFor, options: HistoryOptions = {}): MainWalk {
+  return walk(repo, keysFor, options, false);
+}
+
+function walk(repo: string, keysFor: KeysFor, options: HistoryOptions, fetched: boolean): MainWalk {
   const run = runner(repo, options.env);
   const ref = options.ref ?? 'origin/main';
   const baseline = options.baseline;
+  // The ledger is main's: no other ref may record a commit in it.
+  if (options.ledger !== undefined && ref !== 'origin/main')
+    throw new HistoryError(`the ledger records origin/main only, not ${ref}`);
   const out: MainWalk = { lastVerified: undefined, commits: [] };
   const recorded = options.ledger === undefined ? undefined : readLedger(options.ledger);
   if (recorded !== undefined && recorded.baseline !== baseline) {
@@ -182,6 +190,16 @@ export function walkMain(repo: string, keysFor: KeysFor, options: HistoryOptions
   const trustedUpTo =
     recorded === undefined ? -1 : entries.findIndex((e) => e.commit === recorded.commit);
   if (recorded !== undefined && trustedUpTo < 0) {
+    // 0: this clone's main is an ancestor of the recorded commit, so it is behind (another clone
+    // recorded a newer main); 1: it is not; otherwise this clone lacks the recorded commit.
+    const behind = run('git', ['merge-base', '--is-ancestor', ref, recorded.commit]).status;
+    if (behind !== 1 && !fetched) {
+      const fetch = run('git', ['fetch', '-q', 'origin', 'main']);
+      if (fetch.status !== 0)
+        throw new HistoryError(`cannot fetch main: ${fetch.stderr.trim() || 'git fetch failed'}`);
+      return walk(repo, keysFor, options, true);
+    }
+    if (behind === 0) throw new HistoryError('this clone is behind the ledger; fetch first');
     const reason = `main no longer contains ${recorded.commit}, the last commit this laptop verified: its history was rewritten`;
     return { ...out, rejected: { commit: recorded.commit, reason } };
   }

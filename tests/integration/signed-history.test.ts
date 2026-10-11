@@ -297,6 +297,48 @@ describe('signed main history: the laptop ledger (T139)', () => {
     });
   });
 
+  it('a clone behind the ledger fetches and walks once more instead of reporting a rewrite', () => {
+    const project = signedProject();
+    grow(project, 1);
+    const behind = join(tempDir('factory-clone-'), 'clone');
+    runGit(project.path, ['clone', '-q', `file://${project.origin}`, behind]);
+    // Another clone verifies a newer main and records it.
+    grow(project, 2);
+    const ledger = ledgerPath(tempDir('factory-home-'), REPO);
+    const keys = always(writeKeyFiles([owner]));
+    expect(verify(project.path, undefined, keys, ledger).ok).toBe(true);
+
+    expect(verify(behind, undefined, keys, ledger)).toEqual({
+      ok: true,
+      head: project.revParse('main'),
+    });
+  });
+
+  it('refuses, without calling it tampering, when main is still behind the ledger after a fetch', () => {
+    const project = signedProject();
+    grow(project, 2);
+    const ledger = ledgerPath(tempDir('factory-home-'), REPO);
+    const keys = always(writeKeyFiles([owner]));
+    expect(verify(project.path, undefined, keys, ledger).ok).toBe(true);
+    // origin's main goes back to an ancestor of the recorded commit.
+    project.git(['push', '-q', '-f', 'origin', 'main~1:main']);
+
+    expect(() => verify(project.path, undefined, keys, ledger)).toThrow(
+      'this clone is behind the ledger; fetch first',
+    );
+  });
+
+  it('records only main: a walk of another ref with the ledger is refused', () => {
+    const project = signedProject();
+    const ledger = ledgerPath(tempDir('factory-home-'), REPO);
+    const keys = always(writeKeyFiles([owner]));
+    const walk = () =>
+      verifyFirstParent(project.path, undefined, keys, { ref: 'main', ledger, env: gitEnv });
+
+    expect(walk).toThrow(/ledger .* origin\/main/);
+    expect(existsSync(ledger)).toBe(false);
+  });
+
   it('records the baseline, and refuses another one later even where adoption happened', () => {
     const ledger = ledgerPath(tempDir('factory-home-'), REPO);
     const keys = always(writeKeyFiles([owner]));
