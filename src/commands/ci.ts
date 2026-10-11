@@ -12,7 +12,7 @@ import { inGithubActions } from '../ci/sandbox.js';
 import { measureSize } from '../ci/size.js';
 import { testHead } from '../ci/test.js';
 import type { Isolation } from '../ci/vitest-run.js';
-import { weakened } from '../ci/weakened.js';
+import { findingLine, weakened } from '../ci/weakened.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { fileAt, mergeBase, safeDiff } from '../git/diff.js';
@@ -181,7 +181,8 @@ function weakenedCheck(ctx: CommandContext, args: readonly string[]): number {
   const [base, head] = range(args, 'weakened <base> <head>');
   const result = weakened(ctx.cwd, base, head, { isolation: isolation(ctx), env: ctx.env });
   const summary = `${String(result.passed)} tests passed at the merge base`;
-  return report(ctx, 'weakened', result.findings, [summary]);
+  const findings = result.findings.map((f) => findingLine(f, result.head));
+  return report(ctx, 'weakened', findings, [summary]);
 }
 
 /** `<head>`, or a usage error naming the check. */

@@ -20,6 +20,7 @@ import { NonceLedger, nonceLedgerPath } from '../approvals/nonces.js';
 import {
   extractFromComment,
   isCodeGateWaiver,
+  signableTestTarget,
   newNonce,
   parse,
   RecordError,
@@ -30,6 +31,8 @@ import {
 import { ownerKeyPath, sign } from '../approvals/sign.js';
 import { specBlobSha, verifyGate, verifySignature } from '../approvals/verify.js';
 import type { CommandContext } from '../cli/commands.js';
+import { covers, weakened, type WeakFinding } from '../ci/weakened.js';
+import { resignView } from '../git/diff.js';
 import { ledgerPath } from '../git/history.js';
 import { briefMerged, verifiedMerges } from '../git/merges.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
@@ -41,7 +44,7 @@ import { timeline } from '../github/timeline.js';
 import { itemBranch, slugify } from '../model/naming.js';
 import type { ApprovalGate, ApprovalRecord, Tier } from '../model/types.js';
 import { configOnMain } from '../model/config.js';
-import { buildSummary, type SummaryFacts } from '../notify/summary.js';
+import { buildSummary, visible, type SummaryFacts } from '../notify/summary.js';
 import { projectHere } from './pause.js';
 
 type Project = Awaited<ReturnType<typeof projectHere>>;
@@ -204,6 +207,67 @@ interface Gathered {
   info: Issue;
   view?: BranchView;
   previous?: SummaryFacts['previousSpec'];
+  covered?: WeakFinding[];
+  resign?: SummaryFacts['resign'];
+}
+
+/** One weakened run per merge base and head in a process: its findings depend on nothing else. */
+const weakenedRuns = new Map<string, WeakFinding[]>();
+
+/** The weakened findings at `head`, from this laptop's own run, always in the sandbox. */
+function weakenedAt(project: Project, head: string): WeakFinding[] {
+  const main = git(project, ['rev-parse', '--verify', 'origin/main^{commit}']).stdout.trim();
+  const key = `${project.cwd}\0${main}\0${head}`;
+  let found = weakenedRuns.get(key);
+  if (found === undefined) {
+    const env = project.env ?? process.env;
+    found = weakened(project.cwd, main, head, { isolation: { sandbox: true }, env }).findings;
+    weakenedRuns.set(key, found);
+  }
+  return found;
+}
+
+/**
+ * The view to re-sign from when the item's last signed waiver for `waives` covered another head:
+ * the diff or interdiff since that head, or the full diff when it is gone (T151).
+ */
+async function resignFrom(
+  project: Project,
+  issue: number,
+  waives: string,
+  head: string,
+  keys: ReleaseKeys,
+): Promise<SummaryFacts['resign']> {
+  const comments = await listComments(project.repo, issue, project);
+  for (const comment of [...comments].reverse()) {
+    let record: ApprovalRecord;
+    try {
+      const signed = extractFromComment(comment.body);
+      record = parse(signed.text);
+      if (record.gate !== 'waiver' || record.waives !== waives) continue;
+      if (record.repo !== project.repo || record.issue !== issue) continue;
+      if (!verifySignature(signed, keys, project.env)) continue;
+    } catch {
+      continue;
+    }
+    const waived = record.head ?? '';
+    if (waived === head) return undefined;
+    fetchBranch(project, waived); // the waived head may be gone after a force-push
+    const env = project.env ?? process.env;
+    return { head: waived, ...resignView(project.cwd, 'origin/main', waived, head, env) };
+  }
+  return undefined;
+}
+
+/** A head-bound waiver binds the PR head; it must be the very commit the summary was read at. */
+async function readHead(project: Project, branch: string): Promise<BranchView> {
+  const view = readBranch(project, branch);
+  const head = (await viewPr(project.repo, branch, project)).headRefOid;
+  if (typeof view === 'string' || view.commit !== head)
+    throw new RefusedError(
+      `PR head ${head.slice(0, 12)} is not the commit read from origin/${branch} (${typeof view === 'string' ? view : view.commit.slice(0, 12)}); fetch again and retry`,
+    );
+  return view;
 }
 
 async function fieldsFor(
@@ -233,28 +297,38 @@ async function fieldsFor(
     return { fields: { tier, branch, spec_sha }, info, view, previous };
   }
   const target = waives ?? '';
-  if (target.startsWith('test:'))
-    throw new RefusedError(
-      'test: waiver targets are not supported yet (T151); a weakened test blocks until then',
-    );
+  if (target.startsWith('test:')) {
+    if (!signableTestTarget(target))
+      throw new RefusedError(
+        `${visible(target)} holds a character the summary would have to clean (a control, format or line-break character, or edge spaces): rename the test`,
+      );
+    const { tier, branch } = await approvedRecord(project, issue, keys());
+    // One commit throughout: the weakened run, the findings covered and the record's head.
+    const view = await readHead(project, branch);
+    const covered = weakenedAt(project, view.commit).filter((f) => covers(target, f));
+    if (covered.length === 0)
+      throw new RefusedError(
+        `nothing to waive: ${target} covers no weakened test at ${view.commit.slice(0, 12)}`,
+      );
+    const resign = await resignFrom(project, issue, target, view.commit, keys());
+    const fields = { tier, branch, waives: target, head: view.commit };
+    return { fields, info, view, covered, ...(resign === undefined ? {} : { resign }) };
+  }
   if (target.startsWith('check:') || target.startsWith('dep:'))
     throw new RefusedError(
       `waivers on pull requests (${target.split(':')[0] ?? ''}:) are not supported in this build yet`,
     );
   if (!target.startsWith('gate:')) return { fields: { waives: target }, info };
   const { tier, branch } = await approvedRecord(project, issue, keys());
-  const view = readBranch(project, branch);
   if (!isCodeGateWaiver(target)) {
+    const view = readBranch(project, branch);
     const read = typeof view === 'string' ? {} : { view };
     return { fields: { tier, branch, waives: target }, info, ...read };
   }
-  // A code-gate waiver binds the PR head; it must be the very commit the summary was read at.
-  const head = (await viewPr(project.repo, branch, project)).headRefOid;
-  if (typeof view === 'string' || view.commit !== head)
-    throw new RefusedError(
-      `PR head ${head.slice(0, 12)} is not the commit read from origin/${branch} (${typeof view === 'string' ? view : view.commit.slice(0, 12)}); fetch again and retry`,
-    );
-  return { fields: { tier, branch, waives: target, head }, info, view };
+  const read = await readHead(project, branch);
+  const resign = await resignFrom(project, issue, target, read.commit, keys());
+  const fields = { tier, branch, waives: target, head: read.commit };
+  return { fields, info, view: read, ...(resign === undefined ? {} : { resign }) };
 }
 
 /** Warn while main has no Owner-signed `Factory-Merge: define`; never refuses. */
@@ -313,7 +387,7 @@ export async function approve(ctx: CommandContext): Promise<number> {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-  const { fields, info, view, previous } = gathered;
+  const { fields, info, view, previous, covered, resign } = gathered;
   const summary = buildSummary({
     gate,
     issue: info,
@@ -321,6 +395,8 @@ export async function approve(ctx: CommandContext): Promise<number> {
     commit: view?.commit,
     files: view?.files,
     previousSpec: previous,
+    covered,
+    resign,
   });
   if (!summary.ok)
     throw new RefusedError(

@@ -69,7 +69,23 @@ const WAIVES = [
 /** Gates checked against code: their waivers carry the PR head they cover (AC-089). */
 const CODE_GATE = /^(?:red-green|coverage|size|ac-\d{3,}|ci-[a-z0-9]+(?:-[a-z0-9]+)*)$/;
 
+/**
+ * A weakened-test waiver target (T151), `test:<path>#<title>` or `test:<path>` as `factory ci
+ * weakened` names it. Path and title come from the pull request's code, so a target holding any
+ * character the summary would have to clean (`Cc`, `Cf`, `Zl`, `Zp`: newlines, escapes,
+ * zero-width and bidi characters) cannot be signed, nor one with edge whitespace or any space but
+ * U+0020 (a non-breaking space looks like a normal one): what the Owner signs is exactly what they
+ * read.
+ */
+export function signableTestTarget(waives: string): boolean {
+  return (
+    /^test:\S(?:.*\S)?$/u.test(waives) && !/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]|(?! )\p{Zs}/u.test(waives)
+  );
+}
+
+/** Waivers checked against code carry the PR head they cover: code gates and `test:` targets. */
 export function isCodeGateWaiver(waives: string): boolean {
+  if (waives.startsWith('test:')) return signableTestTarget(waives);
   return waives.startsWith('gate:') && CODE_GATE.test(waives.slice('gate:'.length));
 }
 
@@ -95,7 +111,10 @@ const FORMAT: Record<Field, { test: (v: string) => boolean; rule: string }> = {
   branch: { test: (v) => BRANCH.test(v) && !v.includes('..'), rule: 'must be a branch name' },
   spec_sha: { test: (v) => SHA.test(v), rule: 'must be a 40-hex blob sha' },
   scope: { test: (v) => SCOPES.includes(v), rule: 'must be line or a station name' },
-  waives: { test: (v) => WAIVES.some((p) => p.test(v)), rule: 'must be a waiver target' },
+  waives: {
+    test: (v) => WAIVES.some((p) => p.test(v)) || signableTestTarget(v),
+    rule: 'must be a waiver target (a test: target with no control, format or edge-space character)',
+  },
   head: { test: (v) => SHA.test(v), rule: 'must be a 40-hex commit' },
   timestamp: { test: isTimestamp, rule: 'must be RFC 3339 UTC, YYYY-MM-DDTHH:MM:SSZ' },
   nonce: { test: (v) => NONCE.test(v), rule: 'must be 32 lowercase hex chars' },
@@ -135,7 +154,8 @@ function problemsOf(fields: Fields): string[] {
   if (gate === 'waiver' && waives !== undefined) {
     if (isCodeGateWaiver(waives)) presence.head = 'required';
     else delete presence.head;
-    if (waives.startsWith('gate:')) presence.tier = presence.branch = 'required';
+    if (waives.startsWith('gate:') || waives.startsWith('test:'))
+      presence.tier = presence.branch = 'required';
   }
   for (const field of GATED) {
     const has = fields.has(field);
@@ -146,7 +166,11 @@ function problemsOf(fields: Fields): string[] {
   // Records for a work item name the item's own branch, so they bind to that issue only.
   const issue = valid('issue');
   const branch = valid('branch');
-  const forItem = gate === 'approved' || gate === 'spec-approved' || waives?.startsWith('gate:');
+  const forItem =
+    gate === 'approved' ||
+    gate === 'spec-approved' ||
+    waives?.startsWith('gate:') ||
+    waives?.startsWith('test:');
   if (
     forItem === true &&
     issue !== undefined &&

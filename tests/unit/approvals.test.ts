@@ -21,6 +21,7 @@ import {
   RecordError,
   renderComment,
   serialise,
+  signableTestTarget,
 } from '../../src/approvals/record.js';
 import { sign, SigningError } from '../../src/approvals/sign.js';
 import {
@@ -32,7 +33,9 @@ import {
   type LabelAdd,
   type PostedComment,
 } from '../../src/approvals/verify.js';
+import { covers, type WeakFinding } from '../../src/ci/weakened.js';
 import type { ApprovalRecord } from '../../src/model/types.js';
+import { visible } from '../../src/notify/summary.js';
 import { makeRepo } from '../helpers/git-repo.js';
 import {
   makeKeys,
@@ -291,6 +294,39 @@ describe('approval record canonical form (AC-070)', () => {
       expect(parse(serialise(record))).toEqual(record);
       expect(() => serialise({ ...record, head: HEAD })).toThrow(/head: not allowed/);
     });
+
+    it.each([
+      'test:tests/login.test.ts#locks out after three tries',
+      'test:tests/login.test.ts',
+      'test:tests/a#b.test.ts#a title # with a hash',
+      'test:tests/login.test.ts#says: hello',
+    ])('%s is a code gate on a work item: head, tier and its branch are required', (waives) => {
+      expect(isCodeGateWaiver(waives)).toBe(true);
+      expect(signableTestTarget(waives)).toBe(true);
+      const record = waiver(waives, HEAD);
+      expect(parse(serialise(record))).toEqual(record);
+      expect(() => serialise(waiver(waives))).toThrow(/head: required/);
+      expect(() => serialise(omit(record, 'tier'))).toThrow(/tier: required/);
+      expect(() => serialise({ ...record, branch: 'claude/define' })).toThrow(/branch: must be/);
+    });
+
+    it.each([
+      ['a bidi override in a title', 'test:tests/a.test.ts#safe\u202Eexe.ts'],
+      ['a zero-width character in a path', 'test:tests/lo\u200Bgin.test.ts'],
+      ['an ANSI escape', 'test:tests/a.test.ts#\u001b[2Jcleared'],
+      ['a newline', 'test:tests/a.test.ts#one\nwaives: gate:size'],
+      ['a line separator', 'test:tests/a.test.ts#one\u2028two'],
+      ['a trailing space', 'test:tests/a.test.ts#title '],
+      ['a non-breaking space', 'test:tests/a.test.ts#no\u00A0break'],
+      ['an em space', 'test:tests/a\u2003b.test.ts'],
+      ['no path', 'test:'],
+    ])(
+      'rejects a test: target with %s, which the summary could not show as signed',
+      (_n, waives) => {
+        expect(signableTestTarget(waives)).toBe(false);
+        expect(() => serialise(waiver(waives, HEAD))).toThrow(/waives:/);
+      },
+    );
 
     it.each([
       'gate:',
@@ -700,5 +736,60 @@ describe('record verification (T033, contracts/approval-record.md steps 3–6)',
       expect(first).toEqual([resume, later]);
       expect(replays).toHaveLength(1);
     });
+  });
+});
+
+describe('test: waiver coverage is exact (T151, AC-061)', () => {
+  const titled = (file: string, title: string): WeakFinding => ({
+    target: `test:${file}#${title}`,
+    file,
+    title,
+    what: 'passed at the base, skipped at the head',
+  });
+  const deleted = (file: string): WeakFinding => ({
+    target: `test:${file}`,
+    file,
+    what: 'passed at the base, file deleted',
+  });
+
+  it('a titled waiver covers only the finding with exactly its target', () => {
+    const finding = titled('tests/a.test.ts', 'locks out');
+    expect(covers('test:tests/a.test.ts#locks out', finding)).toBe(true);
+    for (const near of [
+      'test:tests/a.test.ts#locks',
+      'test:tests/a.test.ts#locks out ',
+      'test:tests/a.test.ts#Locks out',
+      'test:tests/a.test.ts#locks out*',
+      'test:tests/a.test#locks out',
+    ])
+      expect(covers(near, finding), near).toBe(false);
+  });
+
+  it('a file-wide waiver covers only the findings of exactly that path', () => {
+    expect(covers('test:tests/a.test.ts', titled('tests/a.test.ts', 'x'))).toBe(true);
+    expect(covers('test:tests/a.test.ts', deleted('tests/a.test.ts'))).toBe(true);
+    expect(covers('test:tests/a', titled('tests/a.test.ts', 'x'))).toBe(false);
+    expect(covers('test:tests/', deleted('tests/a.test.ts'))).toBe(false);
+  });
+
+  it('a # in a path or a title is never read as the split between them', () => {
+    // Path `tests/a#b.test.ts`, title `c`; and path `tests/a`, title `b.test.ts#c`.
+    const inPath = titled('tests/a#b.test.ts', 'c');
+    const inTitle = titled('tests/a', 'b.test.ts#c');
+    expect(inPath.target).toBe(inTitle.target);
+    expect(covers('test:tests/a#b.test.ts', inPath)).toBe(true);
+    expect(covers('test:tests/a#b.test.ts', inTitle)).toBe(false);
+    expect(covers('test:tests/a', inTitle)).toBe(true);
+    expect(covers('test:tests/a', inPath)).toBe(false);
+    expect(covers('test:tests/a#b.test.ts', deleted('tests/a#b.test.ts'))).toBe(true);
+  });
+
+  it('shows control and format characters and line breaks visibly, never as themselves', () => {
+    expect(visible('one\ntwo')).toBe('one\\ntwo');
+    expect(visible('\u001b[2Jred\u202Etxt.exe\u200B')).toBe(
+      '\\u{1b}[2Jred\\u{202e}txt.exe\\u{200b}',
+    );
+    expect(visible('tests/a#b.test.ts#plain title')).toBe('tests/a#b.test.ts#plain title');
+    expect(visible('no\u00A0break\u2003em space')).toBe('no\\u{a0}break\\u{2003}em space');
   });
 });

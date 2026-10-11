@@ -9,8 +9,9 @@
 // Nor may the user's git settings: every call runs without the global and system config, with
 // an explicit algorithm, context and no colour, so the laptop and CI see the same lines.
 import { spawnSync } from 'node:child_process';
-import { realpathSync } from 'node:fs';
-import { posix } from 'node:path';
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join, posix } from 'node:path';
 import { RefusedError } from '../cli/env.js';
 
 export type EntryType = 'regular' | 'binary' | 'symlink' | 'gitlink';
@@ -226,4 +227,72 @@ export function appendOnly(repo: string, change: FileChange, env = process.env):
   const after = blob(repo, change.newOid, env);
   if (!after.subarray(0, before.length).equals(before)) return false;
   return before.length === 0 || before.at(-1) === 0x0a || after.at(before.length) === 0x0a;
+}
+
+/** Flags for every diff the Owner reads before signing: no driver, filter or setting applies. */
+const READ_FLAGS = [
+  ...['--no-color', '--no-ext-diff', '--no-textconv', '--text', '--no-renames'],
+  ...['--diff-algorithm=myers', '--no-indent-heuristic', '-U3'],
+];
+
+/** What changed since a waived head, as `approve` and `merge` show it before a re-sign. */
+export type ResignView =
+  | { kind: 'diff'; text: string }
+  | { kind: 'interdiff'; text: string }
+  | { kind: 'gone'; text: string };
+
+/**
+ * The diff since the waived head when the item's merge base with `main` did not move; else the
+ * interdiff of the item's own changes, its cumulative patch at the waived head against the one at
+ * `head`; when the waived head is not in the clone, the full diff from the merge base (T151).
+ * `git range-diff` is not used: git 2.39 drops `--text` for the patches it compares and shows a
+ * commit added after the waived head by its subject only.
+ */
+export function resignView(
+  repo: string,
+  main: string,
+  waivedHead: string,
+  head: string,
+  env: NodeJS.ProcessEnv = process.env,
+): ResignView {
+  const patch = (from: string, to: string) =>
+    git(repo, ['diff', ...READ_FLAGS, from, to], env).toString('utf8');
+  const newBase = mergeBase(repo, main, head, env);
+  const present = safeGit(repo, ['cat-file', '-e', `${waivedHead}^{commit}`], env).status === 0;
+  if (!/^[0-9a-f]{40}$/.test(waivedHead) || !present)
+    return { kind: 'gone', text: patch(newBase, head) };
+  const oldBase = mergeBase(repo, main, waivedHead, env);
+  if (oldBase === newBase) return { kind: 'diff', text: patch(waivedHead, head) };
+
+  // The two patches are compared outside any repository, so no attributes or config apply.
+  const dir = mkdtempSync(join(tmpdir(), 'factory-interdiff-'));
+  try {
+    writeFileSync(join(dir, 'waived.patch'), patch(oldBase, waivedHead));
+    writeFileSync(join(dir, 'head.patch'), patch(newBase, head));
+    const clean = Object.fromEntries(Object.entries(env).filter(([k]) => !k.startsWith('GIT_')));
+    const compared = spawnSync(
+      'git',
+      // Without core.attributesFile, git reads $XDG_CONFIG_HOME/git/attributes by default.
+      [
+        ...['-c', 'core.attributesFile=/dev/null', 'diff', '--no-index', ...READ_FLAGS],
+        ...['waived.patch', 'head.patch'],
+      ],
+      {
+        cwd: dir,
+        env: {
+          ...clean,
+          ...{ GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_ATTR_NOSYSTEM: '1' },
+          GIT_CEILING_DIRECTORIES: dirname(dir),
+        },
+        encoding: 'utf8',
+        maxBuffer: 1024 * 1024 * 1024,
+      },
+    );
+    // Exit 1 means the patches differ, which is the expected case.
+    if (compared.error !== undefined || (compared.status !== 0 && compared.status !== 1))
+      throw new RefusedError(`cannot compare the patches: ${compared.stderr.trim()}`);
+    return { kind: 'interdiff', text: compared.stdout };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }

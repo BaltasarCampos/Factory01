@@ -488,14 +488,6 @@ describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
     expect(t.issue(ITEM).labels).toContain('owner:waiver');
   });
 
-  it('refuses test: waiver targets until that waiver form exists (AC-061, AC-093)', async () => {
-    const t = setup({ issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }] });
-    const r = await t.cli(['approve', String(ITEM), 'waiver', 'test:tests/a.test.ts#locks out']);
-    expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/test: waiver targets are not supported yet/);
-    expect(t.issue(ITEM).labels).not.toContain('owner:waiver');
-  });
-
   it('a waiver for a target that is not a work item omits tier and branch', async () => {
     const t = setup({ issues: [{ number: 9, title: 'Secret in log output' }] });
 

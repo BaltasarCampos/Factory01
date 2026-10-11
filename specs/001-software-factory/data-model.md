@@ -136,6 +136,7 @@ For `deployed` records, `repo` names the project and `issue` is the Owner inbox 
 | `waives` value | `issue` field | Used by |
 |----------------|---------------|---------|
 | `gate:<gate>` | work item | Gate skip (AC-029). **Code gates** (`red-green`, `coverage`, `size`, `ac-<id>`, `ci-<job>`) carry `head` and count only while the PR head equals it. **Pre-build gates** (for example `spec-approved`, `plan`) carry no `head` and are bound to the item only |
+| `test:<path>#<title>`, `test:<path>` | work item | A weakened test (AC-061): exactly the finding `factory ci weakened` names `test:<path>#<title>`, or every finding whose path is exactly `<path>` (a deleted file is one `test:<path>` finding). No prefixes or patterns; a `#` in a path or a title is never split on, since a finding carries its path and title apart. Carries `head` like a code gate. A target with any control or format character (`Cc`, `Cf`, `Zl`, `Zp`: newlines, ANSI escapes, zero-width and bidi characters), or any space other than U+0020 (`Zs`: a non-breaking space looks like a normal one), is refused, since the summary would have to clean or escape it: rename the test |
 | `check:guardrail-change@<tag>@<sha>` | upgrade PR number (PRs are issues) | Upgrade PRs only (AC-020, AC-054); names the signed release the PR must match |
 | `dep:<name>@<version>` | PR adding the dependency | New-dependency gate (AC-045) |
 | `finding:<rule>@<path:line>` | security issue | Dismissal (AC-043) |
@@ -145,9 +146,20 @@ For `deployed` records, `repo` names the project and `issue` is the Owner inbox 
 shows the diff between a code-gate waiver's head and the current head and asks the Owner to
 sign a new waiver in the same step.
 
-Waivers for weakened tests (`test:<path>#<title>`, AC-061) are not yet a target form:
-`factory approve` refuses `test:` targets, and a diff that weakens a test blocks until the form
-exists (T151, which also replaces the re-sign diff above with a range-diff).
+`factory approve` signs a `test:` waiver only after running the weakened check itself, always
+in the sandbox, at the one commit it resolved the item branch to: the findings it lists, the
+record's `head` and the summary all come from that commit, and a waiver covering no finding there
+is refused. Any new finding at a later head makes the waiver stale, to re-sign, never covered.
+
+To re-sign a head-bound waiver (`gate:` code gate or `test:`), the summary shows the diff since
+the waived head when the merge base did not move, else the interdiff of the item's own changes:
+both cumulative patches (old merge base to waived head, new merge base to head) made through
+`safeGit` with `--no-color --no-ext-diff --no-textconv --text --no-renames --diff-algorithm=myers
+-U3`, then compared with `git diff --no-index --text` and `core.attributesFile=/dev/null` in a temp
+folder outside any repository, so no attributes or config apply. Moved hunk headers and context from main are acceptable noise. When
+the waived head can no longer be fetched, it shows the full diff from the merge base, labelled as
+such. (`git range-diff` is not used: git 2.39.5 drops `--text` for the patches it compares, and
+shows a commit added after the waived head by its subject only.)
 
 ## Pull request merge checks
 
@@ -233,7 +245,7 @@ missing the summary says "unavailable (telemetry missing)" and goes on.
 | Item approval (`approve <issue>`) | R: the request (issue title and body) | — | — | S: estimate for the proposed lane and weekly headroom left | R: the tier (the proposed `tier:` label or `--tier`); other labels shown only if present |
 | Spec approval (`approve <issue> spec`) | R: first approval — Problem and Affected areas; re-approval — `spec.md` diff from the previously approved blob to the one signed | R: each `AC-###` listed; none → refuse | — | S | R: tier; at tier 3 the spec's Risks section (none → refuse) |
 | Waiver, pre-build `gate:` | R: target | — | — | S | R: tier |
-| Waiver, code `gate:` | R: target; PR head (= the commit read); diffstat since the merge base; after a rebase, the range-diff since the waived head (T151) | R: each `AC-###` → its test tasks | R: the waived gate's result | S | R: tier; what the waiver lets through, computed from the waived check (for `red-green`, the criteria whose tests do not go from failing to passing) |
+| Waiver, code `gate:` | R: target; PR head (= the commit read); diffstat since the merge base; after the head moved, the diff since the waived head, or the interdiff of the item's own changes when the merge base moved, or the full diff when the waived head is gone (T151) | R: each `AC-###` → its test tasks | R: the waived gate's result | S | R: tier; what the waiver lets through, computed from the waived check (for `red-green`, the criteria whose tests do not go from failing to passing) |
 | Waiver, other targets (`finding:`, `dep:`, `check:`) | R: target | — | — | — | R: what stays unfixed or accepted |
 | Merge, item | R: diffstat of the checked head; every changed test file, even when its counts net to zero; every removed, skipped, focused or retried test, removed assertion and changed setup or helper file (AC-061), each with the `test:` waiver that covers it, or "none" | R: each `AC-###` → its tagged tests | R: CI on the checked head; verify report | S | R: tier; open findings; waivers in force |
 | Merge, Define / upgrade / log | R: diffstat of the checked head | — | R: the branch's own check: Define output check, manifest equality, append-only | — | R: upgrade — the keys it revokes and the in-flight items whose approvals used them; Define and log — the per-branch check results |
