@@ -165,3 +165,14 @@ export function mergeBrief(repo: TestRepo, options: { signWith?: TestKeys } = {}
   repo.commit({ '.factory/brief.md': '# Brief\n' }, 'Define: brief');
   return mergeIntoMain(repo, 'claude/define', 'define', options);
 }
+
+/** An annotated release tag on `target`, signed with `key` as `factory release` signs it. */
+export function signedReleaseTag(
+  repo: TestRepo,
+  key: TestKeys,
+  tag = 'v1.0.0',
+  target = 'HEAD',
+): void {
+  const signing = ['-c', 'gpg.format=ssh', '-c', `user.signingkey=${key.privateKey}`];
+  repo.git([...signing, 'tag', '-s', '-m', `factory ${tag}`, tag, target]);
+}

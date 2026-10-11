@@ -19,7 +19,7 @@ import { STATIONS, type ApprovalRecord } from '../../src/model/types.js';
 import { derivePause, resumeEntries } from '../../src/pause/derive.js';
 import { calls, readState, seedState, type FakeIssue, type FakePr } from '../helpers/fake-gh.js';
 import { FakeClock } from '../helpers/fake-clock.js';
-import { makeRepo, mergeBrief, type TestRepo } from '../helpers/git-repo.js';
+import { makeRepo, mergeBrief, signedReleaseTag, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
 const REPO = 'owner/project';
@@ -135,8 +135,8 @@ interface Setup {
   noKey?: boolean;
   /** The pinned release revokes the Owner's current key, or the older one. */
   revoke?: 'owner' | 'old';
-  /** Main pins a release the factory clone does not have. */
-  unknownRelease?: boolean;
+  /** Main pins a signed release that has no allowed_signers. */
+  noKeyLists?: boolean;
   /** Main has no Owner-signed `Factory-Merge: define` yet. */
   briefUnmerged?: boolean;
   project?: (repo: TestRepo) => void;
@@ -159,13 +159,17 @@ function setup(options: Setup = {}) {
   // The factory release pinned on main, whose key lists every check on main's side uses.
   const factory = makeRepo({
     files: {
-      allowed_signers: `${old.allowedSignersLine}\n${owner.allowedSignersLine}\n`,
+      allowed_signers: options.noKeyLists
+        ? null
+        : `${old.allowedSignersLine}\n${owner.allowedSignersLine}\n`,
       revoked_keys: { owner: `${owner.publicKey}\n`, old: `${old.publicKey}\n`, none: '' }[
         options.revoke ?? 'none'
       ],
     },
   });
-  const pin = options.unknownRelease ? 'a'.repeat(40) : factory.revParse('HEAD');
+  // Tagged by the Owner, as `factory release` does: the laptop trusts only such pins.
+  signedReleaseTag(factory, owner);
+  const pin = factory.revParse('HEAD');
   // Main stays signed by a key the release does not revoke (src/git/history.ts).
   const mainKey = options.revoke === 'owner' ? old : owner;
   const project = makeRepo({ files: { '.factory/config': config(pin) }, signWith: mainKey });
@@ -412,11 +416,11 @@ describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
   it("refuses when main's pinned key lists cannot be read (AC-084)", async () => {
     const t = setup({
       issues: [{ number: ITEM, title: 'Add login', ...approvedItem() }],
-      unknownRelease: true,
+      noKeyLists: true,
     });
     const r = await t.cli(['approve', String(ITEM), 'waiver', 'gate:plan']);
     expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/factory release a{40} has no allowed_signers/);
+    expect(r.stderr).toMatch(/factory release [0-9a-f]{40} has no allowed_signers/);
     expect(t.issue(ITEM).labels).not.toContain('owner:waiver');
   });
 

@@ -30,7 +30,7 @@ import {
 import { ownerKeyPath, sign } from '../approvals/sign.js';
 import { specBlobSha, verifyGate, verifySignature } from '../approvals/verify.js';
 import type { CommandContext } from '../cli/commands.js';
-import { ledgerPath, type KeysFor } from '../git/history.js';
+import { ledgerPath } from '../git/history.js';
 import { briefMerged, verifiedMerges } from '../git/merges.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { listComments, postComment } from '../github/comments.js';
@@ -262,17 +262,16 @@ function warnBriefUnmerged(
   ctx: CommandContext,
   project: Project,
   keys: () => ReleaseKeys,
-  keysFor: KeysFor,
+  scratch: string,
 ): void {
   let why: string;
   try {
     keys(); // fetches main
     const { baseline } = configOnMain(project.cwd);
     const env = project.env ?? process.env;
-    const laptop = {
-      ledger: ledgerPath(project.home, project.repo),
-      anchorKeys: laptopKeys(project.home),
-    };
+    const anchorKeys = laptopKeys(project.home);
+    const keysFor = releaseKeysFor(env, scratch, anchorKeys);
+    const laptop = { ledger: ledgerPath(project.home, project.repo), anchorKeys };
     if (briefMerged(verifiedMerges(project.cwd, keysFor, { baseline, env, ...laptop }))) return;
     why = 'main has no Owner-signed Factory-Merge: define';
   } catch (err) {
@@ -310,8 +309,7 @@ export async function approve(ctx: CommandContext): Promise<number> {
   let gathered: Gathered;
   try {
     gathered = await fieldsFor(ctx, project, issue, gate, waives, mainKeyLists);
-    if (gate === 'approved')
-      warnBriefUnmerged(ctx, project, mainKeyLists, releaseKeysFor(env, scratch));
+    if (gate === 'approved') warnBriefUnmerged(ctx, project, mainKeyLists, scratch);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -37,11 +37,17 @@ interface Setup {
   settings?: string;
   /** `.claude/settings.json` on an item branch pushed before the pass. */
   branchSettings?: string;
+  /** Keys the pinned factory commit's own allowed_signers lists before the Owner's newest. */
+  releaseSigners?: TestKeys[];
 }
 
 function setup(options: Setup = {}) {
+  const signers = [...(options.releaseSigners ?? []), owner];
   const factory = makeRepo({
-    files: { allowed_signers: `${owner.allowedSignersLine}\n`, revoked_keys: '' },
+    files: {
+      allowed_signers: signers.map((k) => `${k.allowedSignersLine}\n`).join(''),
+      revoked_keys: '',
+    },
   });
   const config = [
     `factory_release: v1.0.0@${factory.revParse('HEAD')}`,
@@ -98,6 +104,9 @@ function setup(options: Setup = {}) {
   const home = tempDir('factory-home-');
   mkdirSync(join(home, '.factory', 'keys'), { recursive: true });
   copyFileSync(owner.publicKeyPath, `${ownerKeyPath(home)}.pub`);
+  // The laptop's own key lists (`factory keygen`), which release tags must verify against.
+  writeFileSync(join(home, '.factory', 'allowed_signers'), `${owner.allowedSignersLine}\n`);
+  writeFileSync(join(home, '.factory', 'revoked_keys'), '');
   const local = new FakeLauncher('local');
   /** A real local launcher against this release manifest; sessions are recorded, not run. */
   const sessions: { args: readonly string[]; cwd: string }[] = [];
@@ -256,6 +265,17 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
       );
     },
   );
+
+  it('the local launcher checks the tag against the laptop key lists: a tag only the release’s own list accepts is refused', async () => {
+    const t = setup({ releaseSigners: [other] });
+    t.tagRelease(other);
+
+    const r = await t.cli(['dispatch'], { launchers: false });
+
+    expect(r.stdout).toMatch(/not signed by a listed, non-revoked Owner key/);
+    expect(t.inbox()).toHaveLength(1);
+    expect(t.inbox()[0]?.body).toMatch(/urgency=urgent kind=tampering/);
+  });
 
   it('main clean but an item branch with changed hooks: no session and one urgent alert', async () => {
     const t = setup({ settings: HOOKED_SETTINGS, branchSettings: '{"hooks":{}}\n' });

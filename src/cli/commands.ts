@@ -4,6 +4,7 @@ import { parseArgs, type ParseArgsOptionsConfig } from 'node:util';
 import { adopt } from '../commands/adopt.js';
 import { approve } from '../commands/approve.js';
 import { ci } from '../commands/ci.js';
+import { config } from '../commands/config.js';
 import { dispatch } from '../commands/dispatch.js';
 import { hook } from '../commands/hook.js';
 import { inbox } from '../commands/inbox.js';
@@ -245,6 +246,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: ['git', 'ssh-keygen'],
     options: {},
     positionals: { min: 3, max: 3 },
+    run: config,
   },
   release: {
     summary: 'Build the guardrail manifest and sign a factory release tag',
