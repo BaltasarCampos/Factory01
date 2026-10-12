@@ -122,6 +122,8 @@ export interface TestFinding {
   message: string;
   /** The waiver target that covers it: `test:<path>#<title>`, or `test:<path>` for the file. */
   target: string;
+  /** The finding's file, apart from the target, so a `#` in a path is never split on. */
+  file: string;
   covered: boolean;
 }
 
@@ -276,7 +278,7 @@ export function weakenedTests(
     const find = (message: string, title?: string) => {
       const target = title === undefined ? fileTarget : `${fileTarget}#${title}`;
       const covered = options.waivers.has(target) || options.waivers.has(fileTarget);
-      findings.push({ message: `${f.path}: ${message}`, target, covered });
+      findings.push({ message: `${f.path}: ${message}`, target, file: f.path, covered });
     };
     if (matches([...config.setupFiles, ...config.globalSetup], f.path)) {
       find('changes a test setup file');

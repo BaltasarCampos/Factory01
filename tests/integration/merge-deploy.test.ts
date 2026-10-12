@@ -509,6 +509,7 @@ Visitors cannot sign in.
 const NOT_YET = 'the merge itself comes with slice 22b; nothing was merged';
 // The item's code and its tagged test: red at the base, where the code is missing, green at the head.
 const LOGIN = 'export const login = (name: string) => name.length > 0;\n';
+const VERIFY_REPORT = `| Check | Result |\n|---|---|\n${['CI', 'Coverage', 'SAST', 'SCA', 'Secrets', 'Licences', 'Review'].map((c) => `| ${c} | pass |`).join('\n')}\n`;
 const LOGIN_TEST = [
   "import { expect, it } from 'vitest';",
   "import { login } from '../src/login.js';",
@@ -557,18 +558,27 @@ let nextRun = 5000;
  * What GitHub Actions shows for `sha`: one pull_request workflow run per workflow file, with its
  * jobs over every attempt. By default every listed job is green.
  */
-function actionsAt(sha: string, jobs: ActionsJob[] = allGreen()) {
+function actionsAt(sha: string, jobs: ActionsJob[] = allGreen(), earlierFailed: string[] = []) {
   const state = readState();
   const repo = state.repos[REPO];
   if (repo === undefined) throw new Error('seed the fake GitHub first');
-  const runs = [...new Set(jobs.map((j) => j.workflow))].map((path) => ({
-    ...{ id: nextRun++, path, head_sha: sha, event: 'pull_request' },
+  const run = { head_sha: sha, event: 'pull_request', status: 'completed' };
+  // Earlier runs of a workflow file at the same commit, from closing and reopening the PR.
+  const earlier = earlierFailed.map((path) => ({
+    ...run,
+    id: nextRun++,
+    path,
+    conclusion: 'failure',
   }));
+  const latest = [...new Set(jobs.map((j) => j.workflow))].map((path) => ({
+    ...{ ...run, id: nextRun++, path, conclusion: 'success' },
+  }));
+  const runs = [...earlier, ...latest];
   repo.api[`repos/${REPO}/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`] = {
     total_count: runs.length,
     workflow_runs: runs,
   };
-  for (const run of runs) {
+  for (const run of latest) {
     const ran = jobs
       .filter((j) => j.workflow === run.path)
       .map((j, i) => ({
@@ -666,6 +676,7 @@ function mergeSetup(o: MergeSetup = {}) {
     'specs/7-add-login/spec.md': ITEM_SPEC,
     'src/login.ts': LOGIN,
     'tests/login.test.ts': LOGIN_TEST,
+    'specs/7-add-login/reports/verify.md': VERIFY_REPORT,
     ...o.files,
   });
   repo.push(branchName);
@@ -1445,6 +1456,61 @@ describe(
 
       expect(r.stdout).toContain('red-green skipped: only test code changed');
       expect(r.stderr).toContain(NOT_YET);
+    });
+  },
+);
+
+// Slice 22a-4: the item's merge summary, from what the checks found, with nothing run again.
+describe(
+  'factory merge: the item summary (T068, slice 22a-4, AC-094)',
+  { timeout: 240_000 },
+  () => {
+    it('shows the summary: diffstat, every changed test file even at net zero, criteria to tests, CI, the verify report', async () => {
+      const t = mergeSetup({
+        project: (repo) => {
+          repo.commit(
+            {
+              'src/calc.ts': 'export const add = (a: number, b: number) => a + b;\n',
+              'tests/calc.test.ts': calcTests([ADDS]),
+            },
+            'calc',
+            { signWith: owner },
+          );
+          repo.push('main');
+        },
+        files: { 'tests/calc.test.ts': calcTests([ADDS.replace('toBe(3)', 'toBe(1 + 2)')]) },
+      });
+      actionsAt(t.head, allGreen(), [CI]);
+
+      const r = await t.cli();
+
+      expect(r.stdout).toContain(`Approval summary for #7 (merge) at ${t.head}:`);
+      for (const line of [
+        'modified +1 -1 tests/calc.test.ts',
+        'Changed test files (each listed, even when its counts net to zero):',
+        'AC-001 → AC-001 signs in',
+        'build-test (.github/workflows/ci.yml): success; 1 earlier run failed',
+        'reports/verify.md: all checks pass',
+        'Waivers in force: none',
+      ])
+        expect(r.stdout).toContain(line);
+      expect(r.stderr).toContain(NOT_YET);
+    });
+
+    it('refuses when a required part is missing: no verify report', async () => {
+      const r = await mergeSetup({ files: { 'specs/7-add-login/reports/verify.md': null } }).cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(
+        /not merging: the approval summary is incomplete:\n\s+Tests and review: /,
+      );
+    });
+
+    it('refuses an upgrade pull request until slice 35', async () => {
+      const r = await mergeSetup({ branch: 'factory/upgrade-v1.1.0' }).cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('upgrade merges come with slice 35 (T115); nothing was merged');
     });
   },
 );

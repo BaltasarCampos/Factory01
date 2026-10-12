@@ -18,7 +18,7 @@ import { checkedSet, type CheckedSet } from '../ci/ac-map.js';
 import type { CommandContext } from '../cli/commands.js';
 import { RefusedError, UsageError } from '../cli/env.js';
 import { pendingManifest } from '../dispatcher/manifest.js';
-import { mergeBase, safeDiff } from '../git/diff.js';
+import { mergeBase, safeDiff, type FileChange } from '../git/diff.js';
 import { listComments } from '../github/comments.js';
 import { timeline } from '../github/timeline.js';
 import { checkedHead, checkedMain, type MainContext, type MergeContext } from '../merge/context.js';
@@ -31,11 +31,12 @@ import {
   type JobResult,
 } from '../merge/ci.js';
 import { laptopChecks, type LaptopResults } from '../merge/laptop.js';
+import { mergeView } from '../merge/view.js';
 import { mergeRules, type RuleName } from '../merge/rules.js';
 import { STATIONS } from '../model/types.js';
-import { NO_FORMAL } from '../notify/summary.js';
+import { buildSummary, NO_FORMAL } from '../notify/summary.js';
 import { derivePause, resumeEntries } from '../pause/derive.js';
-import { coveredAt, signHeadBoundWaiver } from './approve.js';
+import { coveredAt, signHeadBoundWaiver, viewAt, viewIssue } from './approve.js';
 
 const NOTHING = 'nothing was merged';
 
@@ -179,12 +180,50 @@ async function ciChecks(
   return results;
 }
 
-/** What the checks found, for the merge summary (slice 22a-4); nothing here runs again. */
+/** What the checks found, and the summary shown from it; nothing here runs again. */
 export interface MergeResults {
   readonly rule: RuleName;
   readonly ci: readonly JobResult[];
   readonly chain?: Chain;
   readonly laptop?: LaptopResults;
+  /** The approval summary the Owner read (AC-094). */
+  readonly summary?: string;
+}
+
+/**
+ * Run the laptop's checks of the item, then show its merge summary (AC-094), built from what the
+ * checks found; refuse when a required part is missing.
+ */
+async function itemSummary(
+  ctx: CommandContext,
+  c: MergeContext,
+  at: {
+    chain: Chain;
+    set: CheckedSet;
+    base: string;
+    changes: readonly FileChange[];
+    ci: readonly JobResult[];
+    issue: number;
+  },
+): Promise<Pick<MergeResults, 'chain' | 'laptop' | 'summary'>> {
+  const { chain } = at;
+  const laptop = laptopChecks(c, chain, at.set, ctx.io.stdout);
+  const project = {
+    ...{ repo: c.config.repo, inboxIssue: c.config.inbox_issue },
+    ...{ home: c.home, cwd: c.cwd, env: c.env },
+  };
+  const summary = buildSummary({
+    ...{ gate: 'merge', kind: 'merge', issue: await viewIssue(project, at.issue) },
+    ...{ tier: chain.tier, branch: chain.branch, commit: c.head },
+    files: viewAt(project, chain.branch, c.head).files,
+    merge: mergeView(c, at.base, at.changes, chain, at.set, at.ci, laptop),
+  });
+  if (!summary.ok)
+    throw new RefusedError(
+      `not merging: the approval summary is incomplete:\n  ${summary.missing.join('\n  ')}`,
+    );
+  ctx.io.stdout.write(`${summary.text}\n`);
+  return { chain, laptop, summary: summary.text };
 }
 
 export async function merge(ctx: CommandContext): Promise<number> {
@@ -201,28 +240,20 @@ export async function merge(ctx: CommandContext): Promise<number> {
     );
     await confirmSession(ctx, c);
 
-    const upgrade = c.branch.startsWith('factory/upgrade-');
-    const options = { env: c.env };
-    const pr = upgrade
-      ? {
-          number: c.pr.number,
-          comments: await listComments(c.config.repo, c.pr.number, { ...options, thread: 'pr' }),
-          labelAdds: (await timeline(c.config.repo, c.pr.number, options)).filter(
-            (e) => e.event === 'labeled',
-          ),
-        }
-      : undefined;
+    // The upgrade summary and its revoked-keys rule need the signed-release fixture of slice 35.
+    if (c.branch.startsWith('factory/upgrade-'))
+      throw new RefusedError(`upgrade merges come with slice 35 (T115); ${NOTHING}`);
     const result = mergeRules({
       ...{ repo: c.cwd, branch: c.branch, head: c.head, main: c.main, keys: c.keys },
       ...{ laptopKeys: c.laptopKeys, secondCopy: secondCopy(c.env, c.home) },
       ...{ factory: c.factory, factoryRepo: c.factoryRepo, env: c.env },
-      ...(pr === undefined ? {} : { pr }),
     });
     if (result.problems.length > 0)
       throw new RefusedError(
         `the ${result.rule} rule refuses #${arg}; ${NOTHING}:\n  ${result.problems.join('\n  ')}`,
       );
-    const changes = safeDiff(c.cwd, mergeBase(c.cwd, c.main, c.head, c.env), c.head, c.env);
+    const base = mergeBase(c.cwd, c.main, c.head, c.env);
+    const changes = safeDiff(c.cwd, base, c.head, c.env);
     const formal = changes.filter((f) => f.path.startsWith('formal/')).map((f) => f.path);
     if (formal.length > 0)
       throw new RefusedError(`${NO_FORMAL}: #${arg} changes ${formal.join(', ')}`);
@@ -235,7 +266,7 @@ export async function merge(ctx: CommandContext): Promise<number> {
       ci,
       ...(item === undefined
         ? {}
-        : { chain: item.chain, laptop: laptopChecks(c, item.chain, item.set, ctx.io.stdout) }),
+        : await itemSummary(ctx, c, { ...item, base, changes, ci, issue: result.issue ?? 0 })),
     };
     Object.freeze(results);
 

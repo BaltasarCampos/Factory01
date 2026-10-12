@@ -4,6 +4,7 @@ import {
   buildSummary,
   GATE_PARTS,
   PART_TITLES,
+  type MergeView,
   type SummaryFacts,
 } from '../../src/notify/summary.js';
 
@@ -263,18 +264,16 @@ describe('waivers (AC-093)', () => {
 });
 
 describe('gates built later (T053, T068)', () => {
-  it('AC-094: a merge summary is not refused by the code-gate check, and quotes the verify report', () => {
-    const report = `${VERIFY.replace('| SCA | pass |', '| SCA | fail |')}\n- [ ] blocking: SQL built by concatenation\n`;
+  it("AC-094: a merge summary without the merge checks' results refuses every part they give", () => {
     const s = buildSummary(
-      facts({ kind: 'merge', files: { spec: SPEC, tasks: TASKS, verify: report } }),
+      facts({ gate: 'merge', kind: 'merge', files: { spec: SPEC, verify: VERIFY } }),
     );
-    if (!s.ok) throw new Error(`refused: ${s.missing.join('; ')}`);
-    expect(part(s.text, 'Tests and review')).toEqual([
-      `quoted from specs/42-add-login/reports/verify.md at ${COMMIT.slice(0, 12)}:`,
-      '> reports/verify.md: SCA: fail',
-      '> reports/verify.md: unresolved blocking finding: SQL built by concatenation',
+
+    expect(s.ok ? [] : s.missing.map((m) => m.split(':')[0])).toEqual([
+      'What changed',
+      'Spec mapping',
+      'Tests and review',
     ]);
-    expect(part(s.text, 'Spec mapping')).toEqual(['AC-001 → T002', 'AC-002 → no test task yet']);
   });
 });
 
@@ -430,5 +429,154 @@ describe('item trace (AC-017)', () => {
       `c3c3c3c3c3c3 Dispatcher: c3: Factory-Role: dispatcher on a commit that changes src/login.ts`,
       `d4d4d4d4d4d4 Dispatcher: d4: Factory-Role: dispatcher on a commit whose changed files are unknown`,
     ]);
+  });
+});
+
+// The item's merge summary (T068, slice 22a-4, AC-094): built from what the merge checks found,
+// with every agent-written string shown through visible().
+describe('merge summary of a work item (T068, AC-094)', () => {
+  const view = (over: Partial<MergeView> = {}): MergeView => ({
+    pr: { number: 43, title: 'Add login' },
+    diffstat: [
+      { path: 'src/auth/login.ts', status: 'added', added: 12, removed: 0 },
+      { path: 'tests/integration/login.test.ts', status: 'modified', added: 1, removed: 1 },
+    ],
+    testFiles: ['tests/integration/login.test.ts'],
+    early: { findings: [], problems: [], quarantines: [] },
+    weakened: [],
+    passing: ['AC-001 signs in', 'unrelated', 'AC-002 shows an error'],
+    checked: ['AC-001', 'AC-002'],
+    ci: [
+      { job: 'build-test', workflow: '.github/workflows/ci.yml', state: 'success' },
+      { job: 'size', workflow: '.github/workflows/ci.yml', state: 'success' },
+    ].map((j, i) => ({ ...j, failedBefore: i === 0 ? 1 : 0, failedRuns: i === 0 ? 1 : 0 })),
+    redGreen: { skipped: false, checked: 2 },
+    waivers: [],
+    ...over,
+  });
+  const merge = (over: Partial<MergeView> = {}, files: SummaryFacts['files'] = {}) =>
+    facts({
+      gate: 'merge',
+      kind: 'merge',
+      files: { spec: SPEC, tasks: TASKS, verify: VERIFY, events: EVENTS, ...files },
+      merge: view(over),
+    });
+
+  it('lists the diffstat and every changed test file, even one whose counts net to zero', () => {
+    const changed = part(text(merge()), PART_TITLES.changed);
+
+    expect(changed).toContain('Pull request #43: Add login');
+    expect(changed).toContain('added +12 -0 src/auth/login.ts');
+    expect(changed).toContain('modified +1 -1 tests/integration/login.test.ts');
+    const tests = changed.indexOf(
+      'Changed test files (each listed, even when its counts net to zero):',
+    );
+    expect(changed[tests + 1]).toBe('tests/integration/login.test.ts');
+  });
+
+  it('maps each checked criterion to its tagged passing tests', () => {
+    expect(part(text(merge()), PART_TITLES.mapping)).toEqual([
+      'AC-001 → AC-001 signs in',
+      'AC-002 → AC-002 shows an error',
+    ]);
+  });
+
+  it('shows each required job with its earlier failed attempts and runs, and red-green', () => {
+    const results = part(text(merge()), PART_TITLES.results);
+
+    expect(results).toContain(
+      'build-test (.github/workflows/ci.yml): success; 1 earlier attempt failed; 1 earlier run failed',
+    );
+    expect(results).toContain('size (.github/workflows/ci.yml): success');
+    expect(results).toContain('red-green: 2 criteria go from failing to passing');
+    const skipped = part(
+      text(merge({ redGreen: { skipped: true, files: ['tests/a.test.ts'] } })),
+      PART_TITLES.results,
+    );
+    expect(skipped).toContain('red-green skipped: only test code changed (tests/a.test.ts)');
+  });
+
+  it("shows the early warning with each line's covering waiver or none, never as a refusal, and a quarantine as not verified", () => {
+    const t = text(
+      merge({
+        early: {
+          findings: [
+            {
+              message: 'tests/a.test.ts: skipped test "adds"',
+              target: 'test:tests/a.test.ts#adds',
+            },
+            {
+              message: 'tests/b.test.ts: removed assertion',
+              target: 'test:tests/b.test.ts',
+              waiver: 'test:tests/b.test.ts',
+            },
+          ],
+          problems: [],
+          quarantines: [12],
+        },
+      }),
+    );
+    const changed = part(t, PART_TITLES.changed);
+
+    expect(changed).toContain('tests/a.test.ts: skipped test "adds"; waiver: none');
+    expect(changed).toContain('tests/b.test.ts: removed assertion; waiver: test:tests/b.test.ts');
+    expect(changed).toContain('quarantined per #12 (not verified)');
+  });
+
+  it('lists the weakened findings with their waivers, and the waivers in force', () => {
+    const waiver = 'test:tests/a.test.ts#adds';
+    const t = text(
+      merge({
+        weakened: [{ target: waiver, what: 'passed at the base, skipped at the head', waiver }],
+        waivers: [waiver],
+      }),
+    );
+
+    expect(part(t, PART_TITLES.changed)).toContain(
+      `${waiver}: passed at the base, skipped at the head; covered by ${waiver}`,
+    );
+    expect(part(t, PART_TITLES.risks)).toContain(`Waivers in force: ${waiver}`);
+  });
+
+  it('shows agent-written text through visible(): titles, file names, test titles and findings', () => {
+    const t = text(
+      merge({
+        pr: { number: 43, title: 'Add‮login' },
+        diffstat: [{ path: 'src/\u001b[2Jx.ts', status: 'added', added: 1, removed: 0 }],
+        testFiles: ['tests/​x.test.ts'],
+        passing: ['AC-001 signs\nin', 'AC-002 ok'],
+        early: {
+          findings: [{ message: 'tests/x.test.ts: skipped test', target: 'test:tests/x.test.ts' }],
+          problems: [],
+          quarantines: [],
+        },
+      }),
+    );
+
+    for (const shown of [
+      'Pull request #43: Add\\u{202e}login',
+      'added +1 -0 src/\\u{1b}[2Jx.ts',
+      'tests/\\u{200b}x.test.ts',
+      'AC-001 → AC-001 signs\\nin',
+      'tests/x.test.ts: skipped\\u{a0}test; waiver: none',
+    ])
+      expect(t).toContain(shown);
+  });
+
+  it('quotes a failing verify report, and lists its open findings under Known risks', () => {
+    const report = `${VERIFY.replace('| SCA | pass |', '| SCA | fail |')}\n- [ ] blocking: SQL built by concatenation\n`;
+    const t = text(merge({}, { verify: report }));
+
+    expect(part(t, PART_TITLES.results)).toContain('> reports/verify.md: SCA: fail');
+    const risks = part(t, PART_TITLES.risks);
+    expect(risks).toContain('Open findings:');
+    expect(risks).toContain('> SQL built by concatenation');
+  });
+
+  it('refuses when a required part is missing: no verify report (AC-094)', () => {
+    const s = buildSummary(merge({}, { verify: undefined }));
+
+    expect(s.ok).toBe(false);
+    expect(s.ok ? [] : s.missing).toContainEqual(expect.stringMatching(/^Tests and review: /));
   });
 });

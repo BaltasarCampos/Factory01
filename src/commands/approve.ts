@@ -50,6 +50,8 @@ import { projectHere } from './pause.js';
 type Project = Awaited<ReturnType<typeof projectHere>>;
 type RecordFields = Pick<ApprovalRecord, 'tier' | 'branch' | 'spec_sha' | 'waives' | 'head'>;
 type Issue = SummaryFacts['issue'];
+/** The gates `approve` signs records for; `merge` is a summary, never a record. */
+type RecordGate = Exclude<SummaryFacts['gate'], 'merge'>;
 
 /** Sign a record, post it on its issue and claim its nonce in the laptop ledger. */
 export async function postSigned(
@@ -71,7 +73,7 @@ export async function postSigned(
   new NonceLedger(nonceLedgerPath(project.home)).claim(record.nonce, ref);
 }
 
-async function viewIssue(project: Project, issue: number) {
+export async function viewIssue(project: Project, issue: number) {
   const args = ['issue', 'view', numberArg(issue), '--repo', repoArg(project.repo)];
   const f = Fields.of(
     await gh([...args, '--json', 'title,body,labels'], { ...project, json: true }),
@@ -160,7 +162,7 @@ function readBranch(project: Project, branch: string): BranchView | string {
 }
 
 /** The summary files of the item branch at `commit`, which is already fetched. */
-function viewAt(project: Project, branch: string, commit: string): BranchView {
+export function viewAt(project: Project, branch: string, commit: string): BranchView {
   const dir = `specs/${branch.slice('claude/'.length)}`;
   const show = (name: string) => {
     const r = git(project, ['show', `${commit}:${dir}/${name}`]);
@@ -381,7 +383,7 @@ async function signAndPost(
   ctx: CommandContext,
   project: Project,
   issue: number,
-  gate: SummaryFacts['gate'],
+  gate: RecordGate,
   gathered: Gathered,
   confirm?: () => Promise<void>,
 ): Promise<void> {
@@ -452,7 +454,7 @@ function warnBriefUnmerged(
   );
 }
 
-const GATE_OF: Record<string, SummaryFacts['gate'] | undefined> = {
+const GATE_OF: Record<string, RecordGate | undefined> = {
   spec: 'spec-approved',
   waiver: 'waiver',
 };

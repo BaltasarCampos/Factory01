@@ -38,6 +38,11 @@ export interface JobResult {
   state: string;
   /** Earlier attempts of the job in that workflow run that did not succeed. */
   failedBefore: number;
+  /**
+   * Earlier runs of the same workflow file at the same commit that did not succeed: a new run,
+   * from closing and reopening the pull request, would otherwise hide them.
+   */
+  failedRuns: number;
 }
 
 const FILE = 'required-checks.json';
@@ -99,6 +104,8 @@ interface WorkflowRun {
   path: string;
   head_sha: string;
   event: string;
+  status: string;
+  conclusion: string | null;
 }
 
 interface Job {
@@ -141,10 +148,11 @@ export async function ciAt(
   ).filter((r) => r.head_sha === sha && r.event === 'pull_request');
   const results: JobResult[] = [];
   for (const installed of new Set(jobs.map((j) => j.installed))) {
-    const latest = runs
-      .filter((r) => r.path === installed)
-      .sort((a, b) => a.id - b.id)
-      .at(-1);
+    const ofFile = runs.filter((r) => r.path === installed).sort((a, b) => a.id - b.id);
+    const latest = ofFile.at(-1);
+    const failedRuns = ofFile
+      .slice(0, -1)
+      .filter((r) => r.status === 'completed' && r.conclusion !== 'success').length;
     const ran =
       latest === undefined
         ? []
@@ -167,7 +175,7 @@ export async function ciAt(
       const failedBefore = attempts
         .slice(0, -1)
         .filter((r) => r.status === 'completed' && r.conclusion !== 'success').length;
-      results.push({ job, workflow: installed, state, failedBefore });
+      results.push({ job, workflow: installed, state, failedBefore, failedRuns });
     }
   }
   return results;
