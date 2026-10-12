@@ -60,6 +60,18 @@ export interface Release {
   factoryRoot: string;
 }
 
+/** The newest release tag of the factory clone, verified with the laptop's own key lists. */
+export function newestRelease(env: NodeJS.ProcessEnv, home: string): ReleasePin {
+  const source = factorySource(env);
+  const tags = git(source, ['tag', '--list', 'v*', '--sort=-v:refname'], env).out.split('\n');
+  const tag = tags.find((t) => RELEASE_TAG.test(t));
+  if (tag === undefined)
+    throw new RefusedError(`${source} has no factory release; run factory release first`);
+  const sha = mustGit(source, ['rev-parse', `refs/tags/${tag}^{commit}`], env);
+  verifyReleaseTag(source, tag, sha, laptopKeys(home));
+  return { tag, sha };
+}
+
 /**
  * The newest release tag of the factory clone, verified with the laptop's key list (no project
  * pin exists yet), with its `factory/` directory extracted into `scratch`.
@@ -70,12 +82,7 @@ export function verifiedRelease(env: NodeJS.ProcessEnv, home: string, scratch: s
   const repo = /github\.com[:/]([^/]+\/[^/]+?)(?:\.git)?$/.exec(url)?.[1];
   if (repo === undefined)
     throw new RefusedError(`${source}: origin ${url} is not the factory repository on GitHub`);
-  const tags = git(source, ['tag', '--list', 'v*', '--sort=-v:refname'], env).out.split('\n');
-  const tag = tags.find((t) => RELEASE_TAG.test(t));
-  if (tag === undefined)
-    throw new RefusedError(`${source} has no factory release; run factory release first`);
-  const sha = mustGit(source, ['rev-parse', `refs/tags/${tag}^{commit}`], env);
-  verifyReleaseTag(source, tag, sha, laptopKeys(home));
+  const { tag, sha } = newestRelease(env, home);
 
   const archive = spawnSync('git', ['archive', '--format=tar', sha, 'factory'], {
     cwd: source,

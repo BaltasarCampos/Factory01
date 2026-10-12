@@ -32,6 +32,7 @@ type Project = Awaited<ReturnType<typeof projectHere>>;
 const SKEW_WARNING_MS = 60_000;
 
 async function pauseFacts(
+  ctx: CommandContext,
   project: Project,
   scope: string,
   events: readonly LabelEvent[],
@@ -40,7 +41,10 @@ async function pauseFacts(
   const env = project.env ?? process.env;
   const scratch = mkdtempSync(join(tmpdir(), 'factory-keys-'));
   try {
-    const keys = mainKeys(project.cwd, env, scratch, project.home);
+    const warn = (text: string) => {
+      ctx.io.stderr.write(text);
+    };
+    const keys = mainKeys(project.cwd, env, scratch, project.home, warn);
     const comments = await listComments(repo, inbox, project);
     const check = { keys, secondCopy: secondCopy(env, project.home), repo, inboxIssue: inbox };
     const lifts = resumeEntries(comments, check)
@@ -106,7 +110,7 @@ export async function resume(ctx: CommandContext): Promise<number> {
         `behind GitHub's (${label} was added at ${lastAdd.createdAt}); signing with ${timestamp}\n`,
     );
 
-  const pause = await pauseFacts(project, scope, events);
+  const pause = await pauseFacts(ctx, project, scope, events);
   const issue = { number: project.inboxIssue, title: 'Owner inbox', body: '', labels: [] };
   const summary = buildSummary({ gate: 'resume', issue, pause });
   if (!summary.ok)

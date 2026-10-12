@@ -190,13 +190,15 @@ export function releaseKeysFor(env: NodeJS.ProcessEnv, dir: string, laptop?: Rel
  * of main whose first-parent history is Owner-signed (src/git/history.ts), never at a tip an
  * unsigned commit could have repointed. With `home`, the walk resumes from the laptop ledger,
  * the first commit must also verify against the laptop's own key lists, and so must every pin's
- * release tag.
+ * release tag. A commit the walk rejects is passed to `warn`, naming it, since the keys then come
+ * from the commit before it (`merge` and `deploy` refuse instead; Owner note 2026-10-11).
  */
 export function mainKeys(
   projectRepo: string,
   env: NodeJS.ProcessEnv,
   dir: string,
   home?: string,
+  warn?: (text: string) => void,
 ): ReleaseKeys {
   const fetched = spawnSync('git', ['-C', projectRepo, 'fetch', '-q', 'origin', 'main'], {
     env,
@@ -219,6 +221,11 @@ export function mainKeys(
   if (walk.lastVerified === undefined)
     throw new KeyError(
       `main has no Owner-signed commit${walk.rejected ? `: ${walk.rejected.reason}` : ''}`,
+    );
+  if (walk.rejected !== undefined)
+    warn?.(
+      `warning: main has a first-parent commit not signed by the Owner: ${walk.rejected.reason}; ` +
+        `using the keys pinned at ${walk.lastVerified}, the last verified commit\n`,
     );
   return keysFor(pinOnMain(projectRepo, walk.lastVerified));
 }

@@ -10,6 +10,7 @@ import { hook } from '../commands/hook.js';
 import { inbox } from '../commands/inbox.js';
 import { keygen } from '../commands/keygen.js';
 import { mcp } from '../commands/mcp.js';
+import { merge } from '../commands/merge.js';
 import { newProject } from '../commands/new.js';
 import { pause } from '../commands/pause.js';
 import { release } from '../commands/release.js';
@@ -148,6 +149,7 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     requires: OWNER,
     options: {},
     positionals: { min: 1, max: 1 },
+    run: merge,
   },
   deploy: {
     summary: 'Sign a deployed record, then pull, build and restart main',
