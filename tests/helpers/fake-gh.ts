@@ -49,6 +49,8 @@ export interface FakePr {
   createdAt: string;
   /** `owner/name` of the head branch's repository, when not the base repository (a fork). */
   headRepository?: string;
+  /** Label events; pull requests are issues, so they have a timeline too. */
+  events?: FakeLabelEvent[];
 }
 
 export interface FakeLabel {
@@ -644,9 +646,12 @@ function apiCommand(state: FakeGhState, p: Parsed, out: string[]): void {
   if (timeline) {
     const repo = getRepo(state, timeline[1] ?? '');
     const n = Number(timeline[2]);
-    const item = repo.issues.find((i) => i.number === n);
+    // Pull requests are issues: GitHub serves their timeline at the same path.
+    const item = repo.issues.find((i) => i.number === n) ?? repo.prs.find((p) => p.number === n);
     if (!item) throw new GhFailure('Not Found (HTTP 404)');
-    const events = [...item.events].sort((a, b) => a.created_at.localeCompare(b.created_at));
+    const events = [...(item.events ?? [])].sort((a, b) =>
+      a.created_at.localeCompare(b.created_at),
+    );
     const pages: FakeLabelEvent[][] = [];
     for (let i = 0; i < events.length; i += state.pageSize)
       pages.push(events.slice(i, i + state.pageSize));

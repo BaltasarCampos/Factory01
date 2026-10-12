@@ -31,6 +31,8 @@ export interface Chain {
   branch: string;
   /** Head-bound waiver targets whose latest verified record covers another head. */
   stale: string[];
+  /** Waiver targets whose latest verified record is in force at the checked head. */
+  waivers: string[];
 }
 
 /** Records the comments hold, parsed whatever their signature; unparseable ones hold none. */
@@ -140,5 +142,6 @@ export async function verifyChain(c: MergeContext, issue: number): Promise<Chain
       throw new RefusedError(
         `the ${v.record.gate} record in comment ${v.comment.id}: nonce ${v.record.nonce} was first seen on another comment (${ledger.path}); nothing was merged`,
       );
-  return { tier, branch: c.branch, stale };
+  const waivers = chain.flatMap((v) => (v.record.gate === 'waiver' ? [v.record.waives ?? ''] : []));
+  return { tier, branch: c.branch, stale, waivers };
 }

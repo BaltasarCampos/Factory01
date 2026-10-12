@@ -6,6 +6,7 @@ import {
   chmodSync,
   copyFileSync,
   existsSync,
+  readFileSync,
   mkdirSync,
   rmSync,
   symlinkSync,
@@ -20,6 +21,7 @@ import { ownerKeyPath, sign } from '../../src/approvals/sign.js';
 import { verifyGate } from '../../src/approvals/verify.js';
 import { runCli } from '../../src/cli/commands.js';
 import { serialiseManifest } from '../../src/install/manifest.js';
+import { loadRequiredChecks } from '../../src/merge/ci.js';
 import {
   mergeRules,
   originRepo,
@@ -505,6 +507,84 @@ Visitors cannot sign in.
 1. **AC-001** — **Given** a user, **When** they sign in, **Then** they see their links.
 `;
 const NOT_YET = 'the merge itself comes with slice 22b; nothing was merged';
+// The item's code and its tagged test: red at the base, where the code is missing, green at the head.
+const LOGIN = 'export const login = (name: string) => name.length > 0;\n';
+const LOGIN_TEST = [
+  "import { expect, it } from 'vitest';",
+  "import { login } from '../src/login.js';",
+  "it('AC-001 signs in', () => { expect(login('ada')).toBe(true); });",
+  '',
+].join('\n');
+const REQUIRED_PATH = 'factory/profiles/typescript/ci/required-checks.json';
+const REQUIRED = loadRequiredChecks(
+  readFileSync(
+    join(
+      import.meta.dirname,
+      '..',
+      '..',
+      'factory',
+      'profiles',
+      'typescript',
+      'ci',
+      'required-checks.json',
+    ),
+    'utf8',
+  ),
+);
+interface ActionsJob {
+  /** The workflow file it ran from. */
+  workflow: string;
+  name: string;
+  conclusion: string | null;
+  attempt: number;
+}
+/** A job of the workflow run from `workflow`; `conclusion` null while it runs. */
+const actionsJob = (
+  workflow: string,
+  name: string,
+  conclusion: string | null,
+  attempt = 1,
+): ActionsJob => ({ workflow, name, conclusion, attempt });
+const CI = '.github/workflows/ci.yml';
+/** Every listed job green, from the workflow file it is installed at. */
+const allGreen = (except: string[] = []) =>
+  REQUIRED.jobs
+    .filter((j) => !except.includes(j.job))
+    .map((j) => actionsJob(j.installed, j.job, 'success'));
+let nextRun = 5000;
+
+/**
+ * What GitHub Actions shows for `sha`: one pull_request workflow run per workflow file, with its
+ * jobs over every attempt. By default every listed job is green.
+ */
+function actionsAt(sha: string, jobs: ActionsJob[] = allGreen()) {
+  const state = readState();
+  const repo = state.repos[REPO];
+  if (repo === undefined) throw new Error('seed the fake GitHub first');
+  const runs = [...new Set(jobs.map((j) => j.workflow))].map((path) => ({
+    ...{ id: nextRun++, path, head_sha: sha, event: 'pull_request' },
+  }));
+  repo.api[`repos/${REPO}/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`] = {
+    total_count: runs.length,
+    workflow_runs: runs,
+  };
+  for (const run of runs) {
+    const ran = jobs
+      .filter((j) => j.workflow === run.path)
+      .map((j, i) => ({
+        ...{ id: run.id * 100 + i, name: j.name, run_attempt: j.attempt },
+        ...{
+          status: j.conclusion === null ? 'in_progress' : 'completed',
+          conclusion: j.conclusion,
+        },
+      }));
+    repo.api[`repos/${REPO}/actions/runs/${String(run.id)}/jobs?filter=all&per_page=100`] = {
+      total_count: ran.length,
+      jobs: ran,
+    };
+  }
+  writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
+}
 const signersOf = (keys: TestKeys[]) => keys.map((k) => `${k.allowedSignersLine}\n`).join('');
 const labeledAt = (name: string, at: string): FakeLabelEvent => ({
   event: 'labeled',
@@ -567,6 +647,7 @@ function mergeSetup(o: MergeSetup = {}) {
       allowed_signers: signersOf(release),
       revoked_keys: '',
       'factory/workflows/ci.yml': `env:\n  FACTORY_REPO: ${FACTORY_REPO}\n`,
+      [REQUIRED_PATH]: JSON.stringify(REQUIRED),
     },
   });
   signedReleaseTag(factory, owner);
@@ -583,7 +664,8 @@ function mergeSetup(o: MergeSetup = {}) {
   const head = branch(repo, branchName, {
     '.specify/feature.json': '{ "feature_directory": "specs/7-add-login" }\n',
     'specs/7-add-login/spec.md': ITEM_SPEC,
-    'src/login.ts': 'export {};\n',
+    'src/login.ts': LOGIN,
+    'tests/login.test.ts': LOGIN_TEST,
     ...o.files,
   });
   repo.push(branchName);
@@ -670,6 +752,7 @@ function mergeSetup(o: MergeSetup = {}) {
     });
     return { code, stdout: out.join(''), stderr: err.join('') };
   };
+  actionsAt(head);
   const mainOnOrigin = () => runGit(repo.origin, ['rev-parse', 'main']);
   /** Origin shows as the factory repository on GitHub; fetches still reach the bare origin. */
   const asFactoryRepository = (): CliOver => {
@@ -770,12 +853,13 @@ describe(
       const t = mergeSetup();
       t.repo.checkout(ITEM_BRANCH);
       const manifest = { item: ITEM, station: 4, role: 'builder', branch: ITEM_BRANCH };
-      t.repo.commit(
+      const tip = t.repo.commit(
         { 'specs/7-add-login/.station.json': `${JSON.stringify(manifest)}\n` },
         'Dispatcher: station 4 (builder) manifest',
       );
       t.repo.push(ITEM_BRANCH);
       t.repo.checkout('main');
+      actionsAt(tip);
 
       const declined = await t.cli(['merge', String(ITEM_PR)], { answers: [''] });
       const confirmed = await t.cli(['merge', String(ITEM_PR)], { answers: ['yes'] });
@@ -962,7 +1046,8 @@ function itemThread() {
  */
 function staleWaiver(
   waives: string,
-  movedFiles: Files = { 'src/login.ts': 'export const login = 1;\n' },
+  movedFiles: Files = { 'src/extra.ts': 'export const extra = 1;\n' },
+  weaken = true,
 ) {
   const t = mergeSetup({
     project: (repo) => {
@@ -976,7 +1061,7 @@ function staleWaiver(
       );
       repo.push('main');
     },
-    files: { 'tests/calc.test.ts': calcTests([`it.skip${ADDS.slice(2)}`]) },
+    files: weaken ? { 'tests/calc.test.ts': calcTests([`it.skip${ADDS.slice(2)}`]) } : {},
     chain: ({ head }, standard) => [
       ...standard,
       posted(902, itemRecord('waiver', { waives, head }), T_WAIVER),
@@ -986,6 +1071,7 @@ function staleWaiver(
   const moved = t.repo.commit(movedFiles, 'rebased');
   t.repo.push(ITEM_BRANCH);
   t.repo.checkout('main');
+  actionsAt(moved);
   return { t, moved };
 }
 
@@ -1136,14 +1222,16 @@ describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240
     expect(r.stderr).toMatch(why);
   });
 
-  it('a stale code-gate waiver is re-signed only as approve would sign it, so the merge stops when approve would', async () => {
-    const { t } = staleWaiver('gate:red-green');
+  it('a stale gate: waiver approve would refuse to sign does not count, and the check decides', async () => {
+    const { t, moved } = staleWaiver('gate:red-green', undefined, false);
 
     const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
 
-    expect(r.code).toBe(1);
-    expect(r.stderr).toMatch(/not signing: .*no red-green check yet/s);
-    expect(r.stderr).not.toContain(NOT_YET);
+    expect(r.stdout).toMatch(/no red-green check yet/);
+    expect(r.stdout).toContain(
+      `the waiver for gate:red-green is not re-signed, so it does not count at ${moved}; the check decides`,
+    );
+    expect(r.stderr).toContain(NOT_YET);
   });
 
   it('skips a stale test: waiver that covers nothing at the checked head, without asking', async () => {
@@ -1166,7 +1254,8 @@ describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240
 
     expect(r.code).toBe(1);
     expect(r.stdout).toContain('diff since the waived head');
-    expect(r.stderr).toContain('nothing was merged');
+    // Not re-signed, so it does not count, and the weakened check decides.
+    expect(r.stderr).toContain(`${WEAK}: passed at the base, skipped at the head; covered by none`);
     expect(itemThread().comments).toHaveLength(before);
   });
 
@@ -1188,3 +1277,174 @@ describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240
     expect(verdict.ok).toBe(true);
   });
 });
+
+// Slice 22a-3: CI from GitHub Actions check runs on the checked head, the required jobs from the
+// release, and the laptop's own sandboxed weakened, ac-map and red-green runs.
+describe(
+  'factory merge: CI and the laptop checks (T068, slice 22a-3)',
+  { timeout: 240_000 },
+  () => {
+    it('passes an item whose required jobs are green and whose laptop checks pass', async () => {
+      const r = await mergeSetup().cli();
+
+      expect(r.stdout).toMatch(/CI: \d+ required jobs green at /);
+      expect(r.stdout).toContain('weakened: no test weakened');
+      expect(r.stdout).toContain('ac-map: every checked criterion has a passing test');
+      expect(r.stdout).toMatch(/red-green: 1 criterion goes from failing to passing/);
+      expect(r.stderr).toContain(NOT_YET);
+    });
+
+    it('counts only runs of the workflow file a job is installed at: not a commit status, not another workflow file', async () => {
+      const t = mergeSetup();
+      actionsAt(t.head, [
+        ...allGreen(['build-test']),
+        actionsJob('.github/workflows/other.yml', 'build-test', 'success'),
+      ]);
+      const state = readState();
+      const repo = state.repos[REPO];
+      if (repo !== undefined)
+        repo.api[`repos/${REPO}/commits/${t.head}/status`] = {
+          state: 'success',
+          statuses: [{ context: 'ci / build-test', state: 'success' }],
+        };
+      writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
+
+      const r = await t.cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(`build-test (${CI}): missing`);
+      expect(ghCalls().some((c) => c.includes('/status'))).toBe(false);
+    });
+
+    it('a failed build-test is not hidden by a later green build-test from another workflow file', async () => {
+      const t = mergeSetup();
+      actionsAt(t.head, [
+        ...allGreen(['build-test']),
+        actionsJob(CI, 'build-test', 'failure'),
+        actionsJob('.github/workflows/factory-self.yml', 'build-test', 'success'),
+      ]);
+
+      const r = await t.cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(`build-test (${CI}): failure`);
+    });
+
+    it('refuses a required job pending, failed, cancelled or skipped, naming each', async () => {
+      const t = mergeSetup();
+      const state: Record<string, string | null> = {
+        'build-test': null,
+        coverage: 'failure',
+        'ac-map': 'cancelled',
+        'red-green': 'skipped',
+      };
+      actionsAt(t.head, [
+        ...allGreen(Object.keys(state)),
+        ...Object.entries(state).map(([job, conclusion]) => actionsJob(CI, job, conclusion)),
+      ]);
+
+      const r = await t.cli();
+
+      expect(r.code).toBe(1);
+      for (const line of [
+        'build-test (.github/workflows/ci.yml): pending',
+        'coverage (.github/workflows/ci.yml): failure',
+        'ac-map (.github/workflows/ci.yml): cancelled',
+        'red-green (.github/workflows/ci.yml): skipped',
+      ])
+        expect(r.stderr).toContain(line);
+    });
+
+    it('lets the latest attempt of a job decide: green after a failed attempt passes, failed after green does not', async () => {
+      const t = mergeSetup();
+      const rest = allGreen(['build-test']);
+      actionsAt(t.head, [
+        ...rest,
+        actionsJob(CI, 'build-test', 'failure', 1),
+        actionsJob(CI, 'build-test', 'success', 2),
+      ]);
+      const rerun = await t.cli();
+      actionsAt(t.head, [
+        ...rest,
+        actionsJob(CI, 'build-test', 'success', 1),
+        actionsJob(CI, 'build-test', 'failure', 2),
+      ]);
+      const broken = await t.cli();
+
+      expect(rerun.stderr).toContain(NOT_YET);
+      expect(broken.stderr).toContain(`build-test (${CI}): failure`);
+    });
+
+    it('requires append-only when the pull request changes an events.jsonl', async () => {
+      const t = mergeSetup({ files: { 'specs/7-add-login/events.jsonl': '{"kind":"usage"}\n' } });
+      actionsAt(t.head, allGreen(['append-only']));
+
+      const r = await t.cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('append-only (.github/workflows/append-only.yml): missing');
+    });
+
+    it('refuses a weakened test with no test: waiver in force at the checked head', async () => {
+      const t = mergeSetup({
+        project: (repo) => {
+          repo.commit(
+            {
+              'src/calc.ts': 'export const add = (a: number, b: number) => a + b;\n',
+              'tests/calc.test.ts': calcTests([ADDS]),
+            },
+            'calc',
+            { signWith: owner },
+          );
+          repo.push('main');
+        },
+        files: { 'tests/calc.test.ts': calcTests([`it.skip${ADDS.slice(2)}`]) },
+      });
+
+      const r = await t.cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        `${WEAK}: passed at the base, skipped at the head; covered by none`,
+      );
+    });
+
+    it('refuses a checked criterion no passing test names (ac-map)', async () => {
+      const untagged = LOGIN_TEST.replace('AC-001 signs in', 'signs in');
+      const r = await mergeSetup({ files: { 'tests/login.test.ts': untagged } }).cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('AC-001: no passing test names it');
+    });
+
+    it('refuses a tagged test that already passes at the base (red-green)', async () => {
+      const t = mergeSetup({
+        project: (repo) => {
+          repo.commit({ 'src/login.ts': LOGIN }, 'login', { signWith: owner });
+          repo.push('main');
+        },
+        files: { 'src/login.ts': `${LOGIN}export const logout = () => true;\n` },
+      });
+
+      const r = await t.cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/red-green fails at .*AC-001/s);
+    });
+
+    it('says when red-green skipped a tests-only item, and goes on', async () => {
+      const t = mergeSetup({
+        project: (repo) => {
+          repo.commit({ 'src/login.ts': LOGIN }, 'login', { signWith: owner });
+          repo.push('main');
+        },
+        files: { 'src/login.ts': LOGIN },
+      });
+
+      const r = await t.cli();
+
+      expect(r.stdout).toContain('red-green skipped: only test code changed');
+      expect(r.stderr).toContain(NOT_YET);
+    });
+  },
+);

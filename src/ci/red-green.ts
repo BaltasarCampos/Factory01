@@ -9,8 +9,14 @@
 import { mergeBase, resolveCommit, safeDiff } from '../git/diff.js';
 import type { Tier } from '../model/types.js';
 import { isTestCode, TEST_CONFIG, type TestConfig } from '../stations/edges.js';
-import { checkedSet, featureDir, namesId, setFindings } from './ac-map.js';
-import { cleanPass, inWorkspace, type Isolation, type TestRun } from './vitest-run.js';
+import { checkedSet, featureDir, namesId, setFindings, type CheckedSet } from './ac-map.js';
+import {
+  cleanPass,
+  inWorkspace,
+  type Isolation,
+  type TestRun,
+  type Workspace,
+} from './vitest-run.js';
 
 export type RedGreen =
   | { skipped: true; files: string[] }
@@ -50,18 +56,24 @@ export function judge(
   return { findings, seen };
 }
 
-export function redGreen(
+export interface RedGreenOptions {
+  tier: Tier | undefined;
+  branch: string;
+  env: NodeJS.ProcessEnv;
+  config?: TestConfig;
+}
+
+/** The check without running tests: its result already, or what the two runs need. */
+export type RedGreenPlan =
+  | { done: RedGreen }
+  | { done?: undefined; set: CheckedSet; start: string; to: string; config: TestConfig };
+
+export function redGreenPlan(
   repo: string,
   base: string,
   head: string,
-  options: {
-    tier: Tier | undefined;
-    branch: string;
-    isolation: Isolation;
-    env: NodeJS.ProcessEnv;
-    config?: TestConfig;
-  },
-): RedGreen {
+  options: RedGreenOptions,
+): RedGreenPlan {
   const { env } = options;
   const config = options.config ?? TEST_CONFIG;
   const to = resolveCommit(repo, head, env);
@@ -69,19 +81,48 @@ export function redGreen(
   const set = checkedSet(repo, base, to, options.tier, options.branch, env);
   const problems = setFindings(set);
   if (problems.length > 0)
-    return { skipped: false, findings: problems, checked: set.ids.size, seen: 0 };
+    return { done: { skipped: false, findings: problems, checked: set.ids.size, seen: 0 } };
 
   const feature = featureDir(repo, to, options.branch, env);
   const own = (path: string) => path === '.specify/feature.json' || path.startsWith(`${feature}/`);
   const changed = safeDiff(repo, start, to, env).map((c) => c.path);
   if (changed.every((path) => own(path) || isTestCode(path, config)))
-    return { skipped: true, files: changed };
+    return { done: { skipped: true, files: changed } };
+  return { set, start, to, config };
+}
 
-  return inWorkspace(repo, to, { isolation: options.isolation, config, env }, (ws) => {
-    ws.write('head', to);
-    ws.write('base', start, (p) => !isTestCode(p, config));
-    ws.write('base', to, (p) => isTestCode(p, config));
-    const { findings, seen } = judge(set.ids, set.headIds, ws.test('base'), ws.test('head'), to);
-    return { skipped: false, findings, checked: set.ids.size, seen };
-  });
+/**
+ * The two runs in a workspace whose `head` tree holds the head and already ran as `headRun`, so
+ * a caller running other checks on the same head runs it once (`factory merge`).
+ */
+export function redGreenIn(
+  ws: Workspace,
+  plan: Exclude<RedGreenPlan, { done: RedGreen }>,
+  headRun: TestRun,
+): RedGreen {
+  const { set, start, to, config } = plan;
+  ws.write('base-tests', start, (p) => !isTestCode(p, config));
+  ws.write('base-tests', to, (p) => isTestCode(p, config));
+  const { findings, seen } = judge(set.ids, set.headIds, ws.test('base-tests'), headRun, to);
+  return { skipped: false, findings, checked: set.ids.size, seen };
+}
+
+export function redGreen(
+  repo: string,
+  base: string,
+  head: string,
+  options: RedGreenOptions & { isolation: Isolation },
+): RedGreen {
+  const plan = redGreenPlan(repo, base, head, options);
+  if (plan.done !== undefined) return plan.done;
+  const { env } = options;
+  return inWorkspace(
+    repo,
+    plan.to,
+    { isolation: options.isolation, config: plan.config, env },
+    (ws) => {
+      ws.write('head', plan.to);
+      return redGreenIn(ws, plan, ws.test('head'));
+    },
+  );
 }

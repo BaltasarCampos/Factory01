@@ -14,7 +14,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { keyOf, newestKey, secondCopy } from '../approvals/keys.js';
 import { ownerKeyPath } from '../approvals/sign.js';
-import { checkedSet } from '../ci/ac-map.js';
+import { checkedSet, type CheckedSet } from '../ci/ac-map.js';
 import type { CommandContext } from '../cli/commands.js';
 import { RefusedError, UsageError } from '../cli/env.js';
 import { pendingManifest } from '../dispatcher/manifest.js';
@@ -22,8 +22,16 @@ import { mergeBase, safeDiff } from '../git/diff.js';
 import { listComments } from '../github/comments.js';
 import { timeline } from '../github/timeline.js';
 import { checkedHead, checkedMain, type MainContext, type MergeContext } from '../merge/context.js';
-import { verifyChain } from '../merge/chain.js';
-import { mergeRules } from '../merge/rules.js';
+import { verifyChain, type Chain } from '../merge/chain.js';
+import {
+  ciAt,
+  requiredChecksAt,
+  requiredJobs,
+  type BranchKind,
+  type JobResult,
+} from '../merge/ci.js';
+import { laptopChecks, type LaptopResults } from '../merge/laptop.js';
+import { mergeRules, type RuleName } from '../merge/rules.js';
 import { STATIONS } from '../model/types.js';
 import { NO_FORMAL } from '../notify/summary.js';
 import { derivePause, resumeEntries } from '../pause/derive.js';
@@ -77,10 +85,15 @@ async function confirmSession(ctx: CommandContext, c: MergeContext): Promise<voi
 /**
  * The item rules after T143's path rule: once only; the whole approval chain at the checked head
  * (src/merge/chain.ts); tier 3 refused; the criterion set from the verified tier and branch
- * (AC-097); then each stale head-bound waiver re-signed through approve's own waiver flow, or the
- * merge stops.
+ * (AC-097); then each stale head-bound waiver offered for re-signing through approve's own waiver
+ * flow. One the Owner declines, or that approve would refuse to sign, does not count at the
+ * checked head, and the check it waives decides.
  */
-async function itemChecks(ctx: CommandContext, c: MergeContext, issue: number): Promise<void> {
+async function itemChecks(
+  ctx: CommandContext,
+  c: MergeContext,
+  issue: number,
+): Promise<{ chain: Chain; set: CheckedSet }> {
   const merged = c.merges.find((m) => m.value === `#${String(issue)}`);
   if (merged !== undefined)
     throw new RefusedError(
@@ -99,34 +112,79 @@ async function itemChecks(ctx: CommandContext, c: MergeContext, issue: number): 
       `the checked set is empty: spec.md at ${c.head.slice(0, 12)} has no acceptance criteria (AC-097); ${NOTHING}`,
     );
 
-  if (chain.stale.length === 0) return;
+  if (chain.stale.length === 0) return { chain, set };
   const project = {
     ...{ repo: c.config.repo, inboxIssue: c.config.inbox_issue },
     ...{ home: c.home, cwd: c.cwd, env: c.env },
   };
-  // A stale test: waiver covering no weakened test at the checked head is no longer needed.
-  const needed = chain.stale.filter((waives) => {
-    if (!waives.startsWith('test:')) return true;
-    if (coveredAt(project, waives, c.main, c.head).length > 0) return true;
-    ctx.io.stdout.write(`the waiver for ${waives} covers nothing at ${c.head}; no longer needed\n`);
-    return false;
-  });
-  for (const waives of needed) {
-    ctx.io.stdout.write(
-      `The waiver for ${waives} was signed for another head; re-sign it at the checked head ${c.head} or the merge stops.\n`,
-    );
-    const w = { issue, waives, tier: chain.tier, branch: chain.branch, head: c.head };
-    await signHeadBoundWaiver(ctx, project, { ...w, main: c.main, keys: c.keys }, async () => {
-      const answer = await ctx.ask(
-        `Sign a new waiver for ${waives} at ${c.head.slice(0, 12)}? [y/N] `,
+  for (const waives of chain.stale) {
+    // A stale test: waiver covering no weakened test at the checked head is no longer needed.
+    if (waives.startsWith('test:') && coveredAt(project, waives, c.main, c.head).length === 0) {
+      ctx.io.stdout.write(
+        `the waiver for ${waives} covers nothing at ${c.head}; no longer needed\n`,
       );
-      if (!['y', 'yes'].includes(answer.trim().toLowerCase()))
-        throw new RefusedError(`the stale waiver ${waives} was not re-signed; ${NOTHING}`);
-    });
+      continue;
+    }
+    ctx.io.stdout.write(`The waiver for ${waives} was signed for another head.\n`);
+    const w = { issue, waives, tier: chain.tier, branch: chain.branch, head: c.head };
+    try {
+      await signHeadBoundWaiver(ctx, project, { ...w, main: c.main, keys: c.keys }, async () => {
+        const answer = await ctx.ask(
+          `Sign a new waiver for ${waives} at ${c.head.slice(0, 12)}? [y/N] `,
+        );
+        if (!['y', 'yes'].includes(answer.trim().toLowerCase()))
+          throw new RefusedError('the Owner declined to re-sign it');
+      });
+    } catch (err) {
+      if (!(err instanceof RefusedError)) throw err;
+      ctx.io.stdout.write(
+        `${err.message}\nthe waiver for ${waives} is not re-signed, so it does not count at ${c.head}; the check decides\n`,
+      );
+    }
   }
-  const still = (await verifyChain(c, issue)).stale.filter((w) => needed.includes(w));
-  if (still.length > 0)
-    throw new RefusedError(`a re-signed waiver does not verify at the checked head; ${NOTHING}`);
+  // The waivers in force now, re-signed ones included.
+  return { chain: await verifyChain(c, issue), set };
+}
+
+const KIND: Readonly<Record<RuleName, BranchKind | undefined>> = {
+  item: 'item',
+  define: 'define',
+  upgrade: 'upgrade',
+  'factory-log': 'log',
+  'factory-repository': 'factory-repository',
+  none: undefined,
+};
+
+/** The required GitHub Actions jobs green at the checked head (src/merge/ci.ts). */
+async function ciChecks(
+  ctx: CommandContext,
+  c: MergeContext,
+  rule: RuleName,
+  changed: readonly string[],
+): Promise<JobResult[]> {
+  const kind = KIND[rule];
+  if (kind === undefined)
+    throw new RefusedError(`no required checks for the ${rule} rule; ${NOTHING}`);
+  const pin = c.config.factory_release;
+  const list = requiredChecksAt(c.factory, pin.sha, c.config.profile);
+  const results = await ciAt(c.config.repo, c.head, requiredJobs(list, kind, changed), {
+    env: c.env,
+  });
+  const bad = results.filter((r) => r.state !== 'success');
+  if (bad.length > 0)
+    throw new RefusedError(
+      `required checks are not green at ${c.head}; ${NOTHING}:\n  ${bad.map((r) => `${r.job} (${r.workflow}): ${r.state}`).join('\n  ')}`,
+    );
+  ctx.io.stdout.write(`CI: ${String(results.length)} required jobs green at ${c.head}\n`);
+  return results;
+}
+
+/** What the checks found, for the merge summary (slice 22a-4); nothing here runs again. */
+export interface MergeResults {
+  readonly rule: RuleName;
+  readonly ci: readonly JobResult[];
+  readonly chain?: Chain;
+  readonly laptop?: LaptopResults;
 }
 
 export async function merge(ctx: CommandContext): Promise<number> {
@@ -168,8 +226,18 @@ export async function merge(ctx: CommandContext): Promise<number> {
     const formal = changes.filter((f) => f.path.startsWith('formal/')).map((f) => f.path);
     if (formal.length > 0)
       throw new RefusedError(`${NO_FORMAL}: #${arg} changes ${formal.join(', ')}`);
-    if (result.issue !== undefined) await itemChecks(ctx, c, result.issue);
+    const item = result.issue === undefined ? undefined : await itemChecks(ctx, c, result.issue);
     ctx.io.stdout.write(`#${arg} passes the rule ${result.rule}\n`);
+    const changed = changes.map((f) => f.path);
+    const ci = await ciChecks(ctx, c, result.rule, changed);
+    const results: MergeResults = {
+      rule: result.rule,
+      ci,
+      ...(item === undefined
+        ? {}
+        : { chain: item.chain, laptop: laptopChecks(c, item.chain, item.set, ctx.io.stdout) }),
+    };
+    Object.freeze(results);
 
     throw new RefusedError(`the merge itself comes with slice 22b; ${NOTHING}`);
   } finally {
