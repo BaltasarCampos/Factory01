@@ -37,6 +37,7 @@ import {
   seedState,
   type FakeComment,
   type FakeLabelEvent,
+  type FakePr,
 } from '../helpers/fake-gh.js';
 import {
   gitEnv,
@@ -506,7 +507,10 @@ Visitors cannot sign in.
 
 1. **AC-001** — **Given** a user, **When** they sign in, **Then** they see their links.
 `;
-const NOT_YET = 'the merge itself comes with slice 22b; nothing was merged';
+// Every check passed and the summary was shown; the Owner then answered no to the merge itself.
+const DECLINED = 'the Owner did not confirm the merge; nothing was merged';
+const NOT_YET_22C =
+  'Define, log and factory-repository merges come with slice 22c; nothing was merged';
 // The item's code and its tagged test: red at the base, where the code is missing, green at the head.
 const LOGIN = 'export const login = (name: string) => name.length > 0;\n';
 const VERIFY_REPORT = `| Check | Result |\n|---|---|\n${['CI', 'Coverage', 'SAST', 'SCA', 'Secrets', 'Licences', 'Review'].map((c) => `| ${c} | pass |`).join('\n')}\n`;
@@ -618,6 +622,8 @@ interface MergeSetup {
   inbox?: FakeLabelEvent[];
   /** Runs on the project once main is set up, before the item branch. */
   project?: (repo: TestRepo) => void;
+  /** A second release's allowed_signers, pinned on main by a signed commit before the branch. */
+  nextRelease?: string;
   /** The item's labels, when not `tier:<tier>` and `owner:approved`. */
   labels?: string[];
   /** The repository the PR's head branch lives in, when it is a fork. */
@@ -669,6 +675,13 @@ function mergeSetup(o: MergeSetup = {}) {
     signWith: owner,
   });
   if (!o.noConfig) mergeBrief(repo, { signWith: owner });
+  if (o.nextRelease !== undefined) {
+    factory.commit({ allowed_signers: o.nextRelease }, 'next release');
+    signedReleaseTag(factory, owner, 'v1.0.1');
+    const next = `v1.0.1@${factory.revParse('HEAD')}`;
+    repo.commit({ '.factory/config': config(next) }, 'pin v1.0.1', { signWith: owner });
+    repo.push('main');
+  }
   o.project?.(repo);
   const branchName = o.branch ?? ITEM_BRANCH;
   const head = branch(repo, branchName, {
@@ -758,7 +771,8 @@ function mergeSetup(o: MergeSetup = {}) {
       unreadAlerts: () => Promise.resolve([]),
       ask: (question) => {
         asked.push(question);
-        return Promise.resolve(answers.shift() ?? '');
+        const answer = answers.shift() ?? '';
+        return Promise.resolve(typeof answer === 'function' ? answer() : answer);
       },
     });
     return { code, stdout: out.join(''), stderr: err.join('') };
@@ -777,7 +791,8 @@ function mergeSetup(o: MergeSetup = {}) {
 }
 
 interface CliOver {
-  answers?: string[];
+  /** Typed answers in order; a function runs when its question is asked, then answers. */
+  answers?: (string | (() => string))[];
   env?: NodeJS.ProcessEnv;
   tty?: boolean;
 }
@@ -797,7 +812,7 @@ describe(
 
       const r = await t.cli();
 
-      expect(r.stderr).toContain(NOT_YET);
+      expect(r.stderr).toContain(DECLINED);
       expect(r.code).toBe(1);
       expect(r.stdout).toContain(`origin/${ITEM_BRANCH} at ${t.head}`);
       expect(r.stdout).not.toContain(local);
@@ -855,9 +870,10 @@ describe(
       expect(declined.code).toBe(1);
       expect(declined.stderr).toMatch(/warning: .*paused/);
       expect(declined.stderr).toContain('nothing was merged');
-      expect(declined.stderr).not.toContain(NOT_YET);
-      expect(t.asked).toHaveLength(2);
-      expect(confirmed.stderr).toContain(NOT_YET);
+      expect(declined.stderr).not.toContain(DECLINED);
+      // The pause, twice, and the merge itself once.
+      expect(t.asked).toHaveLength(3);
+      expect(confirmed.stderr).toContain(DECLINED);
     });
 
     it('warns while the dispatcher shows a session running for the item, and goes on only after the Owner confirms (AC-088)', async () => {
@@ -877,8 +893,8 @@ describe(
 
       expect(declined.code).toBe(1);
       expect(declined.stderr).toMatch(/warning: .*session.*station 4/);
-      expect(declined.stderr).not.toContain(NOT_YET);
-      expect(confirmed.stderr).toContain(NOT_YET);
+      expect(declined.stderr).not.toContain(DECLINED);
+      expect(confirmed.stderr).toContain(DECLINED);
     });
 
     it('refuses an item main already has an Owner-signed Factory-Merge: #<issue> for (AC-088)', async () => {
@@ -917,7 +933,7 @@ describe(
 
       expect(r.code).toBe(1);
       expect(r.stderr).toContain(NO_FORMAL);
-      expect(r.stderr).not.toContain(NOT_YET);
+      expect(r.stderr).not.toContain(DECLINED);
     });
 
     it("refuses what the branch's merge rule refuses, naming the rule", async () => {
@@ -937,7 +953,7 @@ describe(
       const elsewhere = await mergeSetup({ branch: 'owner-work' }).cli();
 
       expect(there.stdout).toMatch(/rule factory-repository/);
-      expect(there.stderr).toContain(NOT_YET);
+      expect(there.stderr).toContain(NOT_YET_22C);
       expect(elsewhere.stderr).toMatch(/no merge rule takes branch owner-work/);
     });
 
@@ -995,7 +1011,7 @@ describe(
 
       expect(three.stderr).toContain(NO_FORMAL);
       expect(two.stderr).not.toContain(NO_FORMAL);
-      expect(two.stderr).toContain(NOT_YET);
+      expect(two.stderr).toContain(DECLINED);
     });
 
     it('counts Factory-Merge: only on first-parent merges: one reached through a second parent does not make the item merged', async () => {
@@ -1020,7 +1036,7 @@ describe(
 
       expect(side).toMatch(/^[0-9a-f]{40}$/);
       expect(r.stderr).not.toMatch(/already merged/);
-      expect(r.stderr).toContain(NOT_YET);
+      expect(r.stderr).toContain(DECLINED);
     });
   },
 );
@@ -1097,7 +1113,7 @@ describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240
   it('at tier 1, needs no spec approval', async () => {
     const r = await mergeSetup({ tier: 1 }).cli();
 
-    expect(r.stderr).toContain(NOT_YET);
+    expect(r.stderr).toContain(DECLINED);
   });
 
   it('refuses a spec changed since its approval, pointing to factory approve <issue> spec', async () => {
@@ -1236,13 +1252,14 @@ describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240
   it('a stale gate: waiver approve would refuse to sign does not count, and the check decides', async () => {
     const { t, moved } = staleWaiver('gate:red-green', undefined, false);
 
-    const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+    // No re-sign question comes: approve refuses before asking.
+    const r = await t.cli();
 
     expect(r.stdout).toMatch(/no red-green check yet/);
     expect(r.stdout).toContain(
       `the waiver for gate:red-green is not re-signed, so it does not count at ${moved}; the check decides`,
     );
-    expect(r.stderr).toContain(NOT_YET);
+    expect(r.stderr).toContain(DECLINED);
   });
 
   it('skips a stale test: waiver that covers nothing at the checked head, without asking', async () => {
@@ -1253,8 +1270,8 @@ describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240
     expect(r.stdout).toContain(
       `the waiver for ${WEAK} covers nothing at ${moved}; no longer needed`,
     );
-    expect(t.asked).toEqual([]);
-    expect(r.stderr).toContain(NOT_YET);
+    expect(t.asked.filter((q) => q.startsWith('Sign a new waiver'))).toEqual([]);
+    expect(r.stderr).toContain(DECLINED);
   });
 
   it('a declined re-sign of a stale test: waiver refuses the merge and signs nothing', async () => {
@@ -1277,7 +1294,7 @@ describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240
 
     expect(r.stdout).toContain('diff since the waived head');
     expect(r.stdout).toContain(WEAK);
-    expect(r.stderr).toContain(NOT_YET);
+    expect(r.stderr).toContain(DECLINED);
     const verdict = verifyGate({
       ...{ keys: writeKeyFiles([owner]), secondCopy: owner.publicKey, ...itemThread() },
       expected: {
@@ -1302,7 +1319,7 @@ describe(
       expect(r.stdout).toContain('weakened: no test weakened');
       expect(r.stdout).toContain('ac-map: every checked criterion has a passing test');
       expect(r.stdout).toMatch(/red-green: 1 criterion goes from failing to passing/);
-      expect(r.stderr).toContain(NOT_YET);
+      expect(r.stderr).toContain(DECLINED);
     });
 
     it('counts only runs of the workflow file a job is installed at: not a commit status, not another workflow file', async () => {
@@ -1382,7 +1399,7 @@ describe(
       ]);
       const broken = await t.cli();
 
-      expect(rerun.stderr).toContain(NOT_YET);
+      expect(rerun.stderr).toContain(DECLINED);
       expect(broken.stderr).toContain(`build-test (${CI}): failure`);
     });
 
@@ -1455,7 +1472,7 @@ describe(
       const r = await t.cli();
 
       expect(r.stdout).toContain('red-green skipped: only test code changed');
-      expect(r.stderr).toContain(NOT_YET);
+      expect(r.stderr).toContain(DECLINED);
     });
   },
 );
@@ -1494,7 +1511,7 @@ describe(
         'Waivers in force: none',
       ])
         expect(r.stdout).toContain(line);
-      expect(r.stderr).toContain(NOT_YET);
+      expect(r.stderr).toContain(DECLINED);
     });
 
     it('refuses when a required part is missing: no verify report', async () => {
@@ -1512,5 +1529,191 @@ describe(
       expect(r.code).toBe(1);
       expect(r.stderr).toContain('upgrade merges come with slice 35 (T115); nothing was merged');
     });
+  },
+);
+
+// Slice 22b: the signed merge of a work item, made with git commit-tree, never a checkout.
+const PULL_HINT = 'run git pull --ff-only to update your checkout';
+
+/** Change the item's pull request as GitHub holds it. */
+function onPr(change: (pr: FakePr) => void) {
+  const state = readState();
+  const pr = state.repos[REPO]?.prs.find((p) => p.number === ITEM_PR);
+  if (pr === undefined) throw new Error('no pull request');
+  change(pr);
+  writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
+}
+
+/** A commit pushed to `branch` on origin from the project clone, signed by the Owner. */
+function pushTo(repo: TestRepo, branch: string, file: string): string {
+  repo.checkout(branch);
+  const sha = repo.commit({ [file]: `${file}\n` }, `more on ${branch}`, { signWith: owner });
+  repo.push(branch);
+  repo.checkout('main');
+  return sha;
+}
+
+describe(
+  'factory merge: the signed merge of a work item (T068, slice 22b)',
+  { timeout: 240_000 },
+  () => {
+    it('merges exactly the checked head with a commit-tree signed merge, deletes the branch, and touches no working copy (AC-014)', async () => {
+      const t = mergeSetup();
+      const before = t.mainOnOrigin();
+      const local = {
+        head: t.repo.revParse('HEAD'),
+        branch: t.repo.git(['branch', '--show-current']),
+      };
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(t.asked.at(-1)).toBe(`Merge #${String(ITEM_PR)} into main? [y/N] `);
+      expect(r.stdout).toContain(PULL_HINT);
+      const merged = t.mainOnOrigin();
+      expect(
+        runGit(t.repo.origin, ['rev-list', '--parents', '-n', '1', merged]).split(' ').slice(1),
+      ).toEqual([before, t.head]);
+      expect(runGit(t.repo.origin, ['rev-parse', `${merged}^{tree}`])).toBe(
+        runGit(t.repo.origin, ['rev-parse', `${t.head}^{tree}`]),
+      );
+      expect(runGit(t.repo.origin, ['log', '-1', '--format=%B', merged])).toMatch(
+        /\nFactory-Merge: #7\n?$/,
+      );
+      const keys = writeKeyFiles([owner]);
+      runGit(t.repo.origin, [
+        ...[
+          '-c',
+          `gpg.ssh.allowedSignersFile=${keys.allowedSigners}`,
+          '-c',
+          'gpg.minTrustLevel=fully',
+        ],
+        ...['verify-commit', merged],
+      ]);
+      expect(() =>
+        runGit(t.repo.origin, ['rev-parse', '--verify', `refs/heads/${ITEM_BRANCH}`]),
+      ).toThrow();
+      // Nothing of the Owner's working copy moved.
+      expect(t.repo.revParse('HEAD')).toBe(local.head);
+      expect(t.repo.git(['branch', '--show-current'])).toBe(local.branch);
+      expect(t.repo.git(['status', '--porcelain'])).toBe('');
+    });
+
+    it('refuses an item whose branch is behind main, before any slow step, with nothing pushed', async () => {
+      const t = mergeSetup();
+      const moved = pushTo(t.repo, 'main', 'src/later.ts');
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        `main moved since #${String(ITEM_PR)} was integrated; it needs a rebase before it can merge; nothing was merged`,
+      );
+      expect(r.stdout).not.toContain('weakened:');
+      expect(t.mainOnOrigin()).toBe(moved);
+      expect(runGit(t.repo.origin, ['rev-parse', `refs/heads/${ITEM_BRANCH}`])).toBe(t.head);
+    });
+
+    it('aborts with nothing merged when main moves between the check and the push', async () => {
+      const t = mergeSetup();
+      const checked = t.mainOnOrigin();
+      let moved = '';
+
+      const r = await t.cli(['merge', String(ITEM_PR)], {
+        answers: [() => ((moved = pushTo(t.repo, 'main', 'src/race.ts')), 'y')],
+      });
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(`main moved since ${checked}`);
+      expect(r.stderr).toContain('nothing was merged');
+      expect(t.mainOnOrigin()).toBe(moved);
+      expect(runGit(t.repo.origin, ['rev-parse', `refs/heads/${ITEM_BRANCH}`])).toBe(t.head);
+    });
+
+    it('the lease refuses a main rewound to an older commit, which our merge would otherwise fast-forward', async () => {
+      const t = mergeSetup();
+      const checked = t.mainOnOrigin();
+      const older = runGit(t.repo.origin, ['rev-parse', `${checked}^`]);
+
+      const r = await t.cli(['merge', String(ITEM_PR)], {
+        answers: [() => (runGit(t.repo.origin, ['update-ref', 'refs/heads/main', older]), 'y')],
+      });
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(`main moved since ${checked}`);
+      expect(t.mainOnOrigin()).toBe(older);
+    });
+
+    it("gives git's own reason when the push is refused and main did not move", async () => {
+      const t = mergeSetup();
+      const before = t.mainOnOrigin();
+      const hook = join(t.repo.origin, 'hooks', 'pre-receive');
+      writeFileSync(hook, '#!/bin/sh\necho "denied by repository policy" >&2\nexit 1\n', {
+        mode: 0o755,
+      });
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('denied by repository policy');
+      expect(r.stderr).toContain('nothing was merged');
+      expect(r.stderr).not.toContain('main moved');
+      expect(t.mainOnOrigin()).toBe(before);
+    });
+
+    it('verifies the merge commit with the keys pinned at main before pushing', async () => {
+      // The release pinned on main lists the Owner's key for records only, not for git: the
+      // newest-key check passes, and git verify-commit, as the next walk runs it, would not.
+      const recordsOnly = owner.allowedSignersLine.replace(
+        '"factory-approve,git"',
+        '"factory-approve"',
+      );
+      const t = mergeSetup({ nextRelease: `${recordsOnly}\n` });
+      const before = t.mainOnOrigin();
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        'your signing key is not accepted by the release pinned on main; nothing was pushed',
+      );
+      expect(t.mainOnOrigin()).toBe(before);
+    });
+
+    it.each([
+      ['closes the pull request with a comment naming the merged commit', 'OPEN' as const],
+      ['copes with a pull request GitHub already closed', 'CLOSED' as const],
+    ])(
+      'a head pushed after the check is not merged, the branch is deleted, and merge %s (AC-088)',
+      async (_, state) => {
+        const t = mergeSetup();
+        let pushed = '';
+
+        const r = await t.cli(['merge', String(ITEM_PR)], {
+          answers: [
+            () => {
+              pushed = pushTo(t.repo, ITEM_BRANCH, 'src/late.ts');
+              onPr((pr) => {
+                pr.headRefOid = pushed;
+                pr.state = state;
+              });
+              return 'y';
+            },
+          ],
+        });
+
+        expect(r.code).toBe(0);
+        const merged = t.mainOnOrigin();
+        expect(runGit(t.repo.origin, ['rev-parse', `${merged}^2`])).toBe(t.head);
+        expect(() =>
+          runGit(t.repo.origin, ['rev-parse', '--verify', `refs/heads/${ITEM_BRANCH}`]),
+        ).toThrow();
+        const pr = readState().repos[REPO]?.prs.find((p) => p.number === ITEM_PR);
+        expect(pr?.state).toBe('CLOSED');
+        expect(pr?.comments.at(-1)?.body).toContain(merged);
+        expect(pr?.comments.at(-1)?.body).toContain(pushed);
+      },
+    );
   },
 );
