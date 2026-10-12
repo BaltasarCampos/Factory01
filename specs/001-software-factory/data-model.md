@@ -301,7 +301,7 @@ repo). The laptop verifies incrementally from `~/.factory/verified/<repo>` (last
 commit). The factory repository follows the same rule: its merges go through `factory merge`
 (laptop check refusing changes to its own live `.github/workflows/`, `.gitattributes` and
 `.gitmodules`, CI green on the checked commit, signed local merge; sources under
-`factory/self/` are ordinary reviewed files the Owner copies into place), and its releases are tags signed by `factory release`.
+`factory/self/` are ordinary reviewed files the Owner copies into place), and its releases are tags signed by `factory release`. Before the factory repository adopts itself, its merges are signed merges made by hand: `factory merge` needs `.factory/config` on main and refuses without it.
 
 **Merge trailers.** Every merge commit `factory merge` makes ends with `Factory-Merge: <what>`:
 `#<issue>` for an item, `define`, `upgrade <tag>` or `factory-log`. Read only from Owner-signed

@@ -102,7 +102,7 @@ function confirmedTier(option: unknown, labels: readonly string[], issue: number
 }
 
 /** Tier and branch from the item's `approved` record, verified with main's pinned key lists. */
-async function approvedRecord(
+export async function approvedRecord(
   project: Project,
   issue: number,
   keys: ReleaseKeys,
@@ -379,7 +379,10 @@ export async function approve(ctx: CommandContext): Promise<number> {
   const scratch = mkdtempSync(join(tmpdir(), 'factory-keys-'));
   let keys: ReleaseKeys | undefined;
   const env = project.env ?? process.env;
-  const mainKeyLists = () => (keys ??= mainKeys(project.cwd, env, scratch, project.home));
+  const warn = (text: string) => {
+    ctx.io.stderr.write(text);
+  };
+  const mainKeyLists = () => (keys ??= mainKeys(project.cwd, env, scratch, project.home, warn));
   let gathered: Gathered;
   try {
     gathered = await fieldsFor(ctx, project, issue, gate, waives, mainKeyLists);
