@@ -208,13 +208,21 @@ For every merge,
 only after the Owner confirms (the signal is telemetry, so it must never block a merge), shows
 the approval summary (§ Approval summary), then:
 
-1. fetches the checked commit and makes the merge commit locally with
-   `git merge --no-ff -S <checked sha>` (Owner-signed, passphrase prompted), whose message ends
-   with the trailer `Factory-Merge: #<issue>` (item), `define`, `upgrade <tag>` or
-   `factory-log`;
-2. pushes main; the push is rejected if main moved, so exactly the checked commit is merged;
-3. if the PR head moved after the check, closes the PR with a comment naming the merged commit;
-4. deletes the head branch (except `claude/factory-log` and `claude/define`, which persist).
+1. asks "Merge #N into main? [y/N]", then makes the merge commit with
+   `git commit-tree -S <tree> -p <main> -p <checked sha>` (Owner-signed, passphrase prompted),
+   never `git merge`: no checkout, index, hooks or file of the Owner's working copy is involved.
+   For an item, main must be an ancestor of the checked commit (else "it needs a rebase") and the
+   tree is exactly the checked commit's; for the other branches it is `git merge-tree
+   --write-tree` of the two, refused on any conflict, and the rule's path check runs again on the
+   merge result's diff against main. The message ends with the trailer `Factory-Merge: #<issue>`
+   (item), `define`, `upgrade <tag>`, `factory-log` or `branch <name>` (factory repository);
+2. verifies the merge commit with the key lists pinned at main, as the next history walk will;
+3. pushes it to main and deletes the head branch in one `git push --atomic`, with
+   `--force-with-lease=refs/heads/main:<main>`, so it lands only if main is exactly the main
+   checked; `claude/factory-log` and `claude/define` persist, every other head branch is deleted,
+   unconditionally (AC-088);
+4. if the PR head moved after the check, closes the PR with a comment naming the merged commit;
+   a PR GitHub already marked merged or closed is commented on, and never makes the merge fail.
 
 Any later push that recreates a deleted item branch raises a tampering alert.
 
@@ -304,7 +312,9 @@ commit). The factory repository follows the same rule: its merges go through `fa
 `factory/self/` are ordinary reviewed files the Owner copies into place), and its releases are tags signed by `factory release`. Before the factory repository adopts itself, its merges are signed merges made by hand: `factory merge` needs `.factory/config` on main and refuses without it.
 
 **Merge trailers.** Every merge commit `factory merge` makes ends with `Factory-Merge: <what>`:
-`#<issue>` for an item, `define`, `upgrade <tag>` or `factory-log`. Read only from Owner-signed
+`#<issue>` for an item, `define`, `upgrade <tag>`, `factory-log`, or `branch <name>` for a merge
+under the factory-repository rule (a branch name holds no space or newline, so the value is one
+line; Owner decision 2026-10-12). Read only from Owner-signed
 first-parent commits after `baseline`, they answer two questions without agent-written markers:
 whether the brief is merged (admission, § State machine) and whether an item was already merged
 (once-only rule, § Pull request merge checks). If a signature, or main's pinned
