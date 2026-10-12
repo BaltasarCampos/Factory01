@@ -14,8 +14,10 @@ import {
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ReleaseKeys } from '../../src/approvals/keys.js';
+import { NonceLedger, nonceLedgerPath } from '../../src/approvals/nonces.js';
 import { renderComment } from '../../src/approvals/record.js';
 import { ownerKeyPath, sign } from '../../src/approvals/sign.js';
+import { verifyGate } from '../../src/approvals/verify.js';
 import { runCli } from '../../src/cli/commands.js';
 import { serialiseManifest } from '../../src/install/manifest.js';
 import {
@@ -27,7 +29,13 @@ import {
 } from '../../src/merge/rules.js';
 import type { ApprovalRecord } from '../../src/model/types.js';
 import { NO_FORMAL } from '../../src/notify/summary.js';
-import { calls, seedState, type FakeLabelEvent } from '../helpers/fake-gh.js';
+import {
+  calls,
+  readState,
+  seedState,
+  type FakeComment,
+  type FakeLabelEvent,
+} from '../helpers/fake-gh.js';
 import {
   gitEnv,
   makeRepo,
@@ -524,6 +532,32 @@ interface MergeSetup {
   labels?: string[];
   /** The repository the PR's head branch lives in, when it is a fork. */
   headRepository?: string;
+  /** The item's records as posted, from the standard chain (approved, then spec-approved). */
+  chain?: (at: { head: string; specBlob: string }, standard: Posted[]) => Posted[];
+}
+
+/** A record of the item's chain as posted: its comment, and the owner: label added after it. */
+interface Posted {
+  comment: FakeComment;
+  label?: FakeLabelEvent;
+}
+
+/** A record for the item, bound to its branch at tier 2 unless `fields` say otherwise. */
+const itemRecord = (gate: ApprovalRecord['gate'], fields: Partial<ApprovalRecord> = {}) =>
+  ({
+    ...{ repo: REPO, issue: ITEM, gate, tier: 2, branch: ITEM_BRANCH },
+    ...{ timestamp: '2026-10-01T08:00:00Z', nonce: randomBytes(16).toString('hex') },
+    ...fields,
+  }) as ApprovalRecord;
+
+/** `record` signed with `keys`, posted at `at`, with its owner: label added a minute later. */
+function posted(id: number, record: ApprovalRecord, at: string, keys = owner): Posted {
+  const body = renderComment(record, sign(record, keys.privateKey, { stdinIsTTY: true }));
+  const later = new Date(Date.parse(at) + 60_000).toISOString().replace('.000Z', 'Z');
+  return {
+    comment: { id, author: 'owner', body, createdAt: at },
+    label: labeledAt(`owner:${record.gate}`, later),
+  };
 }
 
 function mergeSetup(o: MergeSetup = {}) {
@@ -563,33 +597,42 @@ function mergeSetup(o: MergeSetup = {}) {
   copyFileSync(owner.publicKeyPath, `${ownerKeyPath(home)}.pub`);
 
   const tier = o.tier === undefined ? 2 : o.tier;
-  const approved: ApprovalRecord = {
-    ...{ repo: REPO, issue: ITEM, gate: 'approved', tier: tier ?? 2, branch: ITEM_BRANCH },
-    ...{ timestamp: '2026-10-01T08:00:00Z', nonce: randomBytes(16).toString('hex') },
-  };
-  const body = renderComment(approved, sign(approved, owner.privateKey, { stdinIsTTY: true }));
+  const specBlob = runGit(repo.path, ['rev-parse', `${head}:specs/7-add-login/spec.md`]);
+  const standard: Posted[] =
+    tier === null
+      ? []
+      : [
+          posted(900, itemRecord('approved', { tier }), '2026-10-01T08:00:00Z'),
+          ...(tier === 1
+            ? []
+            : [
+                posted(
+                  901,
+                  itemRecord('spec-approved', { tier, spec_sha: specBlob }),
+                  '2026-10-01T08:30:00Z',
+                ),
+              ]),
+        ];
+  const chain = o.chain?.({ head, specBlob }, standard) ?? standard;
+  const gates = [
+    ...new Set(chain.flatMap((p) => (p.label === undefined ? [] : [p.label.label.name]))),
+  ];
   seedState({
     repos: {
       [REPO]: {
         origin: repo.origin,
-        labels: ['owner:approved', 'owner:waiver', 'pause:line', 'tier:2'].map((name) => ({
-          ...{ name, color: 'ededed', description: '' },
-        })),
+        labels: [
+          ...['owner:approved', 'owner:spec-approved', 'owner:waiver'],
+          ...['pause:line', 'tier:1', 'tier:2', 'tier:3'],
+        ].map((name) => ({ name, color: 'ededed', description: '' })),
         issues: [
           { number: 1, title: 'Owner inbox', events: o.inbox ?? [] },
           {
             number: ITEM,
             title: 'Add login',
-            labels: o.labels ?? [
-              `tier:${String(tier ?? 2)}`,
-              ...(tier === null ? [] : ['owner:approved']),
-            ],
-            ...(tier === null
-              ? {}
-              : {
-                  comments: [{ id: 900, author: 'owner', body, createdAt: approved.timestamp }],
-                  events: [labeledAt('owner:approved', '2026-10-01T08:01:00Z')],
-                }),
+            labels: o.labels ?? [`tier:${String(tier ?? 2)}`, ...gates],
+            comments: chain.map((p) => p.comment),
+            events: chain.flatMap((p) => (p.label === undefined ? [] : [p.label])),
           },
         ],
         prs: [
@@ -886,3 +929,262 @@ describe(
     });
   },
 );
+
+// Slice 22a-2: the whole approval chain at the checked head, its nonces, the criterion set, and
+// re-signing a stale head-bound waiver through approve's own waiver flow.
+const T_WAIVER = '2026-10-01T09:00:00Z';
+const calcTests = (lines: string[]) =>
+  [
+    "import { expect, it } from 'vitest';",
+    "import { add } from '../src/calc.js';",
+    ...lines,
+    '',
+  ].join('\n');
+const ADDS = "it('adds', () => { expect(add(1, 2)).toBe(3); });";
+const WEAK = 'test:tests/calc.test.ts#adds';
+const GROUNDLESS =
+  'holds a record that does not verify and grants nothing; if you did not post it, delete it and run merge again';
+
+/** The comments and label adds on the item now, as the verifier reads them. */
+function itemThread() {
+  const issue = readState().repos[REPO]?.issues.find((i) => i.number === ITEM);
+  return {
+    comments: (issue?.comments ?? []).map((c) => ({ ...c, id: String(c.id) })),
+    labelAdds: (issue?.events ?? [])
+      .filter((e) => e.event === 'labeled')
+      .map((e) => ({ label: e.label.name, createdAt: e.created_at })),
+  };
+}
+
+/**
+ * An item whose branch skips a test that passed on main, with a waiver for it signed at the first
+ * head; the branch then moves on (Integrate's rebase), so the waiver is stale at the checked head.
+ */
+function staleWaiver(
+  waives: string,
+  movedFiles: Files = { 'src/login.ts': 'export const login = 1;\n' },
+) {
+  const t = mergeSetup({
+    project: (repo) => {
+      repo.commit(
+        {
+          'src/calc.ts': 'export const add = (a: number, b: number) => a + b;\n',
+          'tests/calc.test.ts': calcTests([ADDS]),
+        },
+        'calc',
+        { signWith: owner },
+      );
+      repo.push('main');
+    },
+    files: { 'tests/calc.test.ts': calcTests([`it.skip${ADDS.slice(2)}`]) },
+    chain: ({ head }, standard) => [
+      ...standard,
+      posted(902, itemRecord('waiver', { waives, head }), T_WAIVER),
+    ],
+  });
+  t.repo.checkout(ITEM_BRANCH);
+  const moved = t.repo.commit(movedFiles, 'rebased');
+  t.repo.push(ITEM_BRANCH);
+  t.repo.checkout('main');
+  return { t, moved };
+}
+
+describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240_000 }, () => {
+  it('at tier 2, refuses an item without a verified spec approval', async () => {
+    const r = await mergeSetup({ chain: (_, standard) => standard.slice(0, 1) }).cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/#7 has no verified owner:spec-approved/);
+  });
+
+  it('at tier 1, needs no spec approval', async () => {
+    const r = await mergeSetup({ tier: 1 }).cli();
+
+    expect(r.stderr).toContain(NOT_YET);
+  });
+
+  it('refuses a spec changed since its approval, pointing to factory approve <issue> spec', async () => {
+    const t = mergeSetup({
+      chain: (_, [approved]) => [
+        ...(approved === undefined ? [] : [approved]),
+        posted(
+          901,
+          itemRecord('spec-approved', { spec_sha: 'b'.repeat(40) }),
+          '2026-10-01T08:30:00Z',
+        ),
+      ],
+    });
+
+    const r = await t.cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/spec\.md changed since it was approved.*factory approve 7 spec/);
+  });
+
+  it('refuses a tampered waiver, naming its comment', async () => {
+    const t = mergeSetup({
+      chain: (_, standard) => {
+        const waiver = posted(903, itemRecord('waiver', { waives: 'gate:plan' }), T_WAIVER);
+        const body = waiver.comment.body.replace('waives: gate:plan', 'waives: gate:tasks');
+        return [...standard, { ...waiver, comment: { ...waiver.comment, body } }];
+      },
+    });
+
+    const r = await t.cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(`comment 903 ${GROUNDLESS}`);
+  });
+
+  it('refuses a record copied from another item, naming it', async () => {
+    const t = mergeSetup({
+      chain: (_, standard) => [
+        posted(
+          900,
+          itemRecord('approved', { issue: 5, branch: 'claude/5-other' }),
+          '2026-10-01T08:00:00Z',
+        ),
+        ...standard.slice(1),
+      ],
+    });
+
+    const r = await t.cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/no verified owner:approved/);
+    expect(r.stderr).toContain(`comment 900 ${GROUNDLESS}`);
+  });
+
+  it('refuses an owner:waiver label with no record behind it, saying to remove the label', async () => {
+    const t = mergeSetup({
+      chain: (_, standard) => [
+        ...standard,
+        {
+          comment: { id: 904, author: 'owner', body: 'looks fine', createdAt: T_WAIVER },
+          label: labeledAt('owner:waiver', '2026-10-01T09:01:00Z'),
+        },
+      ],
+    });
+
+    const r = await t.cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(
+      'owner:waiver is on #7 with no waiver record behind it, so it grants nothing; if you did not add it, remove the label and run merge again',
+    );
+  });
+
+  it('refuses two records in the chain sharing a nonce', async () => {
+    const approved = itemRecord('approved');
+    const t = mergeSetup({
+      chain: ({ specBlob }) => [
+        posted(900, approved, '2026-10-01T08:00:00Z'),
+        posted(
+          901,
+          itemRecord('spec-approved', { spec_sha: specBlob, nonce: approved.nonce }),
+          '2026-10-01T08:30:00Z',
+        ),
+      ],
+    });
+
+    const r = await t.cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(new RegExp(`nonce ${approved.nonce}.*comment 900.*comment 901`));
+  });
+
+  it("refuses a record whose nonce the laptop's ledger saw on another comment", async () => {
+    const approved = itemRecord('approved');
+    const t = mergeSetup({
+      chain: (_, standard) => [posted(900, approved, '2026-10-01T08:00:00Z'), ...standard.slice(1)],
+    });
+    new NonceLedger(nonceLedgerPath(t.home)).claim(approved.nonce, `${REPO}#5/77`);
+
+    const r = await t.cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/comment 900.*first seen on another comment/);
+  });
+
+  it('refuses a record whose owner: label was added before its comment', async () => {
+    const t = mergeSetup({
+      chain: (_, [approved, spec]) => [
+        ...(approved === undefined ? [] : [approved]),
+        ...(spec === undefined
+          ? []
+          : [{ ...spec, label: labeledAt('owner:spec-approved', '2026-10-01T08:29:00Z') }]),
+      ],
+    });
+
+    const r = await t.cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/no verified owner:spec-approved.*comment 901/);
+  });
+
+  it.each([
+    ['empty', '# Add login\n\n## Problem\n\nVisitors cannot sign in.\n', /no acceptance criteria/],
+    [
+      'with a criterion line without an ID',
+      `${ITEM_SPEC}2. **Given** a guest, **When** they sign in, **Then** they are refused.\n`,
+      /spec\.md:\d+: /,
+    ],
+  ])('refuses a checked set of acceptance criteria %s (AC-097)', async (_, spec, why) => {
+    const r = await mergeSetup({ files: { 'specs/7-add-login/spec.md': spec } }).cli();
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(why);
+  });
+
+  it('a stale code-gate waiver is re-signed only as approve would sign it, so the merge stops when approve would', async () => {
+    const { t } = staleWaiver('gate:red-green');
+
+    const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/not signing: .*no red-green check yet/s);
+    expect(r.stderr).not.toContain(NOT_YET);
+  });
+
+  it('skips a stale test: waiver that covers nothing at the checked head, without asking', async () => {
+    const { t, moved } = staleWaiver(WEAK, { 'tests/calc.test.ts': calcTests([ADDS]) });
+
+    const r = await t.cli();
+
+    expect(r.stdout).toContain(
+      `the waiver for ${WEAK} covers nothing at ${moved}; no longer needed`,
+    );
+    expect(t.asked).toEqual([]);
+    expect(r.stderr).toContain(NOT_YET);
+  });
+
+  it('a declined re-sign of a stale test: waiver refuses the merge and signs nothing', async () => {
+    const { t } = staleWaiver(WEAK);
+    const before = itemThread().comments.length;
+
+    const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['n'] });
+
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain('diff since the waived head');
+    expect(r.stderr).toContain('nothing was merged');
+    expect(itemThread().comments).toHaveLength(before);
+  });
+
+  it('re-signs a stale test: waiver at the checked head with a fresh owner:waiver, and the new record verifies', async () => {
+    const { t, moved } = staleWaiver(WEAK);
+
+    const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+    expect(r.stdout).toContain('diff since the waived head');
+    expect(r.stdout).toContain(WEAK);
+    expect(r.stderr).toContain(NOT_YET);
+    const verdict = verifyGate({
+      ...{ keys: writeKeyFiles([owner]), secondCopy: owner.publicKey, ...itemThread() },
+      expected: {
+        ...{ repo: REPO, issue: ITEM, gate: 'waiver', tier: 2, branch: ITEM_BRANCH },
+        ...{ waives: WEAK, head: moved },
+      },
+    });
+    expect(verdict.ok).toBe(true);
+  });
+});

@@ -89,6 +89,10 @@ export function isCodeGateWaiver(waives: string): boolean {
   return waives.startsWith('gate:') && CODE_GATE.test(waives.slice('gate:'.length));
 }
 
+/** Waivers bound to the PR head: `gate:` code gates and every `test:` target. */
+export const headBound = (waives: string): boolean =>
+  waives.startsWith('test:') || isCodeGateWaiver(waives);
+
 type Presence = 'required' | 'optional';
 type GatedField = 'tier' | 'branch' | 'spec_sha' | 'scope' | 'waives' | 'head';
 const GATED: readonly GatedField[] = ['tier', 'branch', 'spec_sha', 'scope', 'waives', 'head'];

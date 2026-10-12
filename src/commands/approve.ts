@@ -19,7 +19,7 @@ import {
 import { NonceLedger, nonceLedgerPath } from '../approvals/nonces.js';
 import {
   extractFromComment,
-  isCodeGateWaiver,
+  headBound,
   signableTestTarget,
   newNonce,
   parse,
@@ -156,7 +156,11 @@ function readBranch(project: Project, branch: string): BranchView | string {
   if (failed !== undefined) return `cannot fetch ${branch}: ${failed}`;
   const rev = git(project, ['rev-parse', '--verify', `origin/${branch}^{commit}`]);
   if (rev.status !== 0) return `cannot resolve origin/${branch}`;
-  const commit = rev.stdout.trim();
+  return viewAt(project, branch, rev.stdout.trim());
+}
+
+/** The summary files of the item branch at `commit`, which is already fetched. */
+function viewAt(project: Project, branch: string, commit: string): BranchView {
   const dir = `specs/${branch.slice('claude/'.length)}`;
   const show = (name: string) => {
     const r = git(project, ['show', `${commit}:${dir}/${name}`]);
@@ -214,9 +218,8 @@ interface Gathered {
 /** One weakened run per merge base and head in a process: its findings depend on nothing else. */
 const weakenedRuns = new Map<string, WeakFinding[]>();
 
-/** The weakened findings at `head`, from this laptop's own run, always in the sandbox. */
-function weakenedAt(project: Project, head: string): WeakFinding[] {
-  const main = git(project, ['rev-parse', '--verify', 'origin/main^{commit}']).stdout.trim();
+/** The weakened findings at `head` against `main`, from this laptop's run, always sandboxed. */
+function weakenedAt(project: Project, main: string, head: string): WeakFinding[] {
   const key = `${project.cwd}\0${main}\0${head}`;
   let found = weakenedRuns.get(key);
   if (found === undefined) {
@@ -226,6 +229,10 @@ function weakenedAt(project: Project, head: string): WeakFinding[] {
   }
   return found;
 }
+
+/** The weakened findings at `head` that a `test:` waiver for `waives` covers (one run per head). */
+export const coveredAt = (project: Project, waives: string, main: string, head: string) =>
+  weakenedAt(project, main, head).filter((f) => covers(waives, f));
 
 /**
  * The view to re-sign from when the item's last signed waiver for `waives` covered another head:
@@ -237,6 +244,7 @@ async function resignFrom(
   waives: string,
   head: string,
   keys: ReleaseKeys,
+  main: string,
 ): Promise<SummaryFacts['resign']> {
   const comments = await listComments(project.repo, issue, project);
   for (const comment of [...comments].reverse()) {
@@ -254,7 +262,7 @@ async function resignFrom(
     if (waived === head) return undefined;
     fetchBranch(project, waived); // the waived head may be gone after a force-push
     const env = project.env ?? process.env;
-    return { head: waived, ...resignView(project.cwd, 'origin/main', waived, head, env) };
+    return { head: waived, ...resignView(project.cwd, main, waived, head, env) };
   }
   return undefined;
 }
@@ -297,38 +305,126 @@ async function fieldsFor(
     return { fields: { tier, branch, spec_sha }, info, view, previous };
   }
   const target = waives ?? '';
-  if (target.startsWith('test:')) {
-    if (!signableTestTarget(target))
-      throw new RefusedError(
-        `${visible(target)} holds a character the summary would have to clean (a control, format or line-break character, or edge spaces): rename the test`,
-      );
-    const { tier, branch } = await approvedRecord(project, issue, keys());
-    // One commit throughout: the weakened run, the findings covered and the record's head.
-    const view = await readHead(project, branch);
-    const covered = weakenedAt(project, view.commit).filter((f) => covers(target, f));
-    if (covered.length === 0)
-      throw new RefusedError(
-        `nothing to waive: ${target} covers no weakened test at ${view.commit.slice(0, 12)}`,
-      );
-    const resign = await resignFrom(project, issue, target, view.commit, keys());
-    const fields = { tier, branch, waives: target, head: view.commit };
-    return { fields, info, view, covered, ...(resign === undefined ? {} : { resign }) };
-  }
   if (target.startsWith('check:') || target.startsWith('dep:'))
     throw new RefusedError(
       `waivers on pull requests (${target.split(':')[0] ?? ''}:) are not supported in this build yet`,
     );
   if (!target.startsWith('gate:')) return { fields: { waives: target }, info };
   const { tier, branch } = await approvedRecord(project, issue, keys());
-  if (!isCodeGateWaiver(target)) {
-    const view = readBranch(project, branch);
-    const read = typeof view === 'string' ? {} : { view };
-    return { fields: { tier, branch, waives: target }, info, ...read };
+  const view = readBranch(project, branch);
+  const read = typeof view === 'string' ? {} : { view };
+  return { fields: { tier, branch, waives: target }, info, ...read };
+}
+
+/** A head-bound waiver, to sign at `head`, the commit the caller resolved the item branch to. */
+export interface HeadBoundWaiver {
+  issue: number;
+  waives: string;
+  /** From the item's verified `approved` record. */
+  tier: Tier;
+  branch: string;
+  head: string;
+  /** Main's commit, the base of the weakened run and of the re-sign view. */
+  main: string;
+  keys: ReleaseKeys;
+}
+
+function assertSignable(waives: string): void {
+  if (waives.startsWith('test:') && !signableTestTarget(waives))
+    throw new RefusedError(
+      `${visible(waives)} holds a character the summary would have to clean (a control, format or line-break character, or edge spaces): rename the test`,
+    );
+}
+
+/**
+ * The one signing path for a head-bound waiver, used by `approve` and by `merge` re-signing a
+ * stale one: read the summary files at `head`, run the weakened check there for a `test:` target
+ * (sandboxed), show the summary with the re-sign view, refuse if a part is missing, then sign,
+ * post and label. `confirm` runs after the summary is shown and before anything is signed.
+ */
+export async function signHeadBoundWaiver(
+  ctx: CommandContext,
+  project: Project,
+  w: HeadBoundWaiver,
+  confirm?: () => Promise<void>,
+): Promise<void> {
+  assertSignable(w.waives);
+  const info = await viewIssue(project, w.issue);
+  const view = viewAt(project, w.branch, w.head);
+  let covered: WeakFinding[] | undefined;
+  if (w.waives.startsWith('test:')) {
+    // One commit throughout: the weakened run, the findings covered and the record's head.
+    covered = coveredAt(project, w.waives, w.main, w.head);
+    if (covered.length === 0)
+      throw new RefusedError(
+        `nothing to waive: ${w.waives} covers no weakened test at ${w.head.slice(0, 12)}`,
+      );
   }
-  const read = await readHead(project, branch);
-  const resign = await resignFrom(project, issue, target, read.commit, keys());
-  const fields = { tier, branch, waives: target, head: read.commit };
-  return { fields, info, view: read, ...(resign === undefined ? {} : { resign }) };
+  const resign = await resignFrom(project, w.issue, w.waives, w.head, w.keys, w.main);
+  const fields = { tier: w.tier, branch: w.branch, waives: w.waives, head: w.head };
+  const gathered = { fields, info, view, ...(covered === undefined ? {} : { covered }) };
+  await signAndPost(
+    ctx,
+    project,
+    w.issue,
+    'waiver',
+    {
+      ...gathered,
+      ...(resign === undefined ? {} : { resign }),
+    },
+    confirm,
+  );
+}
+
+/** Show the summary, refuse if a part is missing, then sign, post, and add a fresh owner: label. */
+async function signAndPost(
+  ctx: CommandContext,
+  project: Project,
+  issue: number,
+  gate: SummaryFacts['gate'],
+  gathered: Gathered,
+  confirm?: () => Promise<void>,
+): Promise<void> {
+  const { fields, info, view, previous, covered, resign } = gathered;
+  const summary = buildSummary({
+    gate,
+    issue: info,
+    ...fields,
+    commit: view?.commit,
+    files: view?.files,
+    previousSpec: previous,
+    covered,
+    resign,
+  });
+  if (!summary.ok)
+    throw new RefusedError(
+      `not signing: the approval summary is incomplete:\n  ${summary.missing.join('\n  ')}`,
+    );
+  ctx.io.stdout.write(`${summary.text}\n`);
+  await confirm?.();
+  const record: ApprovalRecord = {
+    repo: project.repo,
+    issue,
+    gate,
+    ...fields,
+    timestamp: recordTimestamp(ctx.now()),
+    nonce: newNonce(),
+  };
+  let text: string;
+  try {
+    text = serialise(record);
+  } catch (err) {
+    if (err instanceof RecordError) throw new UsageError(err.message);
+    throw err;
+  }
+  ctx.io.stdout.write(`Signing for ${project.repo}#${String(issue)}:\n\n${text}\n`);
+
+  await postSigned(ctx, project, record);
+  // A fresh label-add after the record, so the new record is the one backing the label.
+  const label = `owner:${gate}`;
+  if (info.labels.includes(label)) await removeLabel(project.repo, issue, label, project);
+  await addLabel(project.repo, issue, label, project);
+  ctx.io.stdout.write(`Applied ${label} to #${String(issue)}.\n`);
 }
 
 /** Warn while main has no Owner-signed `Factory-Merge: define`; never refuses. */
@@ -383,51 +479,22 @@ export async function approve(ctx: CommandContext): Promise<number> {
     ctx.io.stderr.write(text);
   };
   const mainKeyLists = () => (keys ??= mainKeys(project.cwd, env, scratch, project.home, warn));
-  let gathered: Gathered;
   try {
-    gathered = await fieldsFor(ctx, project, issue, gate, waives, mainKeyLists);
+    if (gate === 'waiver' && headBound(waives ?? '')) {
+      const target = waives ?? '';
+      assertSignable(target);
+      const { tier, branch } = await approvedRecord(project, issue, mainKeyLists());
+      const { commit: head } = await readHead(project, branch);
+      const main = git(project, ['rev-parse', '--verify', 'origin/main^{commit}']).stdout.trim();
+      const w = { issue, waives: target, tier, branch, head, main, keys: mainKeyLists() };
+      await signHeadBoundWaiver(ctx, project, w);
+      return ExitCode.Ok;
+    }
+    const gathered = await fieldsFor(ctx, project, issue, gate, waives, mainKeyLists);
     if (gate === 'approved') warnBriefUnmerged(ctx, project, mainKeyLists, scratch);
+    await signAndPost(ctx, project, issue, gate, gathered);
+    return ExitCode.Ok;
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-  const { fields, info, view, previous, covered, resign } = gathered;
-  const summary = buildSummary({
-    gate,
-    issue: info,
-    ...fields,
-    commit: view?.commit,
-    files: view?.files,
-    previousSpec: previous,
-    covered,
-    resign,
-  });
-  if (!summary.ok)
-    throw new RefusedError(
-      `not signing: the approval summary is incomplete:\n  ${summary.missing.join('\n  ')}`,
-    );
-  ctx.io.stdout.write(`${summary.text}\n`);
-  const record: ApprovalRecord = {
-    repo: project.repo,
-    issue,
-    gate,
-    ...fields,
-    timestamp: recordTimestamp(ctx.now()),
-    nonce: newNonce(),
-  };
-  let text: string;
-  try {
-    text = serialise(record);
-  } catch (err) {
-    if (err instanceof RecordError) throw new UsageError(err.message);
-    throw err;
-  }
-  ctx.io.stdout.write(`Signing for ${project.repo}#${String(issue)}:\n\n${text}\n`);
-
-  await postSigned(ctx, project, record);
-  // A fresh label-add after the record, so the new record is the one backing the label.
-  const label = `owner:${gate}`;
-  if (info.labels.includes(label)) await removeLabel(project.repo, issue, label, project);
-  await addLabel(project.repo, issue, label, project);
-  ctx.io.stdout.write(`Applied ${label} to #${String(issue)}.\n`);
-  return ExitCode.Ok;
 }

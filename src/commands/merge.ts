@@ -4,8 +4,8 @@
 // so a key that is no longer the newest fails before any slow step; a pause (AC-078) and a session
 // the dispatcher shows running (AC-088), each a warning the Owner must confirm, since both are
 // telemetry; the branch's merge rule (T143); until `factory ci formal` ships (T165), no tier 3 item
-// and no change under `formal/`; for an item, the once-only rule (AC-088) and a verified
-// `owner:approved`.
+// and no change under `formal/`; for an item, the once-only rule (AC-088), the whole approval
+// chain, the criterion set (AC-097), and stale head-bound waivers re-signed or the merge stops.
 //
 // Slice 22a stops there: the merge itself comes with slice 22b, so every run ends refusing with
 // nothing merged.
@@ -14,6 +14,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { keyOf, newestKey, secondCopy } from '../approvals/keys.js';
 import { ownerKeyPath } from '../approvals/sign.js';
+import { checkedSet } from '../ci/ac-map.js';
 import type { CommandContext } from '../cli/commands.js';
 import { RefusedError, UsageError } from '../cli/env.js';
 import { pendingManifest } from '../dispatcher/manifest.js';
@@ -21,11 +22,12 @@ import { mergeBase, safeDiff } from '../git/diff.js';
 import { listComments } from '../github/comments.js';
 import { timeline } from '../github/timeline.js';
 import { checkedHead, checkedMain, type MainContext, type MergeContext } from '../merge/context.js';
+import { verifyChain } from '../merge/chain.js';
 import { mergeRules } from '../merge/rules.js';
 import { STATIONS } from '../model/types.js';
 import { NO_FORMAL } from '../notify/summary.js';
 import { derivePause, resumeEntries } from '../pause/derive.js';
-import { approvedRecord } from './approve.js';
+import { coveredAt, signHeadBoundWaiver } from './approve.js';
 
 const NOTHING = 'nothing was merged';
 
@@ -72,24 +74,59 @@ async function confirmSession(ctx: CommandContext, c: MergeContext): Promise<voi
   );
 }
 
-/** The item rules after T143's path rule: once only, a verified approval, tier 3 refused. */
-async function itemChecks(c: MergeContext, issue: number): Promise<void> {
+/**
+ * The item rules after T143's path rule: once only; the whole approval chain at the checked head
+ * (src/merge/chain.ts); tier 3 refused; the criterion set from the verified tier and branch
+ * (AC-097); then each stale head-bound waiver re-signed through approve's own waiver flow, or the
+ * merge stops.
+ */
+async function itemChecks(ctx: CommandContext, c: MergeContext, issue: number): Promise<void> {
   const merged = c.merges.find((m) => m.value === `#${String(issue)}`);
   if (merged !== undefined)
     throw new RefusedError(
       `#${String(issue)} is already merged: main has an Owner-signed Factory-Merge: #${String(issue)} at ${merged.commit}; ${NOTHING}`,
     );
-  const project = { repo: c.config.repo, inboxIssue: c.config.inbox_issue };
-  const { tier, branch } = await approvedRecord(
-    { ...project, home: c.home, cwd: c.cwd, env: c.env },
-    issue,
-    c.keys,
-  );
-  if (branch !== c.branch)
+  const chain = await verifyChain(c, issue);
+  if (chain.tier === 3) throw new RefusedError(`${NO_FORMAL}: factory merge refuses a tier 3 item`);
+
+  const set = checkedSet(c.cwd, c.main, c.head, chain.tier, chain.branch, c.env);
+  if (set.problems.length > 0)
     throw new RefusedError(
-      `the approved record for #${String(issue)} names ${branch}, not ${c.branch}; ${NOTHING}`,
+      `every acceptance criterion line needs one ID (AC-097); ${NOTHING}:\n  ${set.problems.join('\n  ')}`,
     );
-  if (tier === 3) throw new RefusedError(`${NO_FORMAL}: factory merge refuses a tier 3 item`);
+  if (set.ids.size === 0)
+    throw new RefusedError(
+      `the checked set is empty: spec.md at ${c.head.slice(0, 12)} has no acceptance criteria (AC-097); ${NOTHING}`,
+    );
+
+  if (chain.stale.length === 0) return;
+  const project = {
+    ...{ repo: c.config.repo, inboxIssue: c.config.inbox_issue },
+    ...{ home: c.home, cwd: c.cwd, env: c.env },
+  };
+  // A stale test: waiver covering no weakened test at the checked head is no longer needed.
+  const needed = chain.stale.filter((waives) => {
+    if (!waives.startsWith('test:')) return true;
+    if (coveredAt(project, waives, c.main, c.head).length > 0) return true;
+    ctx.io.stdout.write(`the waiver for ${waives} covers nothing at ${c.head}; no longer needed\n`);
+    return false;
+  });
+  for (const waives of needed) {
+    ctx.io.stdout.write(
+      `The waiver for ${waives} was signed for another head; re-sign it at the checked head ${c.head} or the merge stops.\n`,
+    );
+    const w = { issue, waives, tier: chain.tier, branch: chain.branch, head: c.head };
+    await signHeadBoundWaiver(ctx, project, { ...w, main: c.main, keys: c.keys }, async () => {
+      const answer = await ctx.ask(
+        `Sign a new waiver for ${waives} at ${c.head.slice(0, 12)}? [y/N] `,
+      );
+      if (!['y', 'yes'].includes(answer.trim().toLowerCase()))
+        throw new RefusedError(`the stale waiver ${waives} was not re-signed; ${NOTHING}`);
+    });
+  }
+  const still = (await verifyChain(c, issue)).stale.filter((w) => needed.includes(w));
+  if (still.length > 0)
+    throw new RefusedError(`a re-signed waiver does not verify at the checked head; ${NOTHING}`);
 }
 
 export async function merge(ctx: CommandContext): Promise<number> {
@@ -131,7 +168,7 @@ export async function merge(ctx: CommandContext): Promise<number> {
     const formal = changes.filter((f) => f.path.startsWith('formal/')).map((f) => f.path);
     if (formal.length > 0)
       throw new RefusedError(`${NO_FORMAL}: #${arg} changes ${formal.join(', ')}`);
-    if (result.issue !== undefined) await itemChecks(c, result.issue);
+    if (result.issue !== undefined) await itemChecks(ctx, c, result.issue);
     ctx.io.stdout.write(`#${arg} passes the rule ${result.rule}\n`);
 
     throw new RefusedError(`the merge itself comes with slice 22b; ${NOTHING}`);
