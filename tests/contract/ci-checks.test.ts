@@ -37,6 +37,7 @@ describe('Verify report check (AC-013)', () => {
       missing: [],
       checksPass: true,
       findingsResolved: true,
+      open: [],
     });
   });
 

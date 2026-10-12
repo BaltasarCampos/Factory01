@@ -9,6 +9,7 @@
 import { isCodeGateWaiver } from '../approvals/record.js';
 import type { ApprovalGate, Tier } from '../model/types.js';
 import { parseTasks } from '../stations/checks/plan.js';
+import { namesId } from '../ci/ac-map.js';
 import { checkSpec, meaningful, section } from '../stations/checks/spec.js';
 import { checkVerifyReport } from '../stations/checks/verify.js';
 
@@ -72,7 +73,7 @@ export interface PauseFacts {
 }
 
 export interface SummaryFacts {
-  gate: Extract<ApprovalGate, 'approved' | 'spec-approved' | 'waiver' | 'resume'>;
+  gate: Extract<ApprovalGate, 'approved' | 'spec-approved' | 'waiver' | 'resume'> | 'merge';
   /** The row of the per-gate list; derived from `gate` when absent (merge and deploy set it). */
   kind?: SummaryGate | undefined;
   issue: { number: number; title: string; body: string; labels: readonly string[] };
@@ -99,6 +100,39 @@ export interface SummaryFacts {
   covered?: readonly { target: string; what: string }[] | undefined;
   /** Re-signing a head-bound waiver: the earlier waiver's head and what changed since (T151). */
   resign?: { head: string; kind: 'diff' | 'interdiff' | 'gone'; text: string } | undefined;
+  /** `factory merge` of a work item: what its checks found at `commit` (T068). */
+  merge?: MergeView | undefined;
+}
+
+/** What `factory merge`'s checks found for a work item at the checked head; nothing is re-run. */
+export interface MergeView {
+  pr: { number: number; title: string };
+  diffstat: readonly { path: string; status: string; added: number; removed: number }[];
+  /** Every changed test file, whatever its line counts. */
+  testFiles: readonly string[];
+  /** `edges.ts`'s early warning: shown, never a refusal; only the sandboxed run decides. */
+  early: {
+    findings: readonly { message: string; target: string; waiver?: string | undefined }[];
+    problems: readonly string[];
+    /** Issues quarantines name; agent-writable, so never verified here. */
+    quarantines: readonly number[];
+  };
+  /** The sandboxed weakened run's findings, each covered by a `test:` waiver in force. */
+  weakened: readonly { target: string; what: string; waiver?: string | undefined }[];
+  /** Titles of the head's tests that pass cleanly. */
+  passing: readonly string[];
+  /** The checked set of acceptance criteria. */
+  checked: readonly string[];
+  ci: readonly {
+    job: string;
+    workflow: string;
+    state: string;
+    failedBefore: number;
+    failedRuns: number;
+  }[];
+  redGreen: { skipped: true; files: readonly string[] } | { skipped: false; checked: number };
+  /** Waiver targets in force at the checked head. */
+  waivers: readonly string[];
 }
 
 export type Summary = { ok: true; text: string } | { ok: false; missing: string[] };
@@ -150,9 +184,83 @@ function specSection(spec: string, name: string): string[] {
 const noSpec = (f: SummaryFacts) => ({ missing: `no spec.md on ${f.branch ?? 'the branch'}` });
 const checkName = (f: SummaryFacts) => (f.waives ?? '').slice('gate:'.length);
 
+const noMerge = { missing: "the merge checks' results were not passed in" };
+
+/** Open findings from the verify report, and the waivers in force at the checked head. */
+function mergeRisks(f: SummaryFacts): string[] {
+  const open = f.files?.verify === undefined ? [] : checkVerifyReport(f.files.verify).open;
+  return [
+    ...(open.length === 0
+      ? ['Open findings: none in reports/verify.md']
+      : ['Open findings:', ...quoted(source(f, 'reports/verify.md'), open.map(visible))]),
+    `Waivers in force: ${(f.merge?.waivers ?? []).map(visible).join(', ') || 'none'}`,
+  ];
+}
+
 const noPause = { missing: 'the pause could not be read from the inbox label history' };
 
+const each = (lines: readonly string[]) => (lines.length === 0 ? ['none'] : lines);
+const counted = (n: number, what: string) =>
+  n === 0 ? [] : [`${plural(n, `earlier ${what}`)} failed`];
+
+/** The item merge's What changed: every string from the branch shown through visible(). */
+function mergeChanged(f: SummaryFacts, m: MergeView): string[] {
+  const early = m.early;
+  return [
+    `Request #${String(f.issue.number)}: ${visible(f.issue.title)}`,
+    `Pull request #${String(m.pr.number)}: ${visible(m.pr.title)}`,
+    `Checked head ${f.commit ?? ''}`,
+    `${plural(m.diffstat.length, 'file')} changed since the merge base:`,
+    ...m.diffstat.map(
+      (d) => `${d.status} +${String(d.added)} -${String(d.removed)} ${visible(d.path)}`,
+    ),
+    'Changed test files (each listed, even when its counts net to zero):',
+    ...each(m.testFiles.map(visible)),
+    'Early warning from the test-diff rules (shown only; the sandboxed run below decides):',
+    ...each([
+      ...early.findings.map(
+        (e) =>
+          `${visible(e.message)}; waiver: ${e.waiver === undefined ? 'none' : visible(e.waiver)}`,
+      ),
+      ...early.problems.map(visible),
+      ...early.quarantines.map((n) => `quarantined per #${String(n)} (not verified)`),
+    ]),
+    `Weakened at the checked head (sandboxed run):`,
+    ...each(
+      m.weakened.map(
+        (w) =>
+          `${visible(w.target)}: ${visible(w.what)}; covered by ${w.waiver === undefined ? 'none' : visible(w.waiver)}`,
+      ),
+    ),
+  ];
+}
+
+const mergeMapping = (m: MergeView): string[] =>
+  m.checked.map((id) => {
+    const tests = m.passing.filter((t) => namesId(t, id)).map(visible);
+    return `${id} → ${tests.length > 0 ? tests.join('; ') : 'no passing test'}`;
+  });
+
+function mergeResults(m: MergeView): string[] {
+  const rg = m.redGreen;
+  return [
+    'CI on the checked head (GitHub Actions workflow runs):',
+    ...m.ci.map((j) =>
+      [
+        `${j.job} (${j.workflow}): ${j.state}`,
+        ...counted(j.failedBefore, 'attempt'),
+        ...counted(j.failedRuns, 'run'),
+      ].join('; '),
+    ),
+    rg.skipped
+      ? `red-green skipped: only test code changed (${rg.files.map(visible).join(', ')})`
+      : `red-green: ${String(rg.checked)} ${rg.checked === 1 ? 'criterion goes' : 'criteria go'} from failing to passing`,
+    'ac-map: every checked criterion has a passing test',
+  ];
+}
+
 function changed(f: SummaryFacts, gate: SummaryGate): Part {
+  if (gate === 'merge') return f.merge === undefined ? noMerge : mergeChanged(f, f.merge);
   if (gate === 'resume') {
     const p = f.pause;
     if (p === undefined) return noPause;
@@ -200,6 +308,7 @@ function changed(f: SummaryFacts, gate: SummaryGate): Part {
 }
 
 function mapping(f: SummaryFacts, gate: SummaryGate): Part {
+  if (gate === 'merge') return f.merge === undefined ? noMerge : mergeMapping(f.merge);
   const spec = f.files?.spec;
   if (spec === undefined) return noSpec(f);
   const { acs } = checkSpec(spec);
@@ -240,7 +349,9 @@ function results(f: SummaryFacts, gate: SummaryGate): Part {
   if (report === undefined) return { missing: `no reports/verify.md on ${f.branch ?? ''}` };
   const r = checkVerifyReport(report);
   const lines = r.complete ? ['reports/verify.md: all checks pass'] : r.missing;
-  return quoted(source(f, 'reports/verify.md'), lines);
+  if (gate !== 'merge') return quoted(source(f, 'reports/verify.md'), lines);
+  if (f.merge === undefined) return noMerge;
+  return [...mergeResults(f.merge), ...quoted(source(f, 'reports/verify.md'), lines.map(visible))];
 }
 
 function usage(f: SummaryFacts): Part {
@@ -318,9 +429,19 @@ function risks(f: SummaryFacts, gate: SummaryGate): Part {
   const spec = f.files?.spec;
   if (spec === undefined) return noSpec(f);
   const listed = specSection(spec, 'Risks');
-  if (listed.length > 0) return [...tier, ...quoted(source(f), listed)];
+  const merge = gate === 'merge' ? mergeRisks(f) : [];
+  if (listed.length > 0)
+    return [
+      ...tier,
+      ...quoted(source(f), gate === 'merge' ? listed.map(visible) : listed),
+      ...merge,
+    ];
   if (f.tier === 3) return { missing: 'tier 3 needs a Risks section in spec.md' };
-  return [...tier, 'none identified (spec.md has no Risks section; required only at tier 3)'];
+  return [
+    ...tier,
+    'none identified (spec.md has no Risks section; required only at tier 3)',
+    ...merge,
+  ];
 }
 
 const PARTS: Readonly<Record<SummaryPart, (f: SummaryFacts, gate: SummaryGate) => Part>> = {

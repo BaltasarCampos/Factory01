@@ -25,6 +25,8 @@ export interface VerifyResult extends CheckResult {
   checksPass: boolean;
   /** No blocking finding is open. */
   findingsResolved: boolean;
+  /** The open blocking findings, as the report words them. */
+  open: string[];
 }
 
 export function checkVerifyReport(text: string): VerifyResult {
@@ -59,6 +61,7 @@ export function checkVerifyReport(text: string): VerifyResult {
     missing,
     checksPass: failing.length === 0,
     findingsResolved: open.length === 0,
+    open,
   };
 }
 
