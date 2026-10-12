@@ -6,7 +6,13 @@
 // finding names the waiver that would cover it; `edges.ts`'s diff rules stay the early warning.
 import { mergeBase, resolveCommit } from '../git/diff.js';
 import { TEST_CONFIG, type TestConfig } from '../stations/edges.js';
-import { cleanPass, inWorkspace, type Isolation, type TestRun } from './vitest-run.js';
+import {
+  cleanPass,
+  inWorkspace,
+  type Isolation,
+  type TestRun,
+  type Workspace,
+} from './vitest-run.js';
 
 /** A test that passed at the base and did not run cleanly at the head. */
 export interface WeakFinding {
@@ -82,13 +88,24 @@ export function weakened(
   const start = mergeBase(repo, base, to, env);
   return inWorkspace(repo, to, { isolation: options.isolation, config, env }, (ws) => {
     const headFiles = new Set(ws.write('head', to));
-    ws.write('base', start);
-    const baseRun = ws.test('base');
-    const findings = judgeWeakened(baseRun, ws.test('head'), headFiles);
-    return {
-      findings,
-      head: to,
-      passed: baseRun.tests.filter((t) => t.status === 'passed' && !t.fails).length,
-    };
+    return { ...weakenedIn(ws, start, headFiles, ws.test('head')), head: to };
   });
+}
+
+/**
+ * The check in a workspace whose `head` tree holds `headFiles` and already ran as `headRun`, so a
+ * caller running other checks on the same head runs it once (`factory merge`).
+ */
+export function weakenedIn(
+  ws: Workspace,
+  start: string,
+  headFiles: ReadonlySet<string>,
+  headRun: TestRun,
+): { findings: WeakFinding[]; passed: number } {
+  ws.write('base', start);
+  const baseRun = ws.test('base');
+  return {
+    findings: judgeWeakened(baseRun, headRun, headFiles),
+    passed: baseRun.tests.filter((t) => t.status === 'passed' && !t.fails).length,
+  };
 }

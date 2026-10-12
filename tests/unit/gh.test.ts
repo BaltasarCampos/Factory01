@@ -209,8 +209,9 @@ describe('GitHub helpers (T028)', () => {
     seed({ repos: { [REPO]: { prs: [{ number: 7, headRefName: 'claude/7-x' }] } } });
     await postComment(REPO, 7, 'waiver', { thread: 'pr' });
     expect((await listComments(REPO, 7, { thread: 'pr' })).map((c) => c.body)).toEqual(['waiver']);
-    // As on GitHub, the issue reader cannot read a pull request's thread.
+    // As on GitHub, the issue reader cannot read a pull request's thread, but its timeline is there.
     await expect(listComments(REPO, 7)).rejects.toThrow(/Could not resolve to an issue/);
+    expect(await timeline(REPO, 7)).toEqual([]);
   });
 
   it('pull requests: one draft PR is created, viewed by number or branch, listed, closed', async () => {

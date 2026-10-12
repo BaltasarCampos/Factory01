@@ -1,0 +1,91 @@
+{
+  "comment": "The GitHub Actions jobs factory merge requires green on the checked head, by branch kind. workflow is the template under factory/, installed the path it runs from in a project (the factory repository runs self/ci.yml as factory-self.yml); a job is read only from runs of its installed workflow file. A job with paths is required only when the pull request changes a matching file; the only pattern form is **/<file name>. tests/contract/required-checks.test.ts ties this list to the workflow templates.",
+  "jobs": [
+    {
+      "workflow": "workflows/ci.yml",
+      "installed": ".github/workflows/ci.yml",
+      "job": "build-test",
+      "if": null,
+      "kinds": ["item", "define", "upgrade", "log"]
+    },
+    {
+      "workflow": "workflows/ci.yml",
+      "installed": ".github/workflows/ci.yml",
+      "job": "coverage",
+      "if": "github.event_name == 'pull_request'",
+      "kinds": ["item", "define", "upgrade", "log"]
+    },
+    {
+      "workflow": "workflows/ci.yml",
+      "installed": ".github/workflows/ci.yml",
+      "job": "ac-map",
+      "if": "needs.item.outputs.issue != ''",
+      "kinds": ["item"]
+    },
+    {
+      "workflow": "workflows/ci.yml",
+      "installed": ".github/workflows/ci.yml",
+      "job": "red-green",
+      "if": "needs.item.outputs.issue != ''",
+      "kinds": ["item"]
+    },
+    {
+      "workflow": "workflows/ci.yml",
+      "installed": ".github/workflows/ci.yml",
+      "job": "weakened",
+      "if": "github.event_name == 'pull_request'",
+      "kinds": ["item", "define", "upgrade", "log"]
+    },
+    {
+      "workflow": "workflows/ci.yml",
+      "installed": ".github/workflows/ci.yml",
+      "job": "size",
+      "if": "github.event_name == 'pull_request'",
+      "kinds": ["item", "define", "upgrade", "log"]
+    },
+    {
+      "workflow": "workflows/security.yml",
+      "installed": ".github/workflows/security.yml",
+      "job": "semgrep",
+      "if": null,
+      "kinds": ["item", "define", "upgrade", "log"]
+    },
+    {
+      "workflow": "workflows/security.yml",
+      "installed": ".github/workflows/security.yml",
+      "job": "gitleaks",
+      "if": null,
+      "kinds": ["item", "define", "upgrade", "log"]
+    },
+    {
+      "workflow": "workflows/append-only.yml",
+      "installed": ".github/workflows/append-only.yml",
+      "job": "append-only",
+      "if": null,
+      "kinds": ["item", "define", "upgrade", "log"],
+      "paths": ["**/events.jsonl"]
+    },
+    {
+      "workflow": "self/ci.yml",
+      "installed": ".github/workflows/factory-self.yml",
+      "job": "build-test",
+      "if": null,
+      "kinds": ["factory-repository"]
+    },
+    {
+      "workflow": "self/ci.yml",
+      "installed": ".github/workflows/factory-self.yml",
+      "job": "formal",
+      "if": null,
+      "kinds": ["factory-repository"]
+    }
+  ],
+  "exempt": [
+    {
+      "workflow": "workflows/ci.yml",
+      "installed": ".github/workflows/ci.yml",
+      "job": "item",
+      "why": "a helper that reads the item's issue and tier for ac-map and red-green, which are required for items"
+    }
+  ]
+}
