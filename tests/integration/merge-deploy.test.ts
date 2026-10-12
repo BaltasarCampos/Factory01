@@ -2,7 +2,15 @@
 // (AC-081–AC-083, AC-086, FR-016g) against src/merge/rules.ts, with the inputs `factory merge`
 // will pass in; the command's own cases come with slices 22a, 22a-2, 22a-3, 22b and 23a.
 import { randomBytes } from 'node:crypto';
-import { chmodSync, copyFileSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import type { ReleaseKeys } from '../../src/approvals/keys.js';
@@ -512,6 +520,10 @@ interface MergeSetup {
   inbox?: FakeLabelEvent[];
   /** Runs on the project once main is set up, before the item branch. */
   project?: (repo: TestRepo) => void;
+  /** The item's labels, when not `tier:<tier>` and `owner:approved`. */
+  labels?: string[];
+  /** The repository the PR's head branch lives in, when it is a fork. */
+  headRepository?: string;
 }
 
 function mergeSetup(o: MergeSetup = {}) {
@@ -568,7 +580,10 @@ function mergeSetup(o: MergeSetup = {}) {
           {
             number: ITEM,
             title: 'Add login',
-            labels: [`tier:${String(tier ?? 2)}`, ...(tier === null ? [] : ['owner:approved'])],
+            labels: o.labels ?? [
+              `tier:${String(tier ?? 2)}`,
+              ...(tier === null ? [] : ['owner:approved']),
+            ],
             ...(tier === null
               ? {}
               : {
@@ -577,7 +592,12 @@ function mergeSetup(o: MergeSetup = {}) {
                 }),
           },
         ],
-        prs: [{ number: ITEM_PR, headRefName: branchName }],
+        prs: [
+          {
+            ...{ number: ITEM_PR, headRefName: branchName },
+            ...(o.headRepository === undefined ? {} : { headRepository: o.headRepository }),
+          },
+        ],
       },
     },
   });
@@ -593,12 +613,12 @@ function mergeSetup(o: MergeSetup = {}) {
       HOME: home,
       FACTORY_SOURCE: factory.path,
     };
-    Object.assign(env, over.env);
     delete env.CLAUDE_CODE_REMOTE;
+    Object.assign(env, over.env);
     const code = await runCli(argv, {
       stdout: { write: (s: string) => void out.push(s) },
       stderr: { write: (s: string) => void err.push(s) },
-      ...{ env, stdinIsTTY: true, cwd: repo.path },
+      ...{ env, stdinIsTTY: over.tty ?? true, cwd: repo.path },
       unreadAlerts: () => Promise.resolve([]),
       ask: (question) => {
         asked.push(question);
@@ -622,6 +642,7 @@ function mergeSetup(o: MergeSetup = {}) {
 interface CliOver {
   answers?: string[];
   env?: NodeJS.ProcessEnv;
+  tty?: boolean;
 }
 
 const ghCalls = () => calls().map((c) => c.join(' '));
@@ -801,6 +822,67 @@ describe(
         /no \.factory\/config on main: this is not a factory project; run factory new or factory adopt/,
       );
       expect(r.stderr).not.toMatch(/by hand/);
+    });
+    it.each([
+      ['in a cloud session', { env: { CLAUDE_CODE_REMOTE: 'true' } }],
+      ['without a terminal', { tty: false }],
+    ])('refuses %s, before fetching anything', async (_, over: CliOver) => {
+      const t = mergeSetup();
+
+      const r = await t.cli(['merge', String(ITEM_PR)], over);
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/runs only on the Owner's laptop/);
+      expect(existsSync(join(t.repo.path, '.git', 'FETCH_HEAD'))).toBe(false);
+      expect(ghCalls()).toEqual([]);
+    });
+
+    it('refuses a pull request from a fork, even with the same branch name, before fetching its branch', async () => {
+      const t = mergeSetup({ headRepository: 'someone/project' });
+      const tracking = `refs/remotes/origin/${ITEM_BRANCH}`;
+      t.repo.git(['update-ref', '-d', tracking]);
+
+      const r = await t.cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        `#${String(ITEM_PR)} comes from a fork (someone/project); nothing was merged`,
+      );
+      expect(() => t.repo.revParse(tracking)).toThrow();
+    });
+
+    it('takes the tier from the verified approved record, never from the issue labels', async () => {
+      const three = await mergeSetup({ tier: 3, labels: ['tier:1', 'owner:approved'] }).cli();
+      const two = await mergeSetup({ tier: 2, labels: ['tier:3', 'owner:approved'] }).cli();
+
+      expect(three.stderr).toContain(NO_FORMAL);
+      expect(two.stderr).not.toContain(NO_FORMAL);
+      expect(two.stderr).toContain(NOT_YET);
+    });
+
+    it('counts Factory-Merge: only on first-parent merges: one reached through a second parent does not make the item merged', async () => {
+      const t = mergeSetup({
+        project: (repo) => {
+          branch(repo, 'claude/9-other', { 'src/other.ts': 'other\n' });
+          branch(repo, 'claude/7-side', { 'src/side.ts': 'side\n' });
+          repo.checkout('claude/9-other');
+          const message = 'Merge claude/7-side\n\nFactory-Merge: #7';
+          repo.git(['merge', '-q', '--no-ff', '--no-gpg-sign', '-m', message, 'claude/7-side']);
+          mergeIntoMain(repo, 'claude/9-other', '#9', { signWith: owner });
+        },
+      });
+      const side = runGit(t.repo.origin, [
+        'log',
+        '--format=%H',
+        '--grep=Factory-Merge: #7',
+        'main',
+      ]);
+
+      const r = await t.cli();
+
+      expect(side).toMatch(/^[0-9a-f]{40}$/);
+      expect(r.stderr).not.toMatch(/already merged/);
+      expect(r.stderr).toContain(NOT_YET);
     });
   },
 );

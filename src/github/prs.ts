@@ -23,9 +23,15 @@ export interface PullRequest {
   isDraft: boolean;
   state: 'OPEN' | 'CLOSED' | 'MERGED';
   url: string;
+  /** The head branch's repository as `owner/name`; undefined once that repository is deleted. */
+  headRepository: string | undefined;
+  isCrossRepository: boolean;
 }
 
-const FIELDS = 'number,title,body,author,headRefName,baseRefName,headRefOid,isDraft,state,url';
+const FIELDS = [
+  'number,title,body,author,headRefName,baseRefName,headRefOid,isDraft,state,url',
+  'headRepository,headRepositoryOwner,isCrossRepository',
+].join(',');
 const STATES = ['OPEN', 'CLOSED', 'MERGED'] as const;
 
 function toPr(value: unknown): PullRequest {
@@ -45,6 +51,11 @@ function toPr(value: unknown): PullRequest {
     isDraft: f.bool('isDraft'),
     state,
     url: f.str('url'),
+    headRepository:
+      f.has('headRepository') && f.has('headRepositoryOwner')
+        ? `${f.login('headRepositoryOwner')}/${f.field('headRepository').str('name')}`
+        : undefined,
+    isCrossRepository: f.bool('isCrossRepository'),
   };
 }
 

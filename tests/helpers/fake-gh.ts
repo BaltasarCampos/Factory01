@@ -47,6 +47,8 @@ export interface FakePr {
   state: 'OPEN' | 'CLOSED';
   comments: FakeComment[];
   createdAt: string;
+  /** `owner/name` of the head branch's repository, when not the base repository (a fork). */
+  headRepository?: string;
 }
 
 export interface FakeLabel {
@@ -125,6 +127,7 @@ function normaliseRepo(repo: DeepPartialRepo, clock: string): FakeRepo {
       state: p.state ?? 'OPEN',
       comments: p.comments ?? [],
       createdAt: p.createdAt ?? clock,
+      ...(p.headRepository === undefined ? {} : { headRepository: p.headRepository }),
     })),
   };
 }
@@ -346,6 +349,8 @@ function prJson(repoFull: string, repo: FakeRepo, pr: FakePr): Record<string, un
   const live = headOid(repo, pr.headRefName);
   if (live !== undefined && pr.state === 'OPEN') pr.headRefOid = live;
   const merged = isMerged(repo, pr);
+  const headRepo = pr.headRepository ?? repoFull;
+  const [headOwner = '', headName = ''] = headRepo.split('/');
   return {
     number: pr.number,
     title: pr.title,
@@ -359,6 +364,9 @@ function prJson(repoFull: string, repo: FakeRepo, pr: FakePr): Record<string, un
     comments: pr.comments.map(commentJson),
     createdAt: pr.createdAt,
     url: `https://github.com/${repoFull}/pull/${String(pr.number)}`,
+    headRepository: { id: 'R_head', name: headName },
+    headRepositoryOwner: { id: 'U_head', login: headOwner },
+    isCrossRepository: headRepo !== repoFull,
   };
 }
 

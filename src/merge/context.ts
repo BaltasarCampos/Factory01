@@ -128,6 +128,12 @@ export async function checkedHead(at: MainContext, number: number): Promise<Merg
     throw new RefusedError(`#${String(number)} is ${pr.state.toLowerCase()}; ${NOTHING}`);
   if (pr.baseRefName !== 'main')
     throw new RefusedError(`#${String(number)} targets ${pr.baseRefName}, not main; ${NOTHING}`);
+  // A fork's branch is not origin's: only this repository's own branches are checked.
+  const from = pr.headRepository;
+  if (pr.isCrossRepository || from?.toLowerCase() !== at.config.repo.toLowerCase())
+    throw new RefusedError(
+      `#${String(number)} comes from a fork (${from ?? 'a deleted repository'}); ${NOTHING}`,
+    );
   const branch = pr.headRefName;
   const valid = run(at.cwd, at.env, ['check-ref-format', `refs/heads/${branch}`]).ok;
   if (!valid || branch.startsWith('-'))

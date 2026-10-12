@@ -111,7 +111,7 @@ export async function merge(ctx: CommandContext): Promise<number> {
     const pr = upgrade
       ? {
           number: c.pr.number,
-          comments: await listComments(c.config.repo, c.pr.number, options),
+          comments: await listComments(c.config.repo, c.pr.number, { ...options, thread: 'pr' }),
           labelAdds: (await timeline(c.config.repo, c.pr.number, options)).filter(
             (e) => e.event === 'labeled',
           ),
