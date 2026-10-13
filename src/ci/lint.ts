@@ -8,7 +8,7 @@ import { join, relative } from 'node:path';
 import { RefusedError } from '../cli/env.js';
 import { TEST_CONFIG } from '../stations/edges.js';
 import { factoryRoot } from './sandbox.js';
-import { RELEASE_CI, writeTsconfig } from './test.js';
+import { RELEASE_CI, tsconfig } from './test.js';
 import { inWorkspace, type Isolation } from './vitest-run.js';
 
 const NOT_TYPESCRIPT = /\.(?:js|mjs|cjs|jsx|tsx)$/;
@@ -27,8 +27,8 @@ export function lintHead(
 ): { findings: string[]; files: number } {
   return inWorkspace(repo, head, { ...options, config: TEST_CONFIG }, (ws) => {
     const written = ws.write('head', head);
+    ws.file('head', 'tsconfig.json', tsconfig());
     const tree = ws.tree('head');
-    writeTsconfig(tree);
     const eslint = ws.run('head', [
       process.execPath,
       join(factoryRoot(), 'node_modules', 'eslint', 'bin', 'eslint.js'),

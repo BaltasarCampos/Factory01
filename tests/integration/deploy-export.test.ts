@@ -17,9 +17,10 @@ import {
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { writeTree } from '../../src/ci/vitest-run.js';
+import { RefusedError } from '../../src/cli/env.js';
 import { newRelease } from '../../src/deploy/release.js';
 import { appFolder } from '../../src/deploy/sandbox.js';
-import { exportTree } from '../../src/git/export.js';
+import { exportTree, writeEntries } from '../../src/git/export.js';
 import { gitEnv, makeRepo, runGit, type TestRepo } from '../helpers/git-repo.js';
 import { tempDir } from '../helpers/keys.js';
 
@@ -69,7 +70,7 @@ describe('exportTree: the commit, without .git, into a new folder (T069)', () =>
 
     expect(() => {
       exportTree(repo.path, repo.revParse('HEAD'), dir, gitEnv);
-    }).toThrow(/exists/);
+    }).toThrow(/was already there: a release is always exported into a new folder/);
     expect(readdirSync(dir)).toEqual([]);
   });
 
@@ -129,6 +130,38 @@ describe('writeTree in a workspace a sandboxed run can write to (T164)', () => {
     ).toThrow(/not a folder/);
     expect(readdirSync(outside)).toEqual([]);
   });
+
+  it('a second write of a path already written refuses, naming the path, not with a raw EEXIST', () => {
+    const repo = project();
+    const dir = join(tempDir(), 'tree');
+    writeTree(repo.path, repo.revParse('HEAD'), dir, () => true, gitEnv);
+
+    expect(() => writeTree(repo.path, repo.revParse('HEAD'), dir, () => true, gitEnv)).toThrow(
+      RefusedError,
+    );
+    expect(() => writeTree(repo.path, repo.revParse('HEAD'), dir, () => true, gitEnv)).toThrow(
+      `${join(dir, 'bin', 'run.sh')} was already there`,
+    );
+  });
+});
+
+describe('the blobs git hands the writer (T069, T164)', () => {
+  it.each([
+    ['a tree where a blob was listed', (repo: TestRepo) => gitTree(repo), / tree /],
+    ['an object git does not have', () => 'b'.repeat(40), /missing/],
+  ])('refuses %s, and writes nothing', (_, oid, said) => {
+    const repo = project();
+    const dir = tempDir();
+    const entries = [{ mode: '100644', oid: oid(repo), path: 'config' }];
+
+    expect(() => {
+      writeEntries(repo.path, entries, dir, gitEnv);
+    }).toThrow(/not "<oid> blob <size>"/);
+    expect(() => {
+      writeEntries(repo.path, entries, dir, gitEnv);
+    }).toThrow(said);
+    expect(readdirSync(dir)).toEqual([]);
+  });
 });
 
 /** A tree holding one file, `name`. */
@@ -170,7 +203,7 @@ describe('release folders under the app folder (T069)', () => {
     mkdirSync(planted, { recursive: true });
     symlinkSync(outside, join(planted, 'src'));
 
-    expect(() => newRelease(app, repo.path, commit, NOW, gitEnv)).toThrow(/exists/);
+    expect(() => newRelease(app, repo.path, commit, NOW, gitEnv)).toThrow(/was already there/);
     const later = newRelease(app, repo.path, commit, new Date('2026-10-14T09:00:00Z'), gitEnv);
 
     expect(later).toBe(join(app.releases, `${commit}-20261014T090000Z`));

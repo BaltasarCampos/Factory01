@@ -275,7 +275,7 @@ verification · 11a install steps (manifest, render, labels, inbox) · 11b `new`
 rules · 15b admission by approval, criterion lines, `resume` summary · 16a item branch, draft PR, evidence · 16b launchers, `dispatch`/`run` · 17 MCP server · 18a safe diff + append-only ·
 18b coverage, size, ac-map · 19a red-green · 19b release-shipped CI + workflows · 20a signed
 main history · 20b `config set` · 21 merge rules · 21b `test:` waivers · 22a `factory merge` checks · 22b `factory merge` merge ·
-23a `factory deploy` export and sandboxed build · 23b deploy service, backup timer and switch-over · 23c deploy record, summary and health · 23d release evidence · 24a–24b role files · 24c station
+23a `factory deploy` export and sandboxed build · 23a-2 workspace files · 23b-1 network through pasta · 23b-2 deploy service, backup timer and switch-over · 23c deploy record, summary and health · 23d release evidence · 24a–24b role files · 24c station
 prompts + Define from `new`/`adopt` · 25a role policy + settings · 25b tokenizer · 25c command
 guard · 25f path and read guards · 27 `guardrail-change` · 28 session-start + guard hooks ·
 29 Gate A e2e · 29c injection + attack suite. Phase 1–2 (P2): 30 lanes/tiers/batch · 31a findings + gates ·
