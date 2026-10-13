@@ -9,7 +9,6 @@
 import type { SpawnSyncReturns } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
-  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -22,7 +21,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, relative } from 'node:path';
 import { RefusedError } from '../cli/env.js';
-import { safeGit } from '../git/diff.js';
+import { realFolder, treeEntries, writeEntries } from '../git/export.js';
 import type { TestConfig } from '../stations/edges.js';
 import { SOURCE_GLOBS } from './coverage.js';
 import { npmCli, sandboxed, unsandboxed, type Runner } from './sandbox.js';
@@ -35,22 +34,6 @@ const TOOL_CONFIG =
   /^(?:(?:vitest|vite)\.config\.[cm]?[jt]s|vitest\.(?:workspace|projects)\.(?:[cm]?[jt]s|json)|tsconfig.*\.json|eslint\.config\..*|\.eslintrc.*|\.eslintignore|\.semgrep.*|\.gitleaks\.toml|\.gitleaksignore)$/;
 const toolConfig = (path: string) => path.split('/').some((part) => TOOL_CONFIG.test(part));
 
-/** A path git would never check out: absolute, or with an empty, `.`, `..` or `.git` part. */
-export function unsafePath(path: string): boolean {
-  return (
-    path.startsWith('/') ||
-    path
-      .split('/')
-      .some((part) => part === '' || part === '.' || part === '..' || part.toLowerCase() === '.git')
-  );
-}
-
-interface Entry {
-  mode: string;
-  oid: string;
-  path: string;
-}
-
 /** Writes the files of `commit` for which `keep` holds into `dir`. Gitlinks are left out. */
 export function writeTree(
   repo: string,
@@ -59,22 +42,8 @@ export function writeTree(
   keep: (path: string) => boolean,
   env: NodeJS.ProcessEnv,
 ): string[] {
-  const listing = safeGit(repo, ['ls-tree', '-r', '-z', '--full-tree', commit], env);
-  if (listing.status !== 0) throw new RefusedError(`cannot list ${commit}: ${listing.stderr}`);
-  const entries: Entry[] = listing.stdout
-    .toString('utf8')
-    .split('\0')
-    .filter(Boolean)
-    .map((row) => {
-      const [meta = '', path = ''] = row.split('\t');
-      const [mode = '', , oid = ''] = meta.split(' ');
-      return { mode, oid, path };
-    });
-  // Every entry is checked, kept or not, before anything is written.
-  const unsafe = entries.find((e) => unsafePath(e.path));
-  if (unsafe !== undefined)
-    throw new RefusedError(`${commit} holds an unsafe path: ${JSON.stringify(unsafe.path)}`);
-  const written = entries.filter(
+  // Every entry is checked, kept or not, before anything is written (src/git/export.ts).
+  const written = treeEntries(repo, commit, env).filter(
     (e) =>
       e.mode !== '160000' &&
       keep(e.path) &&
@@ -82,27 +51,9 @@ export function writeTree(
       e.path.split('/')[0] !== 'node_modules',
   );
   if (written.length === 0) return [];
-  const batch = safeGit(
-    repo,
-    ['cat-file', '--batch'],
-    env,
-    written.map((e) => e.oid).join('\n') + '\n',
-  );
-  if (batch.status !== 0) throw new RefusedError(`cannot read the blobs of ${commit}`);
-  let at = 0;
-  for (const entry of written) {
-    const header = batch.stdout.indexOf(0x0a, at);
-    const size = Number(batch.stdout.subarray(at, header).toString('utf8').split(' ')[2]);
-    const bytes = batch.stdout.subarray(header + 1, header + 1 + size);
-    at = header + 1 + size + 1;
-    const full = join(dir, ...entry.path.split('/'));
-    mkdirSync(dirname(full), { recursive: true });
-    if (entry.mode === '120000') symlinkSync(bytes.toString('utf8'), full);
-    else {
-      writeFileSync(full, bytes);
-      if (entry.mode === '100755') chmodSync(full, 0o755);
-    }
-  }
+  // The workspace is writable from the sandboxed runs too: nothing is written through a link.
+  realFolder(dir);
+  writeEntries(repo, written, dir, env);
   return written.map((e) => e.path);
 }
 
@@ -167,7 +118,7 @@ export function inWorkspace<T>(
     const tree = (name: string) => join(work, name, 'tree');
     const linked = new Set<string>();
     const ready = (name: string) => {
-      mkdirSync(tree(name), { recursive: true });
+      realFolder(tree(name));
       if (!linked.has(name)) linkInstall(tree(name), install);
       linked.add(name);
       return tree(name);

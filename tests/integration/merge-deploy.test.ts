@@ -1,12 +1,13 @@
 // `factory merge` and `factory deploy` (T053). Slice 21 writes the per-branch rule cases
 // (AC-081–AC-083, AC-086, FR-016g) against src/merge/rules.ts, with the inputs `factory merge`
-// will pass in; the command's own cases come with slices 22a, 22a-2, 22a-3, 22b and 23a.
+// will pass in; the command's own cases come with slices 22a to 22c, and deploy's with 23a to 23c.
 import { randomBytes } from 'node:crypto';
 import {
   chmodSync,
   copyFileSync,
   existsSync,
   readFileSync,
+  readdirSync,
   mkdirSync,
   rmSync,
   symlinkSync,
@@ -21,6 +22,7 @@ import { ownerKeyPath, sign } from '../../src/approvals/sign.js';
 import { verifyGate } from '../../src/approvals/verify.js';
 import { runCli } from '../../src/cli/commands.js';
 import { serialiseManifest } from '../../src/install/manifest.js';
+import { appFolder } from '../../src/deploy/sandbox.js';
 import { loadRequiredChecks } from '../../src/merge/ci.js';
 import {
   mergeRules,
@@ -1967,6 +1969,117 @@ describe(
       expect(m.parents).toEqual([before, t.head]);
       expect(m.message).toMatch(/\nFactory-Merge: branch owner-work\n?$/);
       expect(() => branchOnOrigin(t.repo, 'owner-work')).toThrow();
+    });
+  },
+);
+
+// Slice 23a: `factory deploy` exports main's verified commit into a new release folder and builds
+// it in two bubblewrap runs, the install with network and the build without; until 23b it stops
+// before the switch-over.
+const NOT_YET_23B = 'switching the service comes with slice 23b; nothing was deployed';
+const LOCK = {
+  ...{ name: 'p', version: '1.0.0', lockfileVersion: 3, requires: true },
+  packages: { '': { name: 'p', version: '1.0.0' } },
+};
+/** The product on main: an empty install, and `build` as its build script. */
+const product = (build: string): Files => ({
+  'package.json': JSON.stringify({ name: 'p', version: '1.0.0', scripts: { build } }),
+  'package-lock.json': JSON.stringify(LOCK),
+  'build.mjs':
+    "import { mkdirSync, writeFileSync } from 'node:fs';\nmkdirSync('dist');\nwriteFileSync('dist/out.txt', 'built');\n",
+});
+const releasesOf = (home: string) => {
+  const { releases } = appFolder(home, REPO);
+  return existsSync(releases) ? readdirSync(releases).map((n) => join(releases, n)) : [];
+};
+/** A bwrap first on PATH whose probe fails as it does without user namespaces. */
+function failingBwrap(): NodeJS.ProcessEnv {
+  const bin = tempDir();
+  writeFileSync(
+    join(bin, 'bwrap'),
+    '#!/bin/sh\necho "bwrap: No permissions to create new namespace" >&2\nexit 1\n',
+  );
+  chmodSync(join(bin, 'bwrap'), 0o755);
+  return { PATH: `${bin}:${process.env.PATH ?? ''}` };
+}
+
+describe(
+  'factory deploy: the verified export and the sandboxed build (T069, slice 23a)',
+  { timeout: 240_000 },
+  () => {
+    it("exports main's verified commit without .git into a new release, builds it, and stops before the switch", async () => {
+      const t = mergeSetup();
+      const main = onMain(t.repo, product('node build.mjs'), 'the product');
+      t.repo.commit({ 'src/local.ts': 'local\n' }, 'not pushed', { signWith: owner });
+
+      const r = await t.cli(['deploy']);
+
+      expect(r.stderr).toContain(NOT_YET_23B);
+      expect(r.code).toBe(1);
+      const [release, ...more] = releasesOf(t.home);
+      expect(more).toEqual([]);
+      expect(release).toMatch(new RegExp(`/${main}-\\d{8}T\\d{6}Z$`));
+      expect(readFileSync(join(release ?? '', 'dist', 'out.txt'), 'utf8')).toBe('built');
+      expect(existsSync(join(release ?? '', '.git'))).toBe(false);
+      expect(existsSync(join(release ?? '', 'src', 'local.ts'))).toBe(false);
+    });
+
+    it('refuses when main has a first-parent commit not signed by the Owner, before exporting anything (AC-073)', async () => {
+      const t = mergeSetup();
+      onMain(t.repo, product('node build.mjs'), 'the product');
+      t.repo.checkout('main');
+      t.repo.commit({ 'src/b.ts': 'b\n' }, 'pushed past the Owner');
+      t.repo.push('main');
+
+      const r = await t.cli(['deploy']);
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/not signed by the Owner/);
+      expect(releasesOf(t.home)).toEqual([]);
+    });
+
+    it('refuses without a working bubblewrap, before exporting anything, and never builds unsandboxed', async () => {
+      const t = mergeSetup();
+      onMain(t.repo, product('node build.mjs'), 'the product');
+
+      const r = await t.cli(['deploy'], { env: failingBwrap() });
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/only inside bubblewrap.*No permissions to create new namespace/);
+      expect(releasesOf(t.home)).toEqual([]);
+    });
+
+    it("a build that reads the Owner's key file under HOME fails, and nothing was deployed", async () => {
+      const t = mergeSetup();
+      const key = ownerKeyPath(t.home);
+      const steal = `node -e "require('fs').copyFileSync(${JSON.stringify(key).replaceAll('"', "'")}, 'stolen')"`;
+      onMain(t.repo, product(steal), 'the product');
+
+      const r = await t.cli(['deploy']);
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(
+        /the build of [0-9a-f]{40} failed at npm run build; nothing was deployed/,
+      );
+      expect(r.stderr).toContain('ENOENT');
+      const [release] = releasesOf(t.home);
+      expect(existsSync(join(release ?? '', 'stolen'))).toBe(false);
+    });
+
+    it('a failed build refuses, naming the step, with the end of its output', async () => {
+      const t = mergeSetup();
+      onMain(
+        t.repo,
+        product(`node -e "console.error('tsc: 3 errors'); process.exit(2)"`),
+        'the product',
+      );
+
+      const r = await t.cli(['deploy']);
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/failed at npm run build; nothing was deployed/);
+      expect(r.stderr).toContain('tsc: 3 errors');
+      expect(r.stderr).not.toContain(NOT_YET_23B);
     });
   },
 );
