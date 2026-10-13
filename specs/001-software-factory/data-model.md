@@ -213,8 +213,11 @@ the approval summary (§ Approval summary), then:
    never `git merge`: no checkout, index, hooks or file of the Owner's working copy is involved.
    For an item, main must be an ancestor of the checked commit (else "it needs a rebase") and the
    tree is exactly the checked commit's; for the other branches it is `git merge-tree
-   --write-tree` of the two, refused on any conflict, and the rule's path check runs again on the
-   merge result's diff against main. The message ends with the trailer `Factory-Merge: #<issue>`
+   --write-tree` of the two, refused on any conflict, and before the prompt the rule's path check
+   runs again on the merge result: an unsigned probe commit of that tree with the same two
+   parents, authored by `factory probe <probe@invalid>`, never pushed and never named by a ref,
+   whose diff against main is checked (for `claude/factory-log` the log rules: allowed paths,
+   append-only, regular files); the signed commit's tree must equal the probe's. The message ends with the trailer `Factory-Merge: #<issue>`
    (item), `define`, `upgrade <tag>`, `factory-log` or `branch <name>` (factory repository);
 2. verifies the merge commit with the key lists pinned at main, as the next history walk will;
 3. pushes it to main and deletes the head branch in one `git push --atomic`, with
@@ -256,7 +259,7 @@ missing the summary says "unavailable (telemetry missing)" and goes on.
 | Waiver, code `gate:` | R: target; PR head (= the commit read); diffstat since the merge base; after the head moved, the diff since the waived head, or the interdiff of the item's own changes when the merge base moved, or the full diff when the waived head is gone (T151) | R: each `AC-###` → its test tasks | R: the waived gate's result | S | R: tier; what the waiver lets through, computed from the waived check (for `red-green`, the criteria whose tests do not go from failing to passing) |
 | Waiver, other targets (`finding:`, `dep:`, `check:`) | R: target | — | — | — | R: what stays unfixed or accepted |
 | Merge, item | R: diffstat of the checked head; every changed test file, even when its counts net to zero; every removed, skipped, focused or retried test, removed assertion and changed setup or helper file (AC-061), each with the `test:` waiver that covers it, or "none" | R: each `AC-###` → its tagged tests | R: CI on the checked head; verify report | S | R: tier; open findings; waivers in force |
-| Merge, Define / upgrade / log | R: diffstat of the checked head | — | R: the branch's own check: Define output check, manifest equality, append-only | — | R: upgrade — the keys it revokes and the in-flight items whose approvals used them; Define and log — the per-branch check results |
+| Merge, Define / upgrade / log / factory repository | R: the pull request and branch; diffstat of the merge result against main, labelled so, since main may have moved since the branch was cut (Owner decision 2026-10-13, slice 22c) | — | R: CI on the checked head; the branch's own check: Define output check, manifest equality, the log rules, the factory-repository path rule | — | R: upgrade — the keys it revokes and the in-flight items whose approvals used them; Define, log and factory repository — the per-branch check results |
 | Deploy | R: items merged since the last deploy | — | R: CI on main's head | S | R: rollback step from the release notes |
 | Resume | R: items whose state changed since the pause | — | — | — | R: what was paused, when and by whom (label history), and the alerts raised during the pause |
 

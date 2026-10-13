@@ -6,9 +6,10 @@
 // telemetry; the branch's merge rule (T143); until `factory ci formal` ships (T165), no tier 3 item
 // and no change under `formal/`; for an item, the once-only rule (AC-088), the whole approval
 // chain, the criterion set (AC-097), and stale head-bound waivers re-signed or the merge stops;
-// required CI and the laptop's own checks; the approval summary (AC-094). Then, for an item, the
-// signed merge of exactly the checked head (src/merge/local-merge.ts). Define, log and
-// factory-repository merges come with slice 22c.
+// for Define, its output check at the checked head; required CI and, for an item, the laptop's own
+// checks; for the other branches, git's merge with main checked again by the branch's rule on an
+// unsigned probe; the approval summary (AC-094). Then the signed merge (src/merge/local-merge.ts):
+// of exactly the checked head for an item, of the probe's tree for the others.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -31,11 +32,12 @@ import {
   type JobResult,
 } from '../merge/ci.js';
 import { laptopChecks, type LaptopResults } from '../merge/laptop.js';
-import { land } from '../merge/local-merge.js';
+import { land, probeMerge } from '../merge/local-merge.js';
 import { mergeView } from '../merge/view.js';
 import { mergeRules, type RuleName } from '../merge/rules.js';
 import { STATIONS } from '../model/types.js';
-import { buildSummary, NO_FORMAL } from '../notify/summary.js';
+import { buildSummary, NO_FORMAL, visible } from '../notify/summary.js';
+import { checkDefine } from '../stations/checks/define.js';
 import { derivePause, resumeEntries } from '../pause/derive.js';
 import { coveredAt, signHeadBoundWaiver, viewAt, viewIssue } from './approve.js';
 
@@ -181,6 +183,43 @@ async function ciChecks(
   return results;
 }
 
+/**
+ * Define's outputs at the checked head, in order (data-model § Pull request merge checks): a
+ * merge check, so a run that is incomplete or still waiting for the Owner's answers refuses.
+ */
+async function defineOutputs(c: MergeContext): Promise<string[]> {
+  const result = await checkDefine({
+    ...{ workdir: c.cwd, repo: c.config.repo, ref: c.head, mainRef: c.main },
+    gh: { env: c.env },
+  });
+  if (result.waiting)
+    throw new RefusedError(
+      `the Define run at ${c.head} is waiting for the Owner's answers; ${NOTHING}`,
+    );
+  if (!result.complete)
+    throw new RefusedError(
+      `the Define output check fails at ${c.head}; ${NOTHING}:\n  ${(result.missing ?? []).map(visible).join('\n  ')}`,
+    );
+  return [
+    `Define output check at ${c.head.slice(0, 12)}: questions, then the Owner's answers, then the brief, skeleton, 5–10 seed issues and the draft pull request`,
+  ];
+}
+
+/** The branch's own check, as the summary shows it once it passed. */
+const RULE_CHECK: Partial<Record<RuleName, string>> = {
+  define: 'path rule: no protected path changed',
+  'factory-log': 'log rules: only regular files under the log paths, each appended to',
+  'factory-repository':
+    "factory-repository path rule: none of the factory's own workflows or self-protection files changed",
+};
+
+/** The `Factory-Merge:` value of each branch's merge (data-model § Merge trailers). */
+const TRAILER: Partial<Record<RuleName, (c: MergeContext) => string>> = {
+  define: () => 'define',
+  'factory-log': () => 'factory-log',
+  'factory-repository': (c) => `branch ${c.branch}`,
+};
+
 /** What the checks found, and the summary shown from it; nothing here runs again. */
 export interface MergeResults {
   readonly rule: RuleName;
@@ -189,7 +228,60 @@ export interface MergeResults {
   readonly laptop?: LaptopResults;
   /** The approval summary the Owner read (AC-094). */
   readonly summary?: string;
+  /** The tree to land: the checked head's for an item, git's merge with main for the others. */
+  readonly tree: string;
+  readonly trailer: string;
 }
+
+/**
+ * A Define, log or factory-repository branch: git's merge with main, its rule run again on the
+ * unsigned probe of that merge, then the summary of what lands; refuse when a part is missing.
+ */
+function branchSummary(
+  ctx: CommandContext,
+  c: MergeContext,
+  at: { rule: RuleName; base: string; ci: readonly JobResult[]; checks: readonly string[] },
+): Pick<MergeResults, 'summary' | 'tree'> {
+  const { tree, probe } = probeMerge(c);
+  const again = mergeRules({ ...rulesInput(c), head: probe });
+  if (again.rule !== at.rule || again.problems.length > 0)
+    throw new RefusedError(
+      `the ${at.rule} rule refuses the merge result of #${String(c.pr.number)} with main at ${c.main}; ${NOTHING}:\n  ${[
+        ...(again.rule === at.rule ? [] : [`the merge result falls under the ${again.rule} rule`]),
+        ...again.problems,
+      ].join('\n  ')}`,
+    );
+  const lands = safeDiff(c.cwd, c.main, probe, c.env);
+  const check = RULE_CHECK[at.rule];
+  const summary = buildSummary({
+    ...{ gate: 'merge', kind: 'merge-branch', commit: c.head },
+    issue: { number: c.pr.number, title: c.pr.title, body: '', labels: [] },
+    branchMerge: {
+      ...{ pr: { number: c.pr.number, title: c.pr.title }, branch: c.branch, rule: at.rule },
+      ...{ head: c.head, main: c.main, base: at.base, ci: at.ci },
+      diffstat: lands.map((f) => ({
+        ...{ path: f.path, status: f.status },
+        ...{ added: f.added.length, removed: f.removed.length },
+      })),
+      checks: [
+        ...at.checks,
+        ...(check === undefined ? [] : [`${check}, at the checked head and on the merge result`]),
+      ],
+    },
+  });
+  if (!summary.ok)
+    throw new RefusedError(
+      `not merging: the approval summary is incomplete:\n  ${summary.missing.join('\n  ')}`,
+    );
+  ctx.io.stdout.write(`${summary.text}\n`);
+  return { summary: summary.text, tree };
+}
+
+const rulesInput = (c: MergeContext) => ({
+  ...{ repo: c.cwd, branch: c.branch, head: c.head, main: c.main, keys: c.keys },
+  ...{ laptopKeys: c.laptopKeys, secondCopy: secondCopy(c.env, c.home) },
+  ...{ factory: c.factory, factoryRepo: c.factoryRepo, env: c.env },
+});
 
 /**
  * Run the laptop's checks of the item, then show its merge summary (AC-094), built from what the
@@ -244,11 +336,7 @@ export async function merge(ctx: CommandContext): Promise<number> {
     // The upgrade summary and its revoked-keys rule need the signed-release fixture of slice 35.
     if (c.branch.startsWith('factory/upgrade-'))
       throw new RefusedError(`upgrade merges come with slice 35 (T115); ${NOTHING}`);
-    const result = mergeRules({
-      ...{ repo: c.cwd, branch: c.branch, head: c.head, main: c.main, keys: c.keys },
-      ...{ laptopKeys: c.laptopKeys, secondCopy: secondCopy(c.env, c.home) },
-      ...{ factory: c.factory, factoryRepo: c.factoryRepo, env: c.env },
-    });
+    const result = mergeRules(rulesInput(c));
     if (result.problems.length > 0)
       throw new RefusedError(
         `the ${result.rule} rule refuses #${arg}; ${NOTHING}:\n  ${result.problems.join('\n  ')}`,
@@ -265,25 +353,30 @@ export async function merge(ctx: CommandContext): Promise<number> {
       );
     const item = result.issue === undefined ? undefined : await itemChecks(ctx, c, result.issue);
     ctx.io.stdout.write(`#${arg} passes the rule ${result.rule}\n`);
+    const checks = result.rule === 'define' ? await defineOutputs(c) : [];
     const changed = changes.map((f) => f.path);
     const ci = await ciChecks(ctx, c, result.rule, changed);
-    const results: MergeResults = {
-      rule: result.rule,
-      ci,
-      ...(item === undefined
-        ? {}
-        : await itemSummary(ctx, c, { ...item, base, changes, ci, issue: result.issue ?? 0 })),
-    };
+    const issue = result.issue;
+    let results: MergeResults;
+    if (item !== undefined && issue !== undefined) {
+      const tree = safeGit(c.cwd, ['rev-parse', `${c.head}^{tree}`], c.env)
+        .stdout.toString('utf8')
+        .trim();
+      results = {
+        ...{ rule: result.rule, ci, tree, trailer: `#${String(issue)}` },
+        ...(await itemSummary(ctx, c, { ...item, base, changes, ci, issue })),
+      };
+    } else {
+      const trailer = TRAILER[result.rule]?.(c);
+      if (trailer === undefined)
+        throw new RefusedError(`factory merge does not merge ${result.rule} branches; ${NOTHING}`);
+      results = {
+        ...{ rule: result.rule, ci, trailer },
+        ...branchSummary(ctx, c, { rule: result.rule, base, ci, checks }),
+      };
+    }
     Object.freeze(results);
-
-    if (result.issue === undefined)
-      throw new RefusedError(
-        `Define, log and factory-repository merges come with slice 22c; ${NOTHING}`,
-      );
-    const tree = safeGit(c.cwd, ['rev-parse', `${c.head}^{tree}`], c.env)
-      .stdout.toString('utf8')
-      .trim();
-    await land(ctx, c, tree, `#${String(result.issue)}`);
+    await land(ctx, c, results.tree, results.trailer);
     return ExitCode.Ok;
   } finally {
     rmSync(scratch, { recursive: true, force: true });

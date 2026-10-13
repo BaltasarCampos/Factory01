@@ -31,11 +31,14 @@ import {
 } from '../../src/merge/rules.js';
 import type { ApprovalRecord } from '../../src/model/types.js';
 import { NO_FORMAL } from '../../src/notify/summary.js';
+import { briefMerged, verifiedMerges } from '../../src/git/merges.js';
+import { SEED_MARKER } from '../../src/stations/checks/define.js';
 import {
   calls,
   readState,
   seedState,
   type FakeComment,
+  type FakeIssue,
   type FakeLabelEvent,
   type FakePr,
 } from '../helpers/fake-gh.js';
@@ -509,8 +512,6 @@ Visitors cannot sign in.
 `;
 // Every check passed and the summary was shown; the Owner then answered no to the merge itself.
 const DECLINED = 'the Owner did not confirm the merge; nothing was merged';
-const NOT_YET_22C =
-  'Define, log and factory-repository merges come with slice 22c; nothing was merged';
 // The item's code and its tagged test: red at the base, where the code is missing, green at the head.
 const LOGIN = 'export const login = (name: string) => name.length > 0;\n';
 const VERIFY_REPORT = `| Check | Result |\n|---|---|\n${['CI', 'Coverage', 'SAST', 'SCA', 'Secrets', 'Licences', 'Review'].map((c) => `| ${c} | pass |`).join('\n')}\n`;
@@ -630,6 +631,14 @@ interface MergeSetup {
   headRepository?: string;
   /** The item's records as posted, from the standard chain (approved, then spec-approved). */
   chain?: (at: { head: string; specBlob: string }, standard: Posted[]) => Posted[];
+  /** Main has no merged Define brief. */
+  noBrief?: boolean;
+  /** The head branch's commits in order, in place of the item's one commit. */
+  commits?: Files[];
+  /** More issues on the project. */
+  issues?: (Partial<FakeIssue> & { number: number })[];
+  /** The pull request's fields besides its number and head branch. */
+  pr?: Partial<FakePr>;
 }
 
 /** A record of the item's chain as posted: its comment, and the owner: label added after it. */
@@ -674,7 +683,7 @@ function mergeSetup(o: MergeSetup = {}) {
       : { '.factory/config': config(pin), 'src/a.ts': 'a\n' },
     signWith: owner,
   });
-  if (!o.noConfig) mergeBrief(repo, { signWith: owner });
+  if (!o.noConfig && !o.noBrief) mergeBrief(repo, { signWith: owner });
   if (o.nextRelease !== undefined) {
     factory.commit({ allowed_signers: o.nextRelease }, 'next release');
     signedReleaseTag(factory, owner, 'v1.0.1');
@@ -684,14 +693,22 @@ function mergeSetup(o: MergeSetup = {}) {
   }
   o.project?.(repo);
   const branchName = o.branch ?? ITEM_BRANCH;
-  const head = branch(repo, branchName, {
-    '.specify/feature.json': '{ "feature_directory": "specs/7-add-login" }\n',
-    'specs/7-add-login/spec.md': ITEM_SPEC,
-    'src/login.ts': LOGIN,
-    'tests/login.test.ts': LOGIN_TEST,
-    'specs/7-add-login/reports/verify.md': VERIFY_REPORT,
-    ...o.files,
-  });
+  const [first = {}, ...more] = o.commits ?? [
+    {
+      '.specify/feature.json': '{ "feature_directory": "specs/7-add-login" }\n',
+      'specs/7-add-login/spec.md': ITEM_SPEC,
+      'src/login.ts': LOGIN,
+      'tests/login.test.ts': LOGIN_TEST,
+      'specs/7-add-login/reports/verify.md': VERIFY_REPORT,
+      ...o.files,
+    },
+  ];
+  let head = branch(repo, branchName, first);
+  if (more.length > 0) {
+    repo.checkout(branchName);
+    for (const files of more) head = repo.commit(files, `more on ${branchName}`);
+    repo.checkout('main');
+  }
   repo.push(branchName);
 
   const home = tempDir('factory-home-');
@@ -703,9 +720,12 @@ function mergeSetup(o: MergeSetup = {}) {
   copyFileSync(owner.publicKeyPath, `${ownerKeyPath(home)}.pub`);
 
   const tier = o.tier === undefined ? 2 : o.tier;
-  const specBlob = runGit(repo.path, ['rev-parse', `${head}:specs/7-add-login/spec.md`]);
+  const specPath = `${head}:specs/7-add-login/spec.md`;
+  const hasSpec = repo.git(['ls-tree', '--name-only', head, 'specs/7-add-login/spec.md']) !== '';
+  const specBlob = hasSpec ? runGit(repo.path, ['rev-parse', specPath]) : '';
+  // A head with no item spec is not an item: there is no chain to post.
   const standard: Posted[] =
-    tier === null
+    tier === null || !hasSpec
       ? []
       : [
           posted(900, itemRecord('approved', { tier }), '2026-10-01T08:00:00Z'),
@@ -740,10 +760,11 @@ function mergeSetup(o: MergeSetup = {}) {
             comments: chain.map((p) => p.comment),
             events: chain.flatMap((p) => (p.label === undefined ? [] : [p.label])),
           },
+          ...(o.issues ?? []),
         ],
         prs: [
           {
-            ...{ number: ITEM_PR, headRefName: branchName },
+            ...{ ...o.pr, number: ITEM_PR, headRefName: branchName },
             ...(o.headRepository === undefined ? {} : { headRepository: o.headRepository }),
           },
         ],
@@ -953,7 +974,7 @@ describe(
       const elsewhere = await mergeSetup({ branch: 'owner-work' }).cli();
 
       expect(there.stdout).toMatch(/rule factory-repository/);
-      expect(there.stderr).toContain(NOT_YET_22C);
+      expect(there.stderr).toContain(DECLINED);
       expect(elsewhere.stderr).toMatch(/no merge rule takes branch owner-work/);
     });
 
@@ -1715,5 +1736,237 @@ describe(
         expect(pr?.comments.at(-1)?.body).toContain(pushed);
       },
     );
+  },
+);
+
+// Slice 22c: Define, log and factory-repository branches may be behind main, so what lands is
+// git's merge of the two, checked on an unsigned probe commit before the prompt.
+const LOG_BRANCH = 'claude/factory-log';
+const SEEDS = [2, 3, 4, 5, 6];
+const BRIEF = `# Brief
+
+## Problem
+Saving links across devices is clumsy. [pitch]
+
+## Users
+The Owner, on a phone and a laptop. [answer:Q1]
+
+## Core use cases
+- Save a link with one tap. [pitch]
+
+## Non-goals
+- Sharing links with other people. [answer:Q1]
+
+## Success measures
+- A link is saved in under 5 seconds. [pitch]
+
+## Risk areas
+- None known yet. [pitch]
+`;
+/** A complete Define run: questions, then the Owner's answers, then the outputs. */
+const DEFINE_RUN: Files[] = [
+  { '.factory/define/questions.md': 'Q1. Who uses it?\n' },
+  { '.factory/define/answers.md': 'A1. Only me.\n' },
+  {
+    '.factory/brief.md': BRIEF,
+    'package.json': '{ "scripts": { "test": "vitest run" } }\n',
+    'tests/health.test.ts': "it('answers /health', () => {});\n",
+    '.factory/define/backlog.md': `# Backlog\n\n${SEEDS.map((n) => `- #${String(n)} Seed ${String(n)}`).join('\n')}\n`,
+  },
+];
+const seed = (number: number, body = `${SEED_MARKER}\nA seed issue.\n`) => ({
+  ...{ number, title: `Seed ${String(number)}`, body, labels: ['tier:2'] },
+});
+const DEFINE: MergeSetup = {
+  branch: 'claude/define',
+  noBrief: true,
+  commits: DEFINE_RUN,
+  issues: SEEDS.map((n) => seed(n)),
+  pr: { isDraft: true, title: 'Define: brief and backlog' },
+};
+const MERGE_PROMPT = `Merge #${String(ITEM_PR)} into main? [y/N] `;
+const merged = (repo: TestRepo, ref = 'main') => ({
+  parents: runGit(repo.origin, ['rev-list', '--parents', '-n', '1', ref]).split(' ').slice(1),
+  message: runGit(repo.origin, ['log', '-1', '--format=%B', ref]),
+});
+const branchOnOrigin = (repo: TestRepo, name: string) =>
+  runGit(repo.origin, ['rev-parse', '--verify', `refs/heads/${name}`]);
+/** `files` committed on main by the Owner and pushed; returns the new head. */
+function onMain(repo: TestRepo, files: Files, message: string, edit?: () => void): string {
+  repo.checkout('main');
+  edit?.();
+  const sha = repo.commit(files, message, { signWith: owner });
+  repo.push('main');
+  return sha;
+}
+const briefCounts = (repo: TestRepo) => {
+  repo.git(['fetch', '-q', 'origin']);
+  return briefMerged(verifiedMerges(repo.path, () => writeKeyFiles([owner]), { env: gitEnv }));
+};
+
+describe(
+  'factory merge: Define, log and factory-repository branches (T068, slice 22c)',
+  { timeout: 240_000 },
+  () => {
+    it('merges a complete Define run with Factory-Merge: define, keeps claude/define, and the brief then counts as merged (AC-006)', async () => {
+      const t = mergeSetup(DEFINE);
+      const before = t.mainOnOrigin();
+      const unmerged = briefCounts(t.repo);
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout).toMatch(/rule define/);
+      expect(r.stdout).toContain('Define output check');
+      expect(r.stdout).toContain('changed by the merge result against main (what lands)');
+      expect(t.asked.at(-1)).toBe(MERGE_PROMPT);
+      const m = merged(t.repo);
+      expect(m.parents).toEqual([before, t.head]);
+      expect(m.message).toMatch(/\nFactory-Merge: define\n?$/);
+      expect(branchOnOrigin(t.repo, 'claude/define')).toBe(t.head);
+      expect(unmerged).toBe(false);
+      expect(briefCounts(t.repo)).toBe(true);
+    });
+
+    it('merges a Define run after a config set commit landed on main: merge-tree, then the path check on the result (Gate A)', async () => {
+      const t = mergeSetup(DEFINE);
+      const config = `${runGit(t.repo.path, ['show', 'main:.factory/config'])}\nretry_limit: 3\n`;
+      const moved = onMain(
+        t.repo,
+        { '.factory/config': config },
+        'factory config set retry_limit 3',
+      );
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('Main moved since the branch was cut');
+      const m = merged(t.repo);
+      expect(m.parents).toEqual([moved, t.head]);
+      expect(runGit(t.repo.origin, ['show', 'main:.factory/config'])).toContain('retry_limit: 3');
+      expect(runGit(t.repo.origin, ['show', 'main:.factory/brief.md'])).toBe(BRIEF.trimEnd());
+      // The probe: unsigned, made by factory probe, never pushed and named by no ref.
+      const unreachable = runGit(t.repo.path, ['fsck', '--no-reflogs', '--unreachable'])
+        .split('\n')
+        .flatMap((l) => /^unreachable commit ([0-9a-f]+)$/.exec(l)?.slice(1) ?? []);
+      const probes = unreachable.map((sha) =>
+        runGit(t.repo.path, ['log', '-1', '--format=%an <%ae>|%cn <%ce>|%G?|%P|%T', sha]),
+      );
+      const tree = runGit(t.repo.origin, ['rev-parse', 'main^{tree}']);
+      expect(probes).toEqual([
+        `factory probe <probe@invalid>|factory probe <probe@invalid>|N|${moved} ${t.head}|${tree}`,
+      ]);
+      for (const repo of [t.repo.path, t.repo.origin])
+        expect(runGit(repo, ['log', '--all', '--format=%an'])).not.toContain('factory probe');
+    });
+
+    it.each([
+      [
+        'a seed issue without the seed marker',
+        { issues: SEEDS.map((n) => (n === 4 ? seed(n, 'no marker\n') : seed(n))) },
+        `#4: no ${SEED_MARKER} marker`,
+      ],
+      [
+        "a run still waiting for the Owner's answers",
+        { commits: DEFINE_RUN.slice(0, 1) },
+        "waiting for the Owner's answers",
+      ],
+    ])(
+      'refuses a Define run with %s, naming what is missing, before the prompt',
+      async (_, over, why) => {
+        const t = mergeSetup({ ...DEFINE, ...over });
+        const before = t.mainOnOrigin();
+
+        const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain(why);
+        expect(r.stderr).toContain('nothing was merged');
+        expect(t.asked).not.toContain(MERGE_PROMPT);
+        expect(t.mainOnOrigin()).toBe(before);
+      },
+    );
+
+    it('merges claude/factory-log after main moved, with Factory-Merge: factory-log, and keeps the branch', async () => {
+      const t = mergeSetup({
+        branch: LOG_BRANCH,
+        commits: [{ '.factory/events/2026-10.jsonl': '{"a":1}\n' }],
+      });
+      const moved = onMain(t.repo, { 'src/later.ts': 'later\n' }, 'later work');
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout).toMatch(/rule factory-log/);
+      const m = merged(t.repo);
+      expect(m.parents).toEqual([moved, t.head]);
+      expect(m.message).toMatch(/\nFactory-Merge: factory-log\n?$/);
+      expect(branchOnOrigin(t.repo, LOG_BRANCH)).toBe(t.head);
+    });
+
+    it('refuses a log merge whose result leaves the log paths, though the branch alone stays inside them', async () => {
+      // Main renamed the file the log branch appends to; git's merge carries the append along.
+      const t = mergeSetup({
+        branch: LOG_BRANCH,
+        project: (repo) => onMain(repo, { '.factory/ops/notes.md': 'notes\n' }, 'ops notes'),
+        commits: [{ '.factory/ops/notes.md': 'notes\nmore\n' }],
+      });
+      const moved = onMain(t.repo, {}, 'move the notes', () =>
+        t.repo.git(['mv', '.factory/ops/notes.md', 'notes.md']),
+      );
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/factory-log rule refuses the merge result/);
+      expect(r.stderr).toContain('notes.md: outside the log paths');
+      expect(t.asked).not.toContain(MERGE_PROMPT);
+      expect(t.mainOnOrigin()).toBe(moved);
+    });
+
+    it('refuses a branch that conflicts with main, naming the file, with nothing pushed', async () => {
+      const t = mergeSetup({
+        branch: LOG_BRANCH,
+        project: (repo) =>
+          onMain(repo, { '.factory/events/2026-10.jsonl': '{"a":1}\n' }, 'first events'),
+        commits: [{ '.factory/events/2026-10.jsonl': '{"a":1}\n{"b":2}\n' }],
+      });
+      const moved = onMain(
+        t.repo,
+        { '.factory/events/2026-10.jsonl': '{"a":1}\n{"c":3}\n' },
+        'events from elsewhere',
+      );
+
+      const r = await t.cli(['merge', String(ITEM_PR)], { answers: ['y'] });
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        `#${String(ITEM_PR)} conflicts with main in .factory/events/2026-10.jsonl`,
+      );
+      expect(r.stderr).toContain('nothing was merged');
+      expect(t.asked).not.toContain(MERGE_PROMPT);
+      expect(t.mainOnOrigin()).toBe(moved);
+      expect(branchOnOrigin(t.repo, LOG_BRANCH)).toBe(t.head);
+    });
+
+    it("merges the factory repository's own branch with Factory-Merge: branch <name> and deletes it", async () => {
+      const t = mergeSetup({ branch: 'owner-work' });
+      const before = t.mainOnOrigin();
+
+      const r = await t.cli(['merge', String(ITEM_PR)], {
+        ...t.asFactoryRepository(),
+        answers: ['y'],
+      });
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      const m = merged(t.repo);
+      expect(m.parents).toEqual([before, t.head]);
+      expect(m.message).toMatch(/\nFactory-Merge: branch owner-work\n?$/);
+      expect(() => branchOnOrigin(t.repo, 'owner-work')).toThrow();
+    });
   },
 );
