@@ -1,13 +1,15 @@
 // The laptop sandbox (T164, design v1.8, Owner decisions 2026-10-09): pull request code (the
 // `npm ci --ignore-scripts` install and every Vitest run) runs outside GitHub Actions only inside
 // bubblewrap, with no home folder, no agent sockets, an empty environment, no network for the
-// tests and only the run's temp folder writable. Without a working bubblewrap the run is refused;
+// tests, network for the install only through pasta (slice 23b-1), and only the run's temp folder
+// writable. Without a working bubblewrap the run is refused;
 // there is no unsandboxed fallback. CI needs none: its runner is thrown away after the job.
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { RefusedError } from '../cli/env.js';
+import { attached } from './network.js';
 
 /** Runs `argv` with `cwd` as its working folder; the network is only ever on for the install. */
 export type Runner = (
@@ -47,23 +49,38 @@ const ro = (path: string) => ['--ro-bind', path, path];
 export const nodeBin = () => dirname(realpathSync(process.execPath));
 
 /**
- * Read-only binds every sandbox gets: the system folders, then, with the network on, the resolver
- * that /etc/resolv.conf links to (systemd's, under /run), that one file, never the rest of /run;
- * then the Node install: its binary's folder and the npm package `npm` beside it resolves to.
+ * Read-only binds every sandbox gets: the system folders, then the Node install: its binary's
+ * folder and the npm package `npm` beside it resolves to. A run with network gets its own
+ * resolv.conf from the attach helper.
  */
-export function baseBinds(network: boolean): string[] {
+export function baseBinds(): string[] {
   const system = [
     '/usr',
     '/bin',
     ...readdirSync('/').flatMap((n) => (/^lib/.test(n) ? [`/${n}`] : [])),
     '/etc',
   ];
-  const resolver =
-    network && lstatSync('/etc/resolv.conf', { throwIfNoEntry: false })?.isSymbolicLink() === true
-      ? ro(realpathSync('/etc/resolv.conf'))
-      : [];
-  return [...system.flatMap(ro), ...resolver, ...ro(nodeBin()), ...ro(dirname(dirname(npmCli())))];
+  return [...system.flatMap(ro), ...ro(nodeBin()), ...ro(dirname(dirname(npmCli())))];
 }
+
+/**
+ * /dev in every sandbox: five devices, the fd links and a private /dev/shm; no tty, pts or ptmx.
+ * Not `--dev /dev`, whose devpts makes bwrap nest a second user namespace that pasta cannot enter.
+ */
+export const DEV = [
+  ...['null', 'zero', 'full', 'random', 'urandom'].flatMap((d) => [
+    '--dev-bind',
+    `/dev/${d}`,
+    `/dev/${d}`,
+  ]),
+  ...['--symlink', '/proc/self/fd', '/dev/fd'],
+  ...['stdin', 'stdout', 'stderr'].flatMap((name, fd) => [
+    '--symlink',
+    `/proc/self/fd/${String(fd)}`,
+    `/dev/${name}`,
+  ]),
+  ...['--tmpfs', '/dev/shm'],
+];
 
 /**
  * Runs bubblewrap's own probe (`bwrap <args> true`) and refuses, with `what` and bwrap's own
@@ -82,19 +99,13 @@ export function probeBwrap(args: readonly string[], env: NodeJS.ProcessEnv, what
  * The bubblewrap arguments for a run in `work` (made by `mkdtemp`), starting in `cwd`, with the
  * folders in `readOnly`, inside `work`, bound read-only over its writable bind.
  */
-export function sandboxArgs(
-  work: string,
-  cwd: string,
-  network: boolean,
-  readOnly: readonly string[] = [],
-): string[] {
+export function sandboxArgs(work: string, cwd: string, readOnly: readonly string[] = []): string[] {
   const root = factoryRoot();
   return [
     '--unshare-all',
     // Its own PID namespace, which --unshare-all includes too: nothing a run leaves behind keeps
     // writing into `work` afterwards.
     '--unshare-pid',
-    ...(network ? ['--share-net'] : []),
     '--die-with-parent',
     // Its own session: sandboxed code cannot type into the Owner's terminal through TIOCSTI.
     '--new-session',
@@ -102,11 +113,11 @@ export function sandboxArgs(
     ...['--setenv', 'PATH', `${nodeBin()}:/usr/bin:/bin`],
     ...['--setenv', 'HOME', join(work, 'home')],
     ...['--setenv', 'npm_config_cache', join(work, 'npm-cache')],
-    ...baseBinds(network),
+    ...baseBinds(),
     ...['--ro-bind-try', join(root, 'dist'), join(root, 'dist')],
     ...ro(join(root, 'factory')),
     ...ro(join(root, 'node_modules')),
-    ...['--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp'],
+    ...['--proc', '/proc', ...DEV, '--tmpfs', '/tmp'],
     ...['--bind', work, work],
     ...readOnly.flatMap((dir) => ['--ro-bind', dir, dir]),
     ...['--chdir', cwd],
@@ -120,26 +131,32 @@ export function sandboxArgs(
 export function sandboxed(work: string, env: NodeJS.ProcessEnv): Runner {
   for (const dir of ['home', 'npm-cache']) mkdirSync(join(work, dir), { recursive: true });
   const outer = probeBwrap(
-    sandboxArgs(work, work, false),
+    sandboxArgs(work, work),
     env,
     'pull request code runs on this machine only inside bubblewrap, which failed (install it with: sudo apt install bubblewrap)',
   );
+  attached(sandboxArgs(work, work), ['true'], undefined, outer, NO_PASTA);
   return (argv, cwd, network = false) =>
-    spawnSync('bwrap', [...sandboxArgs(work, cwd, network, installed(work, network)), ...argv], {
-      env: outer,
-      ...SPAWN,
-    });
+    network
+      ? attached(sandboxArgs(work, cwd), argv, undefined, outer, NO_PASTA)
+      : spawnSync('bwrap', [...sandboxArgs(work, cwd, installed(work)), ...argv], {
+          env: outer,
+          ...SPAWN,
+        });
 }
+
+const NO_PASTA =
+  'the install gets network only through pasta, which failed (install it with: sudo apt install passt)';
 
 /**
  * After the install, its folder, bound read-only into every later run as the factory's own tools
  * are, so one run cannot change the packages the next one loads. It must still be the real
  * folder the install wrote: bwrap would follow a link put in its place.
  */
-function installed(work: string, network: boolean): string[] {
+function installed(work: string): string[] {
   const install = join(work, 'install');
   const stat = lstatSync(install, { throwIfNoEntry: false });
-  if (network || stat === undefined) return [];
+  if (stat === undefined) return [];
   if (!stat.isDirectory() || realpathSync(install) !== install)
     throw new RefusedError(`${install} is not a folder: refusing to bind it into a run`);
   return [install];

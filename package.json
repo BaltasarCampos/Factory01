@@ -18,7 +18,8 @@
     "test:formal": "bash scripts/tlc.sh",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "typecheck": "tsc -p tsconfig.eslint.json"
+    "typecheck": "tsc -p tsconfig.eslint.json",
+    "check:sandbox": "vitest run --project contract --reporter=verbose tests/contract/network.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",

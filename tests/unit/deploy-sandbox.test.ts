@@ -4,8 +4,9 @@
 import { realpathSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { npmCli } from '../../src/ci/sandbox.js';
-import { appFolder, deployArgs, RUNS, type DeployRun } from '../../src/deploy/sandbox.js';
+import { pastaArgs } from '../../src/ci/network.js';
+import { npmCli, sandboxArgs } from '../../src/ci/sandbox.js';
+import { appFolder, appPort, deployArgs, RUNS, type DeployRun } from '../../src/deploy/sandbox.js';
 
 const HOME = '/home/owner';
 const app = appFolder(HOME, 'owner/project');
@@ -87,7 +88,9 @@ describe('the deploy sandbox table (T069)', () => {
     const args = deployArgs(run, app, RELEASE);
 
     for (const [inside, flag] of Object.entries(folders)) expect(at(args, inside)).toBe(flag);
-    expect(args.includes('--share-net')).toBe(network);
+    // Network only through pasta, which the runner attaches: never bwrap's shared network.
+    expect(RUNS[run].network).toBe(network);
+    expect(args).not.toContain('--share-net');
     expect(environment(args)).toEqual({ PATH: `${node}:/usr/bin:/bin`, ...env });
     expect(args).toEqual(
       expect.arrayContaining([
@@ -126,11 +129,9 @@ describe('the deploy sandbox table (T069)', () => {
 
       expect(readOnly).toEqual(expect.arrayContaining(['/usr', '/etc', node, npm]));
       for (const from of readOnly)
-        expect(
-          ['/usr', '/bin', '/etc', node, npm].includes(from) ||
-            /^\/lib/.test(from) ||
-            from.startsWith('/run/systemd/resolve'),
-        ).toBe(true);
+        expect(['/usr', '/bin', '/etc', node, npm].includes(from) || /^\/lib/.test(from)).toBe(
+          true,
+        );
       expect(args.join(' ')).toContain('--tmpfs /tmp');
       expect(
         binds(args).filter(([, from]) => from === '/tmp' || from.startsWith('/run/user')),
@@ -149,5 +150,76 @@ describe('the deploy sandbox table (T069)', () => {
 
     expect(binds(args)).toContainEqual(['--ro-bind', node, node]);
     for (const from of fromHome) expect([node, npm, release]).toContain(from);
+  });
+});
+
+/** Everything the arguments put under /dev, in order. */
+function dev(args: readonly string[]): string[][] {
+  return args.flatMap((a, i) => {
+    if (a === '--dev') return [[a, args[i + 1] ?? '']];
+    const to = /^--(?:ro-|dev-)?bind(?:-try)?$|^--symlink$/.test(a) ? args[i + 2] : undefined;
+    if (to?.startsWith('/dev') === true) return [[a, args[i + 1] ?? '', to]];
+    if ((a === '--tmpfs' || a === '--dir') && args[i + 1]?.startsWith('/dev') === true)
+      return [[a, args[i + 1] ?? '']];
+    return [];
+  });
+}
+
+/** /dev in every sandbox, pinned: a wider one fails here (Owner decision 2026-10-13). */
+const DEV = [
+  ...['null', 'zero', 'full', 'random', 'urandom'].map((d) => [
+    '--dev-bind',
+    `/dev/${d}`,
+    `/dev/${d}`,
+  ]),
+  ['--symlink', '/proc/self/fd', '/dev/fd'],
+  ['--symlink', '/proc/self/fd/0', '/dev/stdin'],
+  ['--symlink', '/proc/self/fd/1', '/dev/stdout'],
+  ['--symlink', '/proc/self/fd/2', '/dev/stderr'],
+  ['--tmpfs', '/dev/shm'],
+];
+
+describe('/dev in both sandboxes (T069, T164)', () => {
+  it.each(ROWS.map(([run]) => run))(
+    'the %s run sees five devices, the fd links and a private /dev/shm: no tty, pts or ptmx',
+    (run) => {
+      expect(dev(deployArgs(run, app, RELEASE))).toEqual(DEV);
+    },
+  );
+
+  it('so does every run of the test sandbox', () => {
+    expect(dev(sandboxArgs('/tmp/factory-tests-x', '/tmp/factory-tests-x'))).toEqual(DEV);
+  });
+});
+
+describe('the pasta arguments (T069, T164)', () => {
+  it('the install forwards nothing, in either direction, and maps no gateway to the laptop', () => {
+    expect(pastaArgs(undefined, '/tmp/factory-pasta-x/pasta.pid')).toEqual([
+      ...['-f', '-q', '--config-net'],
+      ...['-t', 'none', '-u', 'none', '-T', 'none', '-U', 'none'],
+      '--no-map-gw',
+      ...['--dns-forward', '169.254.1.53'],
+      ...['-P', '/tmp/factory-pasta-x/pasta.pid'],
+    ]);
+  });
+
+  it('the app forwards only its port, and only on the laptop’s loopback', () => {
+    const args = pastaArgs(8080, '/tmp/factory-pasta-x/pasta.pid');
+    expect(args.slice(args.indexOf('-t'), args.indexOf('-t') + 2)).toEqual([
+      '-t',
+      '127.0.0.1/8080',
+    ]);
+    expect(args.filter((a) => a === '-t')).toHaveLength(1);
+  });
+
+  it.each([80, 1023, 0, -1, 65536, 3000.5, Number.NaN])(
+    'refuses %s as the app’s port: an integer from 1024 to 65535',
+    (port) => {
+      expect(() => appPort(port)).toThrow(/1024 to 65535/);
+    },
+  );
+
+  it.each([1024, 3000, 65535])('accepts %i', (port) => {
+    expect(appPort(port)).toBe(port);
   });
 });

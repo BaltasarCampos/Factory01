@@ -4,10 +4,14 @@
 // the system folders and the Node install read-only, a private /tmp, its own PID namespace (so a
 // process it leaves behind dies with it) and session, an empty environment but for PATH, HOME and
 // the app's settings path, and nothing else of the home folder: not ~/.factory, ~/.ssh, ~/.npmrc,
-// ~/.gitconfig or the Owner's checkout. Without a working bubblewrap the deploy refuses.
+// ~/.gitconfig or the Owner's checkout. The install and the app get network only through pasta
+// (slice 23b-1): the internet, never services listening only on the laptop or its local sockets.
+// Without a working bubblewrap or pasta the deploy refuses.
 import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { join } from 'node:path';
-import { baseBinds, nodeBin, probeBwrap, SPAWN } from '../ci/sandbox.js';
+import { attached } from '../ci/network.js';
+import { baseBinds, DEV, nodeBin, probeBwrap, SPAWN } from '../ci/sandbox.js';
+import { RefusedError } from '../cli/env.js';
 
 export type DeployRun = 'install' | 'build' | 'app' | 'backup';
 
@@ -24,6 +28,7 @@ interface Row {
   data?: 'rw';
   backups?: 'rw';
   settings?: 'ro';
+  /** Network through pasta; the app's alone forwards a port, its own. */
   network: boolean;
   home: string;
 }
@@ -68,7 +73,6 @@ export function deployArgs(run: DeployRun, app: AppFolder, release: string): str
     access === undefined ? [] : [access === 'rw' ? '--bind' : '--ro-bind', from, to];
   return [
     ...['--unshare-all', '--unshare-pid'],
-    ...(row.network ? ['--share-net'] : []),
     '--die-with-parent',
     // Its own session: nothing inside can type into the Owner's terminal through TIOCSTI.
     '--new-session',
@@ -76,8 +80,8 @@ export function deployArgs(run: DeployRun, app: AppFolder, release: string): str
     ...['--setenv', 'PATH', `${nodeBin()}:/usr/bin:/bin`],
     ...['--setenv', 'HOME', row.home],
     ...(row.settings === undefined ? [] : ['--setenv', 'APP_SETTINGS', INSIDE.settings]),
-    ...baseBinds(row.network),
-    ...['--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp'],
+    ...baseBinds(),
+    ...['--proc', '/proc', ...DEV, '--tmpfs', '/tmp'],
     ...bind(row.code, release, INSIDE.code),
     ...bind(row.data, app.data, INSIDE.data),
     ...bind(row.backups, app.backups, INSIDE.backups),
@@ -86,22 +90,46 @@ export function deployArgs(run: DeployRun, app: AppFolder, release: string): str
   ];
 }
 
+/** The app's port: an integer from 1024 to 65535, from factory code or the signed config. */
+export function appPort(port: number): number {
+  if (!Number.isInteger(port) || port < 1024 || port > 65535)
+    throw new RefusedError(
+      `the app's port must be an integer from 1024 to 65535, not ${String(port)}`,
+    );
+  return port;
+}
+
 export type DeployRunner = (run: DeployRun, argv: readonly string[]) => SpawnSyncReturns<string>;
 
+const NO_PASTA =
+  'factory deploy gives the product network only through pasta, which failed (install it with: sudo apt install passt)';
+
 /**
- * The runner for `release`, after bubblewrap's own probe: a missing `bwrap`, or user namespaces
- * that do not work, refuse, and nothing ever runs unsandboxed.
+ * The runner for `release`, after bubblewrap's probe and pasta's, together, on the install's
+ * arguments: a missing `bwrap` or `pasta`, or user namespaces that do not work, refuse, and
+ * nothing ever runs unsandboxed or on the shared network. The app run forwards `port`.
  */
 export function deployRunner(
   app: AppFolder,
   release: string,
   env: NodeJS.ProcessEnv,
+  port?: number,
 ): DeployRunner {
   const outer = probeBwrap(
     deployArgs('build', app, release),
     env,
     'factory deploy runs the product only inside bubblewrap, which failed (install it with: sudo apt install bubblewrap; it also needs working user namespaces)',
   );
-  return (run, argv) =>
-    spawnSync('bwrap', [...deployArgs(run, app, release), ...argv], { env: outer, ...SPAWN });
+  attached(deployArgs('install', app, release), ['true'], undefined, outer, NO_PASTA);
+  return (run, argv) => {
+    if (!RUNS[run].network)
+      return spawnSync('bwrap', [...deployArgs(run, app, release), ...argv], {
+        env: outer,
+        ...SPAWN,
+      });
+    if (run === 'app' && port === undefined)
+      throw new RefusedError('the app run needs its port: nothing was started');
+    const forward = run === 'app' && port !== undefined ? appPort(port) : undefined;
+    return attached(deployArgs(run, app, release), argv, forward, outer, NO_PASTA);
+  };
 }

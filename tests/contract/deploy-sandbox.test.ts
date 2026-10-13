@@ -1,10 +1,9 @@
 // Contract tests for the deploy sandbox (T069, slice 23a; design v1.8, Owner decisions
 // 2026-10-13), run for real as the test sandbox's are: in the factory's own CI, which installs
-// bubblewrap; never skipped when it is missing. From inside each run, what it can write, read and
-// reach must be exactly its row of the table, and nothing a run leaves behind outlives it.
-import { once } from 'node:events';
+// bubblewrap; never skipped when it is missing. From inside each run, what it can write and read
+// must be exactly its row of the table, and nothing a run leaves behind outlives it. What each run
+// can reach is network.test.ts's.
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { createServer, type AddressInfo } from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -13,6 +12,8 @@ import { appFolder, deployRunner, type DeployRun } from '../../src/deploy/sandbo
 import { tempDir } from '../helpers/keys.js';
 
 const RUN = 60_000;
+/** The app's port, which only the app run forwards. */
+const PORT = 20_000 + (process.pid % 10_000);
 
 /** The app folder with a release, data, backups and a settings file, under a temp home. */
 function layout() {
@@ -25,9 +26,8 @@ function layout() {
 }
 
 /** What a run can do, from inside it, as JSON on stdout. */
-const PROBE = (port: number, secret: string) => `
+const PROBE = (secret: string) => `
 const fs = require('node:fs');
-const net = require('node:net');
 const can = (f) => { try { f(); return true; } catch { return false; } };
 const out = {
   code: can(() => fs.writeFileSync('/app/code/w', 'x')),
@@ -36,41 +36,36 @@ const out = {
   settings: can(() => fs.readFileSync('/app/settings.env')),
   home: can(() => fs.readFileSync(${JSON.stringify(secret)})),
 };
-const socket = net.connect(${String(port)}, '127.0.0.1');
-socket.on('connect', () => { socket.destroy(); console.log(JSON.stringify({ ...out, net: true })); });
-socket.on('error', () => console.log(JSON.stringify({ ...out, net: false })));
+console.log(JSON.stringify(out));
 `;
 
 const EXPECTED: Record<DeployRun, Record<string, boolean>> = {
-  install: { code: true, data: false, backups: false, settings: false, home: false, net: true },
-  build: { code: true, data: false, backups: false, settings: false, home: false, net: false },
-  app: { code: false, data: true, backups: false, settings: true, home: false, net: true },
-  backup: { code: false, data: true, backups: true, settings: false, home: false, net: false },
+  install: { code: true, data: false, backups: false, settings: false, home: false },
+  build: { code: true, data: false, backups: false, settings: false, home: false },
+  app: { code: false, data: true, backups: false, settings: true, home: false },
+  backup: { code: false, data: true, backups: true, settings: false, home: false },
 };
 
 describe('the deploy sandbox, from inside each run (T069)', () => {
   it.each(Object.keys(EXPECTED) as DeployRun[])(
-    'the %s run writes, reads and reaches exactly what its row allows, and nothing under the real home',
-    async (run) => {
+    'the %s run writes and reads exactly what its row allows, and nothing under the real home',
+    (run) => {
       const fixture = mkdtempSync(join(homedir(), '.factory-deploy-test-'));
-      const server = createServer().listen(0, '127.0.0.1');
       try {
-        await once(server, 'listening');
         const secret = join(fixture, 'approve_ed25519');
         writeFileSync(secret, 'the Owner’s key\n');
-        const { port } = server.address() as AddressInfo;
         const { app, release } = layout();
 
         const result = deployRunner(
           app,
           release,
           process.env,
-        )(run, [process.execPath, '-e', PROBE(port, secret)]);
+          PORT,
+        )(run, [process.execPath, '-e', PROBE(secret)]);
 
         expect(result.stderr).toBe('');
         expect(JSON.parse(result.stdout)).toEqual(EXPECTED[run]);
       } finally {
-        server.close();
         rmSync(fixture, { recursive: true, force: true });
       }
     },
