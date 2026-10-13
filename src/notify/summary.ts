@@ -102,6 +102,8 @@ export interface SummaryFacts {
   resign?: { head: string; kind: 'diff' | 'interdiff' | 'gone'; text: string } | undefined;
   /** `factory merge` of a work item: what its checks found at `commit` (T068). */
   merge?: MergeView | undefined;
+  /** `factory merge` of a Define, log or factory-repository branch (T068, slice 22c). */
+  branchMerge?: BranchMergeView | undefined;
 }
 
 /** What `factory merge`'s checks found for a work item at the checked head; nothing is re-run. */
@@ -133,6 +135,26 @@ export interface MergeView {
   redGreen: { skipped: true; files: readonly string[] } | { skipped: false; checked: number };
   /** Waiver targets in force at the checked head. */
   waivers: readonly string[];
+}
+
+/**
+ * What `factory merge`'s checks found for a Define, log or factory-repository branch. The branch
+ * may be behind main, so what lands is git's merge of the two: the diffstat is the merge result's
+ * against main (data-model § Approval summary).
+ */
+export interface BranchMergeView {
+  pr: { number: number; title: string };
+  branch: string;
+  /** The merge rule that applied. */
+  rule: string;
+  head: string;
+  main: string;
+  /** The merge base of main and the head; main itself when main has not moved. */
+  base: string;
+  diffstat: MergeView['diffstat'];
+  ci: MergeView['ci'];
+  /** The branch's own check results, computed on this laptop. */
+  checks: readonly string[];
 }
 
 export type Summary = { ok: true; text: string } | { ok: false; missing: string[] };
@@ -241,17 +263,24 @@ const mergeMapping = (m: MergeView): string[] =>
     return `${id} → ${tests.length > 0 ? tests.join('; ') : 'no passing test'}`;
   });
 
+const ciLines = (ci: MergeView['ci']): string[] =>
+  ci.length === 0
+    ? []
+    : [
+        'CI on the checked head (GitHub Actions workflow runs):',
+        ...ci.map((j) =>
+          [
+            `${j.job} (${j.workflow}): ${j.state}`,
+            ...counted(j.failedBefore, 'attempt'),
+            ...counted(j.failedRuns, 'run'),
+          ].join('; '),
+        ),
+      ];
+
 function mergeResults(m: MergeView): string[] {
   const rg = m.redGreen;
   return [
-    'CI on the checked head (GitHub Actions workflow runs):',
-    ...m.ci.map((j) =>
-      [
-        `${j.job} (${j.workflow}): ${j.state}`,
-        ...counted(j.failedBefore, 'attempt'),
-        ...counted(j.failedRuns, 'run'),
-      ].join('; '),
-    ),
+    ...ciLines(m.ci),
     rg.skipped
       ? `red-green skipped: only test code changed (${rg.files.map(visible).join(', ')})`
       : `red-green: ${String(rg.checked)} ${rg.checked === 1 ? 'criterion goes' : 'criteria go'} from failing to passing`,
@@ -259,7 +288,32 @@ function mergeResults(m: MergeView): string[] {
   ];
 }
 
+/** A Define, log or factory-repository merge: each part from its view, or the part is missing. */
+const BRANCH_PARTS: Readonly<
+  Record<'changed' | 'results' | 'risks', (b: BranchMergeView) => string[]>
+> = {
+  changed: (b) => [
+    `Pull request #${String(b.pr.number)}: ${visible(b.pr.title)}`,
+    `Branch ${visible(b.branch)} at ${b.head}, onto main at ${b.main}`,
+    `${plural(b.diffstat.length, 'file')} changed by the merge result against main (what lands):`,
+    ...b.diffstat.map(
+      (d) => `${d.status} +${String(d.added)} -${String(d.removed)} ${visible(d.path)}`,
+    ),
+  ],
+  results: (b) => [...ciLines(b.ci), ...b.checks.map(visible)],
+  risks: (b) => [
+    `The ${b.rule} rule passes at the checked head and on the merge result`,
+    b.base === b.main
+      ? 'Main has not moved since the branch was cut'
+      : `Main moved since the branch was cut at ${b.base}: what lands is git's merge of the two, checked above`,
+  ],
+};
+
+const branchPart = (f: SummaryFacts, key: keyof typeof BRANCH_PARTS): Part =>
+  f.branchMerge === undefined ? noMerge : BRANCH_PARTS[key](f.branchMerge);
+
 function changed(f: SummaryFacts, gate: SummaryGate): Part {
+  if (gate === 'merge-branch') return branchPart(f, 'changed');
   if (gate === 'merge') return f.merge === undefined ? noMerge : mergeChanged(f, f.merge);
   if (gate === 'resume') {
     const p = f.pause;
@@ -334,6 +388,7 @@ function mapping(f: SummaryFacts, gate: SummaryGate): Part {
 const isTestWaiver = (f: SummaryFacts) => (f.waives ?? '').startsWith('test:');
 
 function results(f: SummaryFacts, gate: SummaryGate): Part {
+  if (gate === 'merge-branch') return branchPart(f, 'results');
   if (isTestWaiver(f)) {
     const covered = f.covered ?? [];
     if (covered.length === 0)
@@ -389,6 +444,7 @@ function usage(f: SummaryFacts): Part {
 }
 
 function risks(f: SummaryFacts, gate: SummaryGate): Part {
+  if (gate === 'merge-branch') return branchPart(f, 'risks');
   if (gate === 'resume') {
     const p = f.pause;
     if (p === undefined) return noPause;

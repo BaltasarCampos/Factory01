@@ -6,14 +6,20 @@
 // push whose lease lets it land only if main is still the main checked. A pull request whose head
 // moved after the check is closed with a comment naming the merged commit; one GitHub already
 // marked merged or closed is only commented on, and never makes the merge fail.
+//
+// A Define, log or factory-repository branch may be behind main, so its tree is git's merge of
+// the two, and `probeMerge` gives the branch's rule an unsigned commit of that tree to check
+// before the Owner is asked: what lands is what was checked.
 import { spawnSync } from 'node:child_process';
 import { ownerKeyPath } from '../approvals/sign.js';
 import type { CommandContext } from '../cli/commands.js';
 import { RefusedError } from '../cli/env.js';
 import { signedUnder } from '../git/history.js';
+import { safeGit } from '../git/diff.js';
 import { signedCommitTree } from '../git/sign.js';
 import { postComment } from '../github/comments.js';
 import { closePr, viewPr } from '../github/prs.js';
+import { visible } from '../notify/summary.js';
 import type { MergeContext } from './context.js';
 
 const NOTHING = 'nothing was merged';
@@ -28,6 +34,45 @@ function git(c: MergeContext, args: readonly string[]) {
   });
   if (result.error !== undefined) throw new RefusedError(`cannot run git: ${result.error.message}`);
   return { ok: result.status === 0, out: result.stdout.trim(), err: result.stderr.trim() };
+}
+
+/** Who makes the probe commit: unmistakably not the Owner, whatever the clone's config says. */
+const PROBE = ['user', 'author', 'committer'].flatMap((who) => [
+  ...['-c', `${who}.name=factory probe`, '-c', `${who}.email=probe@invalid`],
+]);
+
+/**
+ * Git's merge of the checked head into main: the tree `merge-tree --write-tree` gives, refused on
+ * any conflict, and an unsigned probe commit of it with the merge's own parents, main and the
+ * checked head, for the branch's rule to check as its head: its merge base is main, so the rule
+ * sees exactly what lands. No ref ever names the probe, and it is never pushed.
+ */
+export function probeMerge(c: MergeContext): { tree: string; probe: string } {
+  const n = String(c.pr.number);
+  const merged = safeGit(
+    c.cwd,
+    ['merge-tree', '--write-tree', '--name-only', '--no-messages', '-z', c.main, c.head],
+    c.env,
+  );
+  const [tree = '', ...paths] = merged.stdout.toString('utf8').split('\0');
+  if (merged.status === 1) {
+    const conflicted = [...new Set(paths.filter((p) => p !== ''))].map(visible).join(', ');
+    throw new RefusedError(
+      `#${n} conflicts with main in ${conflicted}; it needs a rebase before it can merge; ${NOTHING}`,
+    );
+  }
+  if (merged.status !== 0 || !/^[0-9a-f]{40,64}$/.test(tree))
+    throw new RefusedError(`git merge-tree failed: ${merged.stderr}; ${NOTHING}`);
+  const made = safeGit(
+    c.cwd,
+    [...PROBE, 'commit-tree', '--no-gpg-sign', tree, '-p', c.main, '-p', c.head],
+    c.env,
+    `factory merge probe of #${n}: never pushed\n`,
+  );
+  const probe = made.stdout.toString('utf8').trim();
+  if (made.status !== 0 || !/^[0-9a-f]{40,64}$/.test(probe))
+    throw new RefusedError(`cannot make the probe commit: ${made.stderr}; ${NOTHING}`);
+  return { tree, probe };
 }
 
 /** The commit `ref` names on origin now, or '' when it is gone. */

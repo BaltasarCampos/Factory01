@@ -4,6 +4,7 @@ import {
   buildSummary,
   GATE_PARTS,
   PART_TITLES,
+  type BranchMergeView,
   type MergeView,
   type SummaryFacts,
 } from '../../src/notify/summary.js';
@@ -273,6 +274,16 @@ describe('gates built later (T053, T068)', () => {
       'What changed',
       'Spec mapping',
       'Tests and review',
+    ]);
+  });
+
+  it('a Define, log or factory-repository merge summary without its view refuses every part it requires', () => {
+    const s = buildSummary(facts({ gate: 'merge', kind: 'merge-branch' }));
+
+    expect(s.ok ? [] : s.missing.map((m) => m.split(':')[0])).toEqual([
+      'What changed',
+      'Tests and review',
+      'Known risks',
     ]);
   });
 });
@@ -577,6 +588,88 @@ describe('merge summary of a work item (T068, AC-094)', () => {
     const s = buildSummary(merge({}, { verify: undefined }));
 
     expect(s.ok).toBe(false);
+    expect(s.ok ? [] : s.missing).toContainEqual(expect.stringMatching(/^Tests and review: /));
+  });
+});
+
+// The merge summary of a Define, log or factory-repository branch (T068, slice 22c): the merge
+// result's diffstat against main, CI, and the branch's own check, agent text through visible().
+describe('merge summary of a Define, log or factory-repository branch (T068, slice 22c)', () => {
+  const MAIN = 'a'.repeat(40);
+  const view = (over: Partial<BranchMergeView> = {}): BranchMergeView => ({
+    pr: { number: 50, title: 'Define: brief and backlog' },
+    branch: 'claude/define',
+    rule: 'define',
+    head: COMMIT,
+    main: MAIN,
+    base: MAIN,
+    diffstat: [{ path: '.factory/brief.md', status: 'added', added: 20, removed: 0 }],
+    ci: [
+      {
+        ...{ job: 'build-test', workflow: '.github/workflows/ci.yml', state: 'success' },
+        ...{ failedBefore: 0, failedRuns: 1 },
+      },
+    ],
+    checks: ['Define output check: complete'],
+    ...over,
+  });
+  const branchMerge = (over: Partial<BranchMergeView> = {}) =>
+    facts({
+      gate: 'merge',
+      kind: 'merge-branch',
+      issue: { number: 50, title: 'Define: brief and backlog', body: '', labels: [] },
+      branchMerge: view(over),
+    });
+
+  it("shows the merge result's diffstat against main, labelled so, CI and the branch's own check", () => {
+    const t = text(branchMerge());
+
+    const changed = part(t, PART_TITLES.changed);
+    expect(changed).toContain('Pull request #50: Define: brief and backlog');
+    expect(changed).toContain(`Branch claude/define at ${COMMIT}, onto main at ${MAIN}`);
+    expect(changed).toContain('1 file changed by the merge result against main (what lands):');
+    expect(changed).toContain('added +20 -0 .factory/brief.md');
+    const results = part(t, PART_TITLES.results);
+    expect(results).toContain(
+      'build-test (.github/workflows/ci.yml): success; 1 earlier run failed',
+    );
+    expect(results).toContain('Define output check: complete');
+    expect(part(t, PART_TITLES.mapping)).toEqual(['—']);
+    expect(part(t, PART_TITLES.usage)).toEqual(['—']);
+  });
+
+  it('says under Known risks whether main moved since the branch was cut', () => {
+    const still = part(text(branchMerge()), PART_TITLES.risks);
+    const base = 'b'.repeat(40);
+    const moved = part(text(branchMerge({ base })), PART_TITLES.risks);
+
+    expect(still).toContain('The define rule passes at the checked head and on the merge result');
+    expect(still).toContain('Main has not moved since the branch was cut');
+    expect(moved).toContain(
+      `Main moved since the branch was cut at ${base}: what lands is git's merge of the two, checked above`,
+    );
+  });
+
+  it('shows agent-written text through visible(): the title, the branch and file names', () => {
+    const t = text(
+      branchMerge({
+        pr: { number: 50, title: 'Define‮ brief' },
+        branch: 'owner-​work',
+        diffstat: [{ path: 'docs/\u001b[2Jx.md', status: 'added', added: 1, removed: 0 }],
+      }),
+    );
+
+    for (const shown of [
+      'Pull request #50: Define\\u{202e} brief',
+      'Branch owner-\\u{200b}work at',
+      'added +1 -0 docs/\\u{1b}[2Jx.md',
+    ])
+      expect(t).toContain(shown);
+  });
+
+  it('refuses when the branch check has nothing to show', () => {
+    const s = buildSummary(branchMerge({ checks: [], ci: [] }));
+
     expect(s.ok ? [] : s.missing).toContainEqual(expect.stringMatching(/^Tests and review: /));
   });
 });
