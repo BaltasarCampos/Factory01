@@ -20,6 +20,7 @@ This is v1.8: it records the decisions made while building slice 15. Only a sign
 - Retries are counted only from gate failures the dispatcher sees itself, never from the event log, so a session cannot delay its own escalation by reporting nothing.
 - The laptop's diff reads git's raw tree and blob data, because plain git diff still applies a pull request's own .gitattributes and could hide changed lines.
 - Pull request tests that factory merge or factory approve runs on your laptop run only inside a bubblewrap sandbox, never next to your keys.
+- The product that factory deploy builds and runs on your laptop, and its daily backup, run inside a bubblewrap sandbox too: merged code is still agent code, so it never sees your home folder or the factory's keys.
 - v1.7 changes (red-green per criterion, waivers bound to the head and their exact target, signed first commits, branches closed after merge) are recorded in the Decisions log.
 
 ## Vision and scope
@@ -432,7 +433,7 @@ Every agent session runs as a Claude Code cloud session on an Anthropic-managed 
 | Claude Code cloud sessions | Every station's agent: clone the repo, edit, run the full test suite, push a `claude/` branch, open or update the pull request | Included in Pro with no compute charge; isolated VM per session; keeps running when the laptop sleeps |
 | Cloud routines | A daily routine that advances the line; a GitHub trigger that starts review when a pull request opens | Self-running with the laptop closed |
 | GitHub-hosted runners | CI on every pull request: tests, type check, lint, scanners, Playwright, TLA+ and Dafny | A second, independent check of what the session reports |
-| Laptop (Crostini) | `factory` dispatcher (`claude --cloud` under the hood), your approvals, the app (Node.js + SQLite) | Light: no model runs locally |
+| Laptop (Crostini) | `factory` dispatcher (`claude --cloud` under the hood), your approvals, the app (Node.js + SQLite) in a bubblewrap sandbox | Light: no model runs locally |
 
 **Limits to respect:**
 
@@ -493,7 +494,7 @@ Agents run with least privilege in disposable sandboxes, and every action is log
 
 **Security**
 
-- Agents never hold production credentials; deploys run on your laptop through the factory deploy command, outside any agent session.
+- Agents never hold production credentials; deploys run on your laptop through the factory deploy command, outside any agent session. The product's build, the running app and its daily backup run inside a bubblewrap sandbox: no home folder, an empty environment apart from the app's own settings, only the app's folder (code, data and backups) writable, and network for the install and the running app. A systemd user service keeps the app running, and without bubblewrap the deploy refuses.
 - Sandboxes are ephemeral cloud VMs, with network egress limited to the Trusted allowlist.
 - Secrets are injected only at runtime into CI, never into agent context.
 - Untrusted text (tickets, issue comments, web pages, dependency READMEs) is treated as data; agents cannot act on instructions found in it without a human.
@@ -553,6 +554,7 @@ The factory is most exposed where three things meet: agents that can read privat
 | Lesson poisoning | Untrusted text in the logs becomes a "lesson" | Coach changes are pull requests you review; lessons can never touch guardrails |
 | Log tampering | An agent rewrites history in `events.jsonl` or `claude/factory-log` | The log is telemetry, never trusted for decisions; `factory merge` accepts only additions under allowed paths |
 | Agent code on your laptop | factory merge or factory approve runs a pull request's tests, which copy your key file, read your GitHub token or replace the factory CLI before you next type your passphrase | The tests and their install run only inside a bubblewrap sandbox: no home directory, no agent sockets, an empty environment, no network for the tests, only temporary folders writable; without the sandbox the command refuses to run them. CI jobs that run pull request code get read-only permissions and no secrets |
+| Deployed code on your laptop | Merged code, during the build, while the app runs or in its daily backup, reads your key file or edits the laptop's own key lists, the root every signature check trusts | factory deploy runs the build, the app and the backup only inside a bubblewrap sandbox: no home folder, only the app's own folder writable, an environment holding only the app's settings, network for the install and the running app; without the sandbox the deploy refuses |
 | Factory supply chain | A malicious pull request to the public factory repo | Factory-repo merges are signed local merges after a laptop check; releases are signed tags you review; projects pin `<tag>@<sha>`; outside pull requests never trigger agents |
 
 ### Guardrail protection
@@ -633,7 +635,7 @@ TypeScript end to end (confirmed): one typed language across front and back end 
 | Scanners | Semgrep Community Edition, gitleaks, npm audit, license-checker, Dependabot alerts; weekly scan of main | £0 |
 | Tests | Vitest, Playwright, fast-check, run in the cloud session and again in CI | £0 |
 | Formal verification | TLA+ for workflows and state machines; Dafny for small critical functions; in CI | £0 |
-| Release | `factory deploy` pulls main, builds and restarts the app on the laptop; feature flags in config | £0 |
+| Release | `factory deploy` pulls main, builds and restarts the app on the laptop inside a bubblewrap sandbox, kept running by a systemd user service; feature flags in config | £0 |
 | Observability | JSONL event log + a weekly metrics report written by the Ops agent | £0 |
 
 **Spec workflow:** GitHub's Spec Kit (1.0.13) drives stations 2–4 through its hyphenated commands (`/speckit-specify`, `/speckit-clarify`, `/speckit-plan`, `/speckit-tasks`, `/speckit-analyze`, `/speckit-implement`), with artifacts in `specs/<issue>-<slug>/`. The constitution sits in `.specify/memory/constitution.md`, installed by the factory tool and protected as a guardrail file. Spec Kit's plan, spec and tasks templates are updated in Phase 0 to enforce its principles. CI calls `factory ci` commands built from the pinned factory commit (see Merging and verification on your laptop).
@@ -785,6 +787,7 @@ Eleven review rounds produced the frozen v1.0; v1.1 recorded the Spec Kit alignm
 | Can telemetry block an approval? | No: usage is shown when present and never required | Quality gates |
 | Who counts retries? | The dispatcher, from gate failures it sees itself (failed required checks, failing verify reports); events a session writes never count, so a silent session still escalates | Control plane; Merging and verification |
 | Where does the laptop run a pull request's tests? | Only in a bubblewrap sandbox with no home, no environment and no network for the tests; no sandbox, no run. CI needs none: its runner is thrown away | Security; Merging and verification |
+| Where does the deployed app run? | On your laptop, in a bubblewrap sandbox kept running by a systemd user service: no home folder, only its own folder writable, network allowed. Its build and daily backup run in the same sandbox | Security; Release |
 
 **Still open**
 
