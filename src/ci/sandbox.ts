@@ -16,7 +16,11 @@ export type Runner = (
   network?: boolean,
 ) => SpawnSyncReturns<string>;
 
-const SPAWN = { encoding: 'utf8', maxBuffer: 256 * 1024 * 1024, timeout: 30 * 60 * 1000 } as const;
+export const SPAWN = {
+  encoding: 'utf8',
+  maxBuffer: 256 * 1024 * 1024,
+  timeout: 30 * 60 * 1000,
+} as const;
 
 /** `factory ci <check>` runs pull request code unsandboxed only on GitHub's runner. */
 export const inGithubActions = (env: NodeJS.ProcessEnv) => env.GITHUB_ACTIONS === 'true';
@@ -37,23 +41,46 @@ export function npmCli(): string {
   return cli;
 }
 
-/** The bubblewrap arguments for a run in `work` (made by `mkdtemp`), starting in `cwd`. */
-export function sandboxArgs(work: string, cwd: string, network: boolean): string[] {
-  const node = dirname(realpathSync(process.execPath));
-  const root = factoryRoot();
-  const ro = (path: string) => ['--ro-bind', path, path];
+const ro = (path: string) => ['--ro-bind', path, path];
+
+/** The folder of the Node binary every sandbox runs, by its real path (nvm's lives under home). */
+export const nodeBin = () => dirname(realpathSync(process.execPath));
+
+/**
+ * Read-only binds every sandbox gets: the system folders, then, with the network on, the resolver
+ * that /etc/resolv.conf links to (systemd's, under /run), that one file, never the rest of /run;
+ * then the Node install: its binary's folder and the npm package `npm` beside it resolves to.
+ */
+export function baseBinds(network: boolean): string[] {
   const system = [
     '/usr',
     '/bin',
     ...readdirSync('/').flatMap((n) => (/^lib/.test(n) ? [`/${n}`] : [])),
     '/etc',
   ];
-  // With the network on, a resolver that /etc/resolv.conf links to (systemd's, under /run) is
-  // bound too: that one file, never the rest of /run.
   const resolver =
     network && lstatSync('/etc/resolv.conf', { throwIfNoEntry: false })?.isSymbolicLink() === true
       ? ro(realpathSync('/etc/resolv.conf'))
       : [];
+  return [...system.flatMap(ro), ...resolver, ...ro(nodeBin()), ...ro(dirname(dirname(npmCli())))];
+}
+
+/**
+ * Runs bubblewrap's own probe (`bwrap <args> true`) and refuses, with `what` and bwrap's own
+ * error, if it fails; never an unsandboxed fallback. Returns the outer environment: `bwrap` is
+ * found on the caller's PATH, and nothing else of the environment reaches it.
+ */
+export function probeBwrap(args: readonly string[], env: NodeJS.ProcessEnv, what: string) {
+  const outer = { PATH: env.PATH ?? '' };
+  const probe = spawnSync('bwrap', [...args, 'true'], { env: outer, encoding: 'utf8' });
+  if (probe.error !== undefined || probe.status !== 0)
+    throw new RefusedError(`${what}: ${probe.error?.message ?? probe.stderr.trim()}`);
+  return outer;
+}
+
+/** The bubblewrap arguments for a run in `work` (made by `mkdtemp`), starting in `cwd`. */
+export function sandboxArgs(work: string, cwd: string, network: boolean): string[] {
+  const root = factoryRoot();
   return [
     '--unshare-all',
     ...(network ? ['--share-net'] : []),
@@ -61,13 +88,10 @@ export function sandboxArgs(work: string, cwd: string, network: boolean): string
     // Its own session: sandboxed code cannot type into the Owner's terminal through TIOCSTI.
     '--new-session',
     '--clearenv',
-    ...['--setenv', 'PATH', `${node}:/usr/bin:/bin`],
+    ...['--setenv', 'PATH', `${nodeBin()}:/usr/bin:/bin`],
     ...['--setenv', 'HOME', join(work, 'home')],
     ...['--setenv', 'npm_config_cache', join(work, 'npm-cache')],
-    ...system.flatMap(ro),
-    ...resolver,
-    ...ro(node),
-    ...ro(dirname(dirname(npmCli()))),
+    ...baseBinds(network),
     ...['--ro-bind-try', join(root, 'dist'), join(root, 'dist')],
     ...ro(join(root, 'factory')),
     ...ro(join(root, 'node_modules')),
@@ -83,16 +107,11 @@ export function sandboxArgs(work: string, cwd: string, network: boolean): string
  */
 export function sandboxed(work: string, env: NodeJS.ProcessEnv): Runner {
   for (const dir of ['home', 'npm-cache']) mkdirSync(join(work, dir), { recursive: true });
-  // `bwrap` is found on the caller's PATH; nothing else of the environment reaches it.
-  const outer = { PATH: env.PATH ?? '' };
-  const probe = spawnSync('bwrap', [...sandboxArgs(work, work, false), 'true'], {
-    env: outer,
-    encoding: 'utf8',
-  });
-  if (probe.error !== undefined || probe.status !== 0)
-    throw new RefusedError(
-      `pull request code runs on this machine only inside bubblewrap, which failed (install it with: sudo apt install bubblewrap): ${probe.error?.message ?? probe.stderr.trim()}`,
-    );
+  const outer = probeBwrap(
+    sandboxArgs(work, work, false),
+    env,
+    'pull request code runs on this machine only inside bubblewrap, which failed (install it with: sudo apt install bubblewrap)',
+  );
   return (argv, cwd, network = false) =>
     spawnSync('bwrap', [...sandboxArgs(work, cwd, network), ...argv], { env: outer, ...SPAWN });
 }
