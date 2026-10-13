@@ -150,30 +150,26 @@ describe('the laptop sandbox fails closed (T164)', () => {
     );
   });
 
-  it.each([false, true])(
-    'the bwrap arguments (network %s) start a new session and bind nothing of $HOME',
-    (network) => {
-      const work = realpathSync(tempDir());
-      const args = sandboxArgs(work, work, network);
-      expect(args).toEqual(
-        expect.arrayContaining(['--unshare-all', '--unshare-pid', '--new-session', '--clearenv']),
-      );
-      expect(args.includes('--share-net')).toBe(network);
-      const home = homedir();
-      const sources = args.flatMap((a, i) =>
-        /^--(?:ro-|dev-)?bind(?:-try)?$/.test(a) ? [args[i + 1] ?? ''] : [],
-      );
-      expect(sources.filter((s) => s === home || home.startsWith(`${s}/`) || s === '/')).toEqual(
-        [],
-      );
-      expect(sources.filter((s) => s.startsWith('/run/user') || s === '/tmp')).toEqual([]);
-    },
-  );
+  it('the bwrap arguments start a new session, never share the network and bind nothing of $HOME', () => {
+    const work = realpathSync(tempDir());
+    const args = sandboxArgs(work, work);
+    expect(args).toEqual(
+      expect.arrayContaining(['--unshare-all', '--unshare-pid', '--new-session', '--clearenv']),
+    );
+    // The install's network is pasta's, attached by the runner (T164, slice 23b-1).
+    expect(args).not.toContain('--share-net');
+    const home = homedir();
+    const sources = args.flatMap((a, i) =>
+      /^--(?:ro-|dev-)?bind(?:-try)?$/.test(a) ? [args[i + 1] ?? ''] : [],
+    );
+    expect(sources.filter((s) => s === home || home.startsWith(`${s}/`) || s === '/')).toEqual([]);
+    expect(sources.filter((s) => s.startsWith('/run/user') || s === '/tmp')).toEqual([]);
+  });
 
   it('binds the install read-only after the one writable bind, the run’s temp folder', () => {
     const work = realpathSync(tempDir());
     const install = join(work, 'install');
-    const args = sandboxArgs(work, work, false, [install]).join(' ');
+    const args = sandboxArgs(work, work, [install]).join(' ');
     expect(args).toContain(`--bind ${work} ${work} --ro-bind ${install} ${install}`);
   });
 });
