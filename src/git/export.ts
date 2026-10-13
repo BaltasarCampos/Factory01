@@ -5,19 +5,10 @@
 // through one; and a tree naming one path both a link or file and a folder, which `git mktree`
 // accepts, is refused. `deploy` exports into a folder that did not exist; `writeTree` writes into
 // the workspaces of `merge` and `approve`, which their sandboxed runs can write to as well.
-import {
-  closeSync,
-  constants,
-  fchmodSync,
-  lstatSync,
-  mkdirSync,
-  openSync,
-  realpathSync,
-  symlinkSync,
-  writeSync,
-} from 'node:fs';
-import { dirname, join } from 'node:path';
+import { lstatSync, mkdirSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { RefusedError } from '../cli/env.js';
+import { createFile, freshFolder } from '../fs/safe-files.js';
 import { safeGit } from './diff.js';
 
 export interface TreeEntry {
@@ -68,18 +59,6 @@ export function treeEntries(repo: string, commit: string, env: NodeJS.ProcessEnv
   return entries;
 }
 
-/** `path` as a real folder, made when missing; no part of it may be a link. */
-export function realFolder(path: string): void {
-  const stat = lstatSync(path, { throwIfNoEntry: false });
-  if (stat === undefined) {
-    realFolder(dirname(path));
-    mkdirSync(path);
-  } else if (!stat.isDirectory() || realpathSync(path) !== path)
-    throw new RefusedError(`${path} is not a folder: refusing to write through it`);
-}
-
-const CREATE = constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW;
-
 /**
  * Writes `entries` (from `treeEntries`, gitlinks left out) into `dir`, a real folder: folders
  * first, from the top down, then files, created exclusively and never through a link, 100755 ones
@@ -114,28 +93,34 @@ export function writeEntries(
     entries.map((e) => e.oid).join('\n') + '\n',
   );
   if (batch.status !== 0) throw new RefusedError(`cannot read the blobs: ${batch.stderr}`);
-  const links: [string, string][] = [];
+  // Every header is checked before anything is written.
+  const blobs: [TreeEntry, Buffer][] = [];
   let at = 0;
   for (const entry of entries) {
     const header = batch.stdout.indexOf(0x0a, at);
-    const size = Number(batch.stdout.subarray(at, header).toString('utf8').split(' ')[2]);
-    const bytes = batch.stdout.subarray(header + 1, header + 1 + size);
-    at = header + 1 + size + 1;
-    const full = join(dir, ...entry.path.split('/'));
-    if (entry.mode === '120000') {
-      links.push([bytes.toString('utf8'), full]);
-      continue;
-    }
-    const mode = entry.mode === '100755' ? 0o755 : 0o644;
-    const fd = openSync(full, CREATE, mode);
-    try {
-      writeSync(fd, bytes);
-      fchmodSync(fd, mode);
-    } finally {
-      closeSync(fd);
-    }
+    const line = batch.stdout.subarray(at, header < 0 ? undefined : header).toString('utf8');
+    const [oid, type, size] = line.split(' ');
+    if (header < 0 || oid !== entry.oid || type !== 'blob' || !/^\d+$/.test(size ?? ''))
+      throw new RefusedError(
+        `git cat-file said ${JSON.stringify(line)} for ${entry.path}, not "<oid> blob <size>"`,
+      );
+    blobs.push([entry, batch.stdout.subarray(header + 1, header + 1 + Number(size))]);
+    at = header + 1 + Number(size) + 1;
   }
-  for (const [target, full] of links) symlinkSync(target, full);
+  const links: [string, string][] = [];
+  for (const [entry, bytes] of blobs) {
+    const full = join(dir, ...entry.path.split('/'));
+    if (entry.mode === '120000') links.push([bytes.toString('utf8'), full]);
+    else createFile(full, bytes, entry.mode === '100755' ? 0o755 : 0o644);
+  }
+  for (const [target, full] of links)
+    try {
+      symlinkSync(target, full);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST')
+        throw new RefusedError(`${full} was already there: refusing to write over it`);
+      throw err;
+    }
 }
 
 /**
@@ -154,15 +139,6 @@ export function exportTree(
     throw new RefusedError(
       `${commit} holds a submodule at ${JSON.stringify(submodule.path)}, which a release cannot hold`,
     );
-  realFolder(dirname(dir));
-  try {
-    mkdirSync(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST')
-      throw new RefusedError(
-        `${dir} already exists: a release is always exported into a new folder`,
-      );
-    throw err;
-  }
+  freshFolder(dir, 'a release is always exported into a new folder');
   writeEntries(repo, entries, dir, env);
 }

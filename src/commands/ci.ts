@@ -1,6 +1,5 @@
 // `factory ci <check>` (contracts/cli.md, contracts/ci-checks.md): the checks the project's CI
 // workflows run, from the CLI built at the release pinned on main. Exit 0 passes, 1 fails.
-import { existsSync, readFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { checkAcMap, checkedSet, passingTitles } from '../ci/ac-map.js';
 import { checkAppendOnly, LOG_BRANCH } from '../ci/append-only.js';
@@ -11,10 +10,11 @@ import { scanGitleaks, scanMarkers, scanSemgrep } from '../ci/scan.js';
 import { inGithubActions } from '../ci/sandbox.js';
 import { measureSize } from '../ci/size.js';
 import { testHead } from '../ci/test.js';
-import type { Isolation } from '../ci/vitest-run.js';
+import { REPORT_CAP, type Isolation } from '../ci/vitest-run.js';
 import { findingLine, weakened } from '../ci/weakened.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
+import { readCapped } from '../fs/safe-files.js';
 import { fileAt, mergeBase, safeDiff } from '../git/diff.js';
 import { parseConfig, RELEASE_LIMITS } from '../model/config.js';
 import type { ProjectConfig, Tier } from '../model/types.js';
@@ -73,9 +73,10 @@ function mainConfig(ctx: CommandContext): ProjectConfig {
 function readReport(ctx: CommandContext, path: string, head: string): string {
   if (fileAt(ctx.cwd, head, path, ctx.env) !== undefined)
     throw new RefusedError(`${path} is committed at the head; CI writes its own reports`);
-  const full = join(ctx.cwd, path);
-  if (!existsSync(full)) throw new RefusedError(`${path} not found; run the tests first`);
-  return readFileSync(full, 'utf8');
+  // Read without following a link: the checkout is the pull request's.
+  const text = readCapped(join(ctx.cwd, path), REPORT_CAP);
+  if (text === undefined) throw new RefusedError(`${path} not found; run the tests first`);
+  return text;
 }
 
 function sizeCheck(ctx: CommandContext, args: readonly string[]): number {

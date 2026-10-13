@@ -8,20 +8,12 @@
 // outside GitHub Actions they and their install run only in the sandbox (T164).
 import type { SpawnSyncReturns } from 'node:child_process';
 import { createRequire } from 'node:module';
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readFileSync,
-  realpathSync,
-  rmSync,
-  symlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix, relative } from 'node:path';
 import { RefusedError } from '../cli/env.js';
-import { realFolder, treeEntries, writeEntries } from '../git/export.js';
+import { createFile, freshFolder, readCapped, realFolder } from '../fs/safe-files.js';
+import { treeEntries, writeEntries } from '../git/export.js';
 import type { TestConfig } from '../stations/edges.js';
 import { SOURCE_GLOBS } from './coverage.js';
 import { npmCli, sandboxed, unsandboxed, type Runner } from './sandbox.js';
@@ -59,9 +51,21 @@ export function writeTree(
 
 /** Links the project's install into a tree, so its code resolves the head's dependencies. */
 export function linkInstall(dir: string, install: string | undefined): void {
-  if (install !== undefined && existsSync(install))
+  if (install === undefined || !existsSync(install)) return;
+  try {
     symlinkSync(install, join(dir, 'node_modules'), 'dir');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST')
+      throw new RefusedError(`${join(dir, 'node_modules')} was already there`);
+    throw err;
+  }
 }
+
+/** Why a run's folder may not be there before the factory makes it. */
+const PLANTED = 'an earlier sandboxed run made it';
+
+/** The most the factory reads of a run's results or coverage report. */
+export const REPORT_CAP = 64 * 1024 * 1024;
 
 const INSTALL_FILES = ['package.json', 'package-lock.json', 'npm-shrinkwrap.json', '.npmrc'];
 
@@ -78,6 +82,7 @@ export function installHead(
   env: NodeJS.ProcessEnv,
 ): string | undefined {
   const dir = join(work, 'install');
+  freshFolder(dir, PLANTED);
   const files = writeTree(repo, head, dir, (p) => INSTALL_FILES.includes(p), env);
   if (!files.includes('package.json')) return undefined;
   const npm = run([process.execPath, npmCli(), 'ci', '--ignore-scripts'], dir, true);
@@ -95,6 +100,8 @@ export type Isolation = { sandbox: true } | { sandbox: false; install: string };
 export interface Workspace {
   /** Writes `commit`'s files for which `keep` holds into the named tree; returns their paths. */
   write(name: string, commit: string, keep?: (path: string) => boolean): string[];
+  /** Writes the factory's own file at `path` in the named tree, such as the release's tsconfig. */
+  file(name: string, path: string, text: string): void;
   /** The named tree's folder, inside the named run's folder. */
   tree(name: string): string;
   /** Runs `argv` in the named tree, with the install linked in. */
@@ -103,7 +110,14 @@ export interface Workspace {
   test(name: string, coverage?: boolean): TestRun;
 }
 
-/** Runs `fn` in a fresh temp folder, removed afterwards, with the head's install ready. */
+/**
+ * Runs `fn` in a fresh temp folder, removed afterwards, with the head's install ready. Every
+ * sandboxed run can write anywhere in it, so each run's folder is made here at its first use and
+ * refused if a run planted it already, and the factory writes into it only before the first run
+ * there: files a run planted never end up in what the factory writes or reads. That keeps the
+ * factory's files clean, not a verdict: a test can tell which run it is in, and the runs still
+ * share `work/home`.
+ */
 export function inWorkspace<T>(
   repo: string,
   head: string,
@@ -116,17 +130,33 @@ export function inWorkspace<T>(
     const run = isolation.sandbox ? sandboxed(work, env) : unsandboxed(env);
     const install = isolation.sandbox ? installHead(repo, head, work, run, env) : isolation.install;
     const tree = (name: string) => join(work, name, 'tree');
-    const linked = new Set<string>();
-    const ready = (name: string) => {
+    const made = new Set<string>();
+    const ran = new Set<string>();
+    /** The named tree, its run's folder made fresh at first use; refused once a run was there. */
+    const open = (name: string) => {
+      if (ran.has(name))
+        throw new RefusedError(
+          `work/${name} has had a run: the factory writes into a run's folder only before the first run there`,
+        );
+      if (!made.has(name)) freshFolder(join(work, name), PLANTED);
+      made.add(name);
       realFolder(tree(name));
-      if (!linked.has(name)) linkInstall(tree(name), install);
-      linked.add(name);
       return tree(name);
     };
+    const ready = (name: string) => {
+      const dir = open(name);
+      linkInstall(dir, install);
+      ran.add(name);
+      return dir;
+    };
     return fn({
-      write: (name, commit, keep = () => true) => writeTree(repo, commit, tree(name), keep, env),
+      write: (name, commit, keep = () => true) => writeTree(repo, commit, open(name), keep, env),
+      file: (name, path, text) => {
+        createFile(join(open(name), path), text);
+      },
       tree,
       run: (name, argv) => run(argv, ready(name)),
+      // The run's config is written into its folder before Vitest starts.
       test: (name, coverage = false) =>
         runTests(ready(name), join(work, name), options.config, run, coverage),
     });
@@ -209,7 +239,6 @@ export function runTests(
   const vitest = factoryVitest();
   const configDir = join(work, 'config');
   const out = join(work, 'results.json');
-  mkdirSync(configDir, { recursive: true });
   const options = {
     root: dir,
     cacheDir: join(work, 'cache'),
@@ -240,17 +269,18 @@ export function runTests(
   };
   // The alias patterns go in as text and become RegExps in the config module.
   const text = `const o = ${JSON.stringify(options)};\nfor (const a of o.resolve.alias) a.find = new RegExp(a.find);\nexport default o;\n`;
-  writeFileSync(join(configDir, 'vitest.config.mjs'), text);
-  writeFileSync(join(configDir, 'reporter.mjs'), REPORTER(out));
+  createFile(join(configDir, 'vitest.config.mjs'), text);
+  createFile(join(configDir, 'reporter.mjs'), REPORTER(out));
   const result = run(
     [process.execPath, vitest.bin, 'run', '--config', join(configDir, 'vitest.config.mjs')],
     dir,
   );
-  if (!existsSync(out))
+  const results = readCapped(out, REPORT_CAP);
+  if (results === undefined)
     throw new RefusedError(
       `vitest wrote no results: ${(result.stderr || result.stdout).trim().slice(-2000)}`,
     );
-  return parseResults(readFileSync(out, 'utf8'), dir);
+  return parseResults(results, dir);
 }
 
 type FileResult = { name?: unknown; status?: unknown; assertionResults?: unknown };

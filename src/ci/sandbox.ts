@@ -78,11 +78,22 @@ export function probeBwrap(args: readonly string[], env: NodeJS.ProcessEnv, what
   return outer;
 }
 
-/** The bubblewrap arguments for a run in `work` (made by `mkdtemp`), starting in `cwd`. */
-export function sandboxArgs(work: string, cwd: string, network: boolean): string[] {
+/**
+ * The bubblewrap arguments for a run in `work` (made by `mkdtemp`), starting in `cwd`, with the
+ * folders in `readOnly`, inside `work`, bound read-only over its writable bind.
+ */
+export function sandboxArgs(
+  work: string,
+  cwd: string,
+  network: boolean,
+  readOnly: readonly string[] = [],
+): string[] {
   const root = factoryRoot();
   return [
     '--unshare-all',
+    // Its own PID namespace, which --unshare-all includes too: nothing a run leaves behind keeps
+    // writing into `work` afterwards.
+    '--unshare-pid',
     ...(network ? ['--share-net'] : []),
     '--die-with-parent',
     // Its own session: sandboxed code cannot type into the Owner's terminal through TIOCSTI.
@@ -97,6 +108,7 @@ export function sandboxArgs(work: string, cwd: string, network: boolean): string
     ...ro(join(root, 'node_modules')),
     ...['--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp'],
     ...['--bind', work, work],
+    ...readOnly.flatMap((dir) => ['--ro-bind', dir, dir]),
     ...['--chdir', cwd],
   ];
 }
@@ -113,7 +125,24 @@ export function sandboxed(work: string, env: NodeJS.ProcessEnv): Runner {
     'pull request code runs on this machine only inside bubblewrap, which failed (install it with: sudo apt install bubblewrap)',
   );
   return (argv, cwd, network = false) =>
-    spawnSync('bwrap', [...sandboxArgs(work, cwd, network), ...argv], { env: outer, ...SPAWN });
+    spawnSync('bwrap', [...sandboxArgs(work, cwd, network, installed(work, network)), ...argv], {
+      env: outer,
+      ...SPAWN,
+    });
+}
+
+/**
+ * After the install, its folder, bound read-only into every later run as the factory's own tools
+ * are, so one run cannot change the packages the next one loads. It must still be the real
+ * folder the install wrote: bwrap would follow a link put in its place.
+ */
+function installed(work: string, network: boolean): string[] {
+  const install = join(work, 'install');
+  const stat = lstatSync(install, { throwIfNoEntry: false });
+  if (network || stat === undefined) return [];
+  if (!stat.isDirectory() || realpathSync(install) !== install)
+    throw new RefusedError(`${install} is not a folder: refusing to bind it into a run`);
+  return [install];
 }
 
 /** The runner in GitHub Actions: the job's environment, less Vitest's and Node's own options. */

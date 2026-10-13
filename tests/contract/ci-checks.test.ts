@@ -217,6 +217,20 @@ describe('factory ci coverage (QG-3, AC-013)', () => {
     expect(r.output).toContain('coverage/lcov.info is committed at the head');
   });
 
+  it('a coverage folder in the checkout that is a link is refused, and nothing is read through it (T164)', async () => {
+    const { repo, base } = project();
+    const head = repo.commit({ 'src/login.ts': numbered(10) }, 'login');
+    const outside = join(repo.path, '..', 'reports');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'lcov.info'), 'TN:\nSF:src/login.ts\nDA:1,1\nend_of_record\n');
+    symlinkSync(outside, join(repo.path, 'coverage'));
+
+    const r = await ci(repo, ['coverage', base, head]);
+
+    expect(r.code).not.toBe(0);
+    expect(r.output).toContain('coverage is not a folder');
+  });
+
   it('AC-013: a test file under src/ fails and names the test paths; one under tests/ is never a source', async () => {
     const { repo, base } = project();
     const head = repo.commit(

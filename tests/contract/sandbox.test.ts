@@ -156,7 +156,7 @@ describe('the laptop sandbox fails closed (T164)', () => {
       const work = realpathSync(tempDir());
       const args = sandboxArgs(work, work, network);
       expect(args).toEqual(
-        expect.arrayContaining(['--unshare-all', '--new-session', '--clearenv']),
+        expect.arrayContaining(['--unshare-all', '--unshare-pid', '--new-session', '--clearenv']),
       );
       expect(args.includes('--share-net')).toBe(network);
       const home = homedir();
@@ -169,4 +169,11 @@ describe('the laptop sandbox fails closed (T164)', () => {
       expect(sources.filter((s) => s.startsWith('/run/user') || s === '/tmp')).toEqual([]);
     },
   );
+
+  it('binds the install read-only after the one writable bind, the run’s temp folder', () => {
+    const work = realpathSync(tempDir());
+    const install = join(work, 'install');
+    const args = sandboxArgs(work, work, false, [install]).join(' ');
+    expect(args).toContain(`--bind ${work} ${work} --ro-bind ${install} ${install}`);
+  });
 });
