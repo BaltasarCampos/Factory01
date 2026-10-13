@@ -5,10 +5,10 @@
 // the dispatcher shows running (AC-088), each a warning the Owner must confirm, since both are
 // telemetry; the branch's merge rule (T143); until `factory ci formal` ships (T165), no tier 3 item
 // and no change under `formal/`; for an item, the once-only rule (AC-088), the whole approval
-// chain, the criterion set (AC-097), and stale head-bound waivers re-signed or the merge stops.
-//
-// Slice 22a stops there: the merge itself comes with slice 22b, so every run ends refusing with
-// nothing merged.
+// chain, the criterion set (AC-097), and stale head-bound waivers re-signed or the merge stops;
+// required CI and the laptop's own checks; the approval summary (AC-094). Then, for an item, the
+// signed merge of exactly the checked head (src/merge/local-merge.ts). Define, log and
+// factory-repository merges come with slice 22c.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -16,9 +16,9 @@ import { keyOf, newestKey, secondCopy } from '../approvals/keys.js';
 import { ownerKeyPath } from '../approvals/sign.js';
 import { checkedSet, type CheckedSet } from '../ci/ac-map.js';
 import type { CommandContext } from '../cli/commands.js';
-import { RefusedError, UsageError } from '../cli/env.js';
+import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { pendingManifest } from '../dispatcher/manifest.js';
-import { mergeBase, safeDiff, type FileChange } from '../git/diff.js';
+import { mergeBase, safeDiff, safeGit, type FileChange } from '../git/diff.js';
 import { listComments } from '../github/comments.js';
 import { timeline } from '../github/timeline.js';
 import { checkedHead, checkedMain, type MainContext, type MergeContext } from '../merge/context.js';
@@ -31,6 +31,7 @@ import {
   type JobResult,
 } from '../merge/ci.js';
 import { laptopChecks, type LaptopResults } from '../merge/laptop.js';
+import { land } from '../merge/local-merge.js';
 import { mergeView } from '../merge/view.js';
 import { mergeRules, type RuleName } from '../merge/rules.js';
 import { STATIONS } from '../model/types.js';
@@ -257,6 +258,11 @@ export async function merge(ctx: CommandContext): Promise<number> {
     const formal = changes.filter((f) => f.path.startsWith('formal/')).map((f) => f.path);
     if (formal.length > 0)
       throw new RefusedError(`${NO_FORMAL}: #${arg} changes ${formal.join(', ')}`);
+    // An item lands as exactly its checked tree, so it must already contain main.
+    if (result.rule === 'item' && base !== c.main)
+      throw new RefusedError(
+        `main moved since #${arg} was integrated; it needs a rebase before it can merge; ${NOTHING}`,
+      );
     const item = result.issue === undefined ? undefined : await itemChecks(ctx, c, result.issue);
     ctx.io.stdout.write(`#${arg} passes the rule ${result.rule}\n`);
     const changed = changes.map((f) => f.path);
@@ -270,7 +276,15 @@ export async function merge(ctx: CommandContext): Promise<number> {
     };
     Object.freeze(results);
 
-    throw new RefusedError(`the merge itself comes with slice 22b; ${NOTHING}`);
+    if (result.issue === undefined)
+      throw new RefusedError(
+        `Define, log and factory-repository merges come with slice 22c; ${NOTHING}`,
+      );
+    const tree = safeGit(c.cwd, ['rev-parse', `${c.head}^{tree}`], c.env)
+      .stdout.toString('utf8')
+      .trim();
+    await land(ctx, c, tree, `#${String(result.issue)}`);
+    return ExitCode.Ok;
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
