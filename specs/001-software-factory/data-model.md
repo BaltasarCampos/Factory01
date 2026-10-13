@@ -33,6 +33,7 @@ per project, so it is **not** hashed against the release manifest. Instead:
 | `retry_limit` | number, default 3 | FR-012 |
 | `size_limit_lines` | number, default = the release's limit (400) | QG-6; may only be **lowered** below the release's limit, through `factory config set` |
 | `coverage_min` | number, default = the release's floor (90) | QG-3; may only be **raised** above the release's floor, through `factory config set` |
+| `app_port` | number, default 3000 | The port the deployed app listens on, forwarded by pasta on the laptop's 127.0.0.1 only; an integer from 1024 to 65535, set through `factory config set` (T069, slice 23b-2a) |
 
 CI applies the stricter of the release's value and main's config value; a lower coverage or a
 higher size limit in config is rejected when the config is loaded.
