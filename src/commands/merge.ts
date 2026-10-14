@@ -20,8 +20,6 @@ import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { pendingManifest } from '../dispatcher/manifest.js';
 import { mergeBase, safeDiff, safeGit, type FileChange } from '../git/diff.js';
-import { listComments } from '../github/comments.js';
-import { timeline } from '../github/timeline.js';
 import { checkedHead, checkedMain, type MainContext, type MergeContext } from '../merge/context.js';
 import { verifyChain, type Chain } from '../merge/chain.js';
 import {
@@ -35,21 +33,12 @@ import { laptopChecks, type LaptopResults } from '../merge/laptop.js';
 import { land, probeMerge } from '../merge/local-merge.js';
 import { mergeView } from '../merge/view.js';
 import { mergeRules, type RuleName } from '../merge/rules.js';
-import { STATIONS } from '../model/types.js';
 import { buildSummary, NO_FORMAL, visible } from '../notify/summary.js';
 import { checkDefine } from '../stations/checks/define.js';
-import { derivePause, resumeEntries } from '../pause/derive.js';
+import { confirm, confirmPause } from '../pause/confirm.js';
 import { coveredAt, signHeadBoundWaiver, viewAt, viewIssue } from './approve.js';
 
 const NOTHING = 'nothing was merged';
-
-/** Go on only when the Owner answers yes; the warning is telemetry, never a refusal by itself. */
-async function confirm(ctx: CommandContext, warning: string, question: string): Promise<void> {
-  ctx.io.stderr.write(`warning: ${warning}\n`);
-  const answer = (await ctx.ask(`${question} [y/N] `)).trim().toLowerCase();
-  if (answer !== 'y' && answer !== 'yes')
-    throw new RefusedError(`the Owner did not confirm; ${NOTHING}`);
-}
 
 /** The key this laptop signs with must be the newest listed, non-revoked key at main's pin. */
 function assertNewestKey(at: MainContext): void {
@@ -60,22 +49,6 @@ function assertNewestKey(at: MainContext): void {
     );
 }
 
-async function confirmPause(ctx: CommandContext, at: MainContext): Promise<void> {
-  const { repo, inbox_issue: inbox } = at.config;
-  const options = { env: at.env };
-  const resumes = resumeEntries(await listComments(repo, inbox, options), {
-    ...{ keys: at.keys, secondCopy: secondCopy(at.env, at.home) },
-    ...{ repo, inboxIssue: inbox },
-  });
-  const pause = derivePause(await timeline(repo, inbox, options), resumes);
-  const paused = [
-    ...(pause.line ? ['pause:line'] : []),
-    ...[...pause.stations].map((s) => `pause:${STATIONS[s]}`),
-  ];
-  if (paused.length > 0)
-    await confirm(ctx, `the line is paused (${paused.join(', ')})`, 'Merge anyway while paused?');
-}
-
 async function confirmSession(ctx: CommandContext, c: MergeContext): Promise<void> {
   const manifest = pendingManifest({ projectDir: c.cwd, now: ctx.now, env: c.env }, c.head);
   if (manifest === undefined) return;
@@ -83,6 +56,7 @@ async function confirmSession(ctx: CommandContext, c: MergeContext): Promise<voi
     ctx,
     `the dispatcher shows a session running on ${c.branch} (station ${String(manifest.station)}, ${manifest.role}), which may still push`,
     'Merge anyway?',
+    NOTHING,
   );
 }
 
@@ -326,7 +300,7 @@ export async function merge(ctx: CommandContext): Promise<number> {
   try {
     const at = checkedMain(ctx.cwd, ctx.env, ctx.env.HOME ?? homedir(), scratch);
     assertNewestKey(at);
-    await confirmPause(ctx, at);
+    await confirmPause(ctx, at, 'Merge anyway while paused?', NOTHING);
     const c = await checkedHead(at, Number(arg));
     ctx.io.stdout.write(
       `Checking #${arg}: origin/${c.branch} at ${c.head}, onto main at ${c.main}\n`,
