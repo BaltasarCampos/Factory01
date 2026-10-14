@@ -15,7 +15,7 @@ const LIST = loadRequiredChecks(
 const ITEM_ONLY = "needs.item.outputs.issue != ''";
 
 interface Workflow {
-  on: { pull_request?: { paths?: string[] } | null };
+  on: { pull_request?: { paths?: string[] } | null; push?: { branches?: string[] } };
   jobs: Record<string, { if?: string; name?: string }>;
 }
 const workflow = (path: string) => parse(readFileSync(join(FACTORY, path), 'utf8')) as Workflow;
@@ -53,6 +53,22 @@ describe('required-checks.json against the workflow templates (T068)', () => {
       .filter((p) => 'pull_request' in workflow(p).on)
       .flatMap((p) => Object.keys(workflow(p).jobs).map((job) => named(p, job)));
     expect(triggered.filter((j) => !accounted.has(j))).toEqual([]);
+  });
+
+  // `factory deploy` reads CI on main's head from the push run (T069, slice 23c-1b): only the jobs
+  // with no `if:` run there, the item helper and the pull-request-only jobs being skipped.
+  it('requires on main exactly the jobs a push to main runs in the project workflows', () => {
+    const paths = ['ci.yml', 'append-only.yml', 'security.yml'].map((f) => `workflows/${f}`);
+    const onMain = paths
+      .filter((p) => workflow(p).on.push?.branches?.includes('main') === true)
+      .flatMap((p) =>
+        Object.entries(workflow(p).jobs)
+          .filter(([, job]) => job.if === undefined)
+          .map(([job]) => named(p, job)),
+      );
+    const listed = requiredJobs(LIST, 'main', []).map((j) => named(j.workflow, j.job));
+    expect(listed).toEqual(onMain);
+    expect(listed).toEqual(['workflows/ci.yml#build-test']);
   });
 
   it('requires append-only only when the pull request changes an events.jsonl', () => {

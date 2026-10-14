@@ -57,7 +57,10 @@ function run(cwd: string, env: NodeJS.ProcessEnv, args: readonly string[]) {
     encoding: 'utf8',
   });
   if (result.error !== undefined) throw new RefusedError(`cannot run git: ${result.error.message}`);
-  return { ok: result.status === 0, out: result.stdout, err: result.stderr.trim() };
+  return {
+    ...{ ok: result.status === 0, status: result.status },
+    ...{ out: result.stdout, err: result.stderr.trim() },
+  };
 }
 
 /** Why main without `.factory/config` cannot merge here; only the factory repository merges by hand. */
@@ -150,4 +153,21 @@ export async function checkedHead(at: MainContext, number: number): Promise<Merg
       `the PR head ${pr.headRefOid.slice(0, 12)} is not origin/${branch} as fetched (${head.slice(0, 12)}); run merge again`,
     );
   return Object.freeze({ ...at, pr, branch, head });
+}
+
+/**
+ * Fetch `branch` from origin, as main is fetched, into `origin/<branch>`, and return its commit;
+ * undefined when origin has no such branch. `factory deploy` reads the release notes on
+ * `claude/factory-log` this way, once (slice 23c-1b).
+ */
+export function fetchBranch(at: MainContext, branch: string, nothing: string): string | undefined {
+  const listed = run(at.cwd, at.env, ['ls-remote', '--exit-code', '--heads', 'origin', branch]);
+  // --exit-code: 2 when origin has no such branch.
+  if (listed.status === 2) return undefined;
+  if (!listed.ok)
+    throw new RefusedError(`cannot list ${branch} on origin: ${listed.err}; ${nothing}`);
+  const ref = `refs/remotes/origin/${branch}`;
+  const fetched = run(at.cwd, at.env, ['fetch', '-q', 'origin', `+refs/heads/${branch}:${ref}`]);
+  if (!fetched.ok) throw new RefusedError(`cannot fetch ${branch}: ${fetched.err}; ${nothing}`);
+  return run(at.cwd, at.env, ['rev-parse', '--verify', `${ref}^{commit}`]).out.trim();
 }

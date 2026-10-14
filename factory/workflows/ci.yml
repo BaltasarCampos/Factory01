@@ -8,7 +8,8 @@ name: ci
 on:
   pull_request:
   push:
-    branches: ['claude/**']
+    # main: factory deploy reads CI on main's head from this push run; only build-test runs there.
+    branches: ['claude/**', main]
 
 permissions:
   contents: read

@@ -5,11 +5,14 @@
 // its chain verified again as `merge` verified it: at the head that merge checked, its second
 // parent, with the branch its signed message names, but with the key lists at main's verified
 // head, so a key revoked since the merge refuses the deploy. Define, upgrade and log merges have
-// no chain.
+// no chain. Then CI on main's head (slice 23c-1b): the push run on `main` of the project workflow
+// at main's exact commit, its jobs the `main` kind of the release's `required-checks.json`.
 import { RefusedError } from '../cli/env.js';
 import { safeGit } from '../git/diff.js';
 import { verifyChain } from '../merge/chain.js';
+import { ciAt, requiredChecksAt, requiredJobs, type JobResult } from '../merge/ci.js';
 import type { MainContext } from '../merge/context.js';
+import type { Tier } from '../model/types.js';
 import { NO_FORMAL } from '../notify/summary.js';
 
 const NOTHING = 'nothing was deployed';
@@ -74,11 +77,15 @@ export function shippedSince(at: MainContext, since: string | undefined): Shippe
 }
 
 /** Each shipped item's chain, verified again; the first that fails refuses, naming the item. */
-export async function verifyShipped(at: MainContext, shipped: Shipped): Promise<void> {
+export async function verifyShipped(
+  at: MainContext,
+  shipped: Shipped,
+): Promise<(ShippedItem & { tier: Tier })[]> {
+  const verified: (ShippedItem & { tier: Tier })[] = [];
   for (const item of shipped.items) {
     const context = { ...at, head: item.head, branch: item.branch };
     const named = `#${String(item.issue)} (merged in ${item.merge.slice(0, 12)})`;
-    let tier: number;
+    let tier: Tier;
     try {
       tier = (await verifyChain(context, item.issue, 'deploy')).tier;
     } catch (err) {
@@ -86,5 +93,44 @@ export async function verifyShipped(at: MainContext, shipped: Shipped): Promise<
       throw new RefusedError(`the approvals of ${named} do not verify: ${err.message}`);
     }
     if (tier === 3) throw new RefusedError(`${NO_FORMAL}: ${named} is tier 3; ${NOTHING}`);
+    verified.push({ ...item, tier });
   }
+  return verified;
+}
+
+/** The required `main` jobs, each green in the latest push run on `main` at main's head. */
+export async function ciOnMain(at: MainContext): Promise<JobResult[]> {
+  const { factory_release: pin, profile, repo } = at.config;
+  const jobs = requiredJobs(requiredChecksAt(at.factory, pin.sha, profile, NOTHING), 'main', []);
+  if (jobs.length === 0)
+    throw new RefusedError(
+      `the release pinned on main requires no CI job on main, so CI on main's head cannot be read; ${NOTHING}`,
+    );
+  const results = await ciAt(
+    repo,
+    at.main,
+    jobs,
+    { env: at.env },
+    { branch: 'main', nothing: NOTHING },
+  );
+  if (results.some((r) => r.state === 'pending'))
+    throw new RefusedError(
+      `CI on main's head is still running; run factory deploy again when it finishes; ${NOTHING}`,
+    );
+  if (results.some((r) => !r.ran))
+    throw new RefusedError(
+      `no CI run on main's head yet: it may still be starting, or the project's .github/workflows/ci.yml predates CI on main (install the pinned release's workflows/ci.yml); run factory deploy again shortly; ${NOTHING}`,
+    );
+  const bad = results.filter((r) => r.state !== 'success');
+  if (bad.length > 0) {
+    const hint = bad.some((r) => r.state === 'missing')
+      ? [
+          "a required job is not in the run on main: the project's .github/workflows/ci.yml may predate CI on main; install the pinned release's workflows/ci.yml",
+        ]
+      : [];
+    throw new RefusedError(
+      `CI on main's head is not green at ${at.main}; ${NOTHING}:\n  ${[...bad.map((r) => `${r.job} (${r.workflow}): ${r.state}`), ...hint].join('\n  ')}`,
+    );
+  }
+  return results;
 }
