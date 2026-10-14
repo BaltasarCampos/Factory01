@@ -64,7 +64,7 @@ const ROWS: [DeployRun, Record<string, string | undefined>, boolean, Record<stri
       '/app/settings.env': '--ro-bind',
     },
     true,
-    { HOME: '/app/data', APP_SETTINGS: '/app/settings.env' },
+    { HOME: '/app/data', APP_SETTINGS: '/app/settings.env', APP_DATA: '/app/data' },
   ],
   [
     'backup',
@@ -75,7 +75,7 @@ const ROWS: [DeployRun, Record<string, string | undefined>, boolean, Record<stri
       '/app/settings.env': undefined,
     },
     false,
-    { HOME: '/app/data' },
+    { HOME: '/app/data', APP_DATA: '/app/data' },
   ],
 ];
 
@@ -117,6 +117,12 @@ describe('the deploy sandbox table (T069)', () => {
       );
     for (const from of fromHome)
       expect([RELEASE, app.data, app.backups, app.settings]).toContain(from);
+  });
+
+  it('only the app run gets PORT, the port pasta forwards to it', () => {
+    expect(environment(deployArgs('app', app, RELEASE, 8080))).toMatchObject({ PORT: '8080' });
+    for (const run of ['install', 'build', 'backup'] as const)
+      expect(environment(deployArgs(run, app, RELEASE, 8080)).PORT).toBeUndefined();
   });
 
   it.each(ROWS.map(([run]) => run))(

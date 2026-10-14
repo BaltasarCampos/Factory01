@@ -11,6 +11,7 @@ import { inbox } from '../commands/inbox.js';
 import { keygen } from '../commands/keygen.js';
 import { mcp } from '../commands/mcp.js';
 import { deploy } from '../commands/deploy.js';
+import { service } from '../commands/service.js';
 import { merge } from '../commands/merge.js';
 import { newProject } from '../commands/new.js';
 import { pause } from '../commands/pause.js';
@@ -160,6 +161,17 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     options: {},
     positionals: { min: 0, max: 0 },
     run: deploy,
+  },
+  service: {
+    summary: 'Run a deployed app in the deploy sandbox (what its systemd unit runs)',
+    usage: 'factory service app <owner>/<repo> <release> --port <port>',
+    // Started by systemd, with no terminal; it refuses in a cloud session itself.
+    laptopOnly: false,
+    requires: [],
+    options: { port: { type: 'string' } },
+    positionals: { min: 3, max: 3 },
+    showsAlerts: false,
+    run: service,
   },
   pause: {
     summary: 'Pause the line or one station',

@@ -119,6 +119,14 @@ describe('factory config set (T137, FR-007f, AC-090)', () => {
     expect(t.mainConfig()).toMatch(/\nparallel_sessions: 2$/);
   });
 
+  it('sets the deployed app’s port (T069)', async () => {
+    const t = setup();
+
+    expect((await t.cli(['set', 'app_port', '8080'])).code).toBe(0);
+
+    expect(t.mainConfig()).toMatch(/\napp_port: 8080$/);
+  });
+
   it.each([
     ['factory_release', `v1.0.1@${'b'.repeat(40)}`, /factory_release is set by factory upgrade/],
     ['baseline', 'c'.repeat(40), /baseline is set by factory new\/adopt/],
@@ -145,6 +153,8 @@ describe('factory config set (T137, FR-007f, AC-090)', () => {
     ['retry_limit', '3\nbaseline: x', /not a plain value/],
     ['retry_limit', '1e3', /retry_limit: must be a positive integer/],
     ['coverage_min', '0x10', /coverage_min: must be a positive integer/],
+    ['app_port', '80', /app_port: must be an integer from 1024 to 65535/],
+    ['app_port', '70000', /app_port: must be an integer from 1024 to 65535/],
   ])('keeps the config rules: refuses %s %j', async (key, value, why) => {
     const t = setup();
     const before = t.mainHead();

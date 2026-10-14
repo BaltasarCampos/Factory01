@@ -38,11 +38,13 @@ const KEYS = [
   'retry_limit',
   'size_limit_lines',
   'coverage_min',
+  'app_port',
 ] as const;
 type Key = (typeof KEYS)[number];
 
 const COMMIT = /^[0-9a-f]{40}$/;
-const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+/** `owner/name`, as GitHub allows them. */
+export const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const POSITIVE_INT = /^[1-9]\d*$/;
 
 export function parseConfig(text: string, release: ReleaseLimits = RELEASE_LIMITS): ProjectConfig {
@@ -116,6 +118,12 @@ export function parseConfig(text: string, release: ReleaseLimits = RELEASE_LIMIT
     problems.push('coverage_min: must be at most 100');
   }
 
+  // The deployed app's port, which pasta forwards on the laptop's loopback (T069).
+  const portText = get('app_port') ?? '3000';
+  const app_port = Number(portText);
+  if (!POSITIVE_INT.test(portText) || app_port < 1024 || app_port > 65535)
+    problems.push('app_port: must be an integer from 1024 to 65535');
+
   if (problems.length > 0 || !pin || repo === undefined) throw new ConfigError(problems);
 
   return {
@@ -129,6 +137,7 @@ export function parseConfig(text: string, release: ReleaseLimits = RELEASE_LIMIT
     retry_limit,
     size_limit_lines,
     coverage_min,
+    app_port,
   };
 }
 

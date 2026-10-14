@@ -2,6 +2,7 @@
 // (AC-081–AC-083, AC-086, FR-016g) against src/merge/rules.ts, with the inputs `factory merge`
 // will pass in; the command's own cases come with slices 22a to 22c, and deploy's with 23a to 23c.
 import { randomBytes } from 'node:crypto';
+import { createServer } from 'node:http';
 import {
   chmodSync,
   copyFileSync,
@@ -14,7 +15,8 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { fileURLToPath } from 'node:url';
+import { beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { ReleaseKeys } from '../../src/approvals/keys.js';
 import { NonceLedger, nonceLedgerPath } from '../../src/approvals/nonces.js';
 import { renderComment } from '../../src/approvals/record.js';
@@ -23,6 +25,7 @@ import { verifyGate } from '../../src/approvals/verify.js';
 import { runCli } from '../../src/cli/commands.js';
 import { serialiseManifest } from '../../src/install/manifest.js';
 import { appFolder } from '../../src/deploy/sandbox.js';
+import { unitName, unitRelease } from '../../src/deploy/service.js';
 import { loadRequiredChecks } from '../../src/merge/ci.js';
 import {
   mergeRules,
@@ -1973,20 +1976,21 @@ describe(
   },
 );
 
-// Slice 23a: `factory deploy` exports main's verified commit into a new release folder and builds
-// it in two bubblewrap runs, the install with network and the build without; until 23b it stops
-// before the switch-over.
-const NOT_YET_23B = 'switching the service comes with slice 23b; nothing was deployed';
+// Slices 23a and 23b-2a: `factory deploy` exports main's verified commit into a new release folder,
+// builds it in two bubblewrap runs, the install with network and the build without, then switches
+// the app's systemd user unit to it, here with a fake `systemctl --user` that serves the unit's
+// port when its release holds a file `serves`.
 const LOCK = {
   ...{ name: 'p', version: '1.0.0', lockfileVersion: 3, requires: true },
   packages: { '': { name: 'p', version: '1.0.0' } },
 };
-/** The product on main: an empty install, and `build` as its build script. */
-const product = (build: string): Files => ({
+/** The product on main: an empty install, `build` as its build script, and whether it serves. */
+const product = (build: string, serves = true): Files => ({
   'package.json': JSON.stringify({ name: 'p', version: '1.0.0', scripts: { build } }),
   'package-lock.json': JSON.stringify(LOCK),
   'build.mjs':
     "import { mkdirSync, writeFileSync } from 'node:fs';\nmkdirSync('dist');\nwriteFileSync('dist/out.txt', 'built');\n",
+  ...(serves ? { serves: '' } : {}),
 });
 const releasesOf = (home: string) => {
   const { releases } = appFolder(home, REPO);
@@ -2000,86 +2004,270 @@ function failingBwrap(): NodeJS.ProcessEnv {
     '#!/bin/sh\necho "bwrap: No permissions to create new namespace" >&2\nexit 1\n',
   );
   chmodSync(join(bin, 'bwrap'), 0o755);
-  return { PATH: `${bin}:${process.env.PATH ?? ''}` };
+  return { PATH: `${bin}:${systemd.PATH}` };
 }
+const systemd = {
+  PATH: `${join(fileURLToPath(new URL('../helpers/systemd', import.meta.url)))}:${process.env.PATH ?? ''}`,
+};
+let nextPort = 23_000 + (process.pid % 2_000) * 4;
+
+/** A project ready to deploy: main holds the product and its port; the settings file is there. */
+function deployable(files: Files) {
+  const t = mergeSetup();
+  const port = nextPort++;
+  const config = `${runGit(t.repo.path, ['show', 'main:.factory/config'])}\napp_port: ${String(port)}\n`;
+  const main = onMain(t.repo, { ...files, '.factory/config': config }, 'the product');
+  const app = appFolder(t.home, REPO);
+  mkdirSync(join(app.settings, '..'), { recursive: true });
+  writeFileSync(app.settings, 'TOKEN=settings\n', { mode: 0o600 });
+  const unit = join(t.home, '.config', 'systemd', 'user', unitName(REPO));
+  const state = join(t.home, '.fake-systemd');
+  onTestFinished(() => {
+    // Stop whatever the fake started.
+    for (const f of existsSync(state) ? readdirSync(state) : [])
+      if (f.endsWith('.pid'))
+        try {
+          process.kill(Number(readFileSync(join(state, f), 'utf8')));
+        } catch {
+          // Already gone.
+        }
+  });
+  const deploy = (env: NodeJS.ProcessEnv = {}) =>
+    t.cli(['deploy'], { env: { ...systemd, ...env } });
+  const all = () =>
+    existsSync(join(state, 'calls'))
+      ? readFileSync(join(state, 'calls'), 'utf8').trim().split('\n')
+      : [];
+  // Without the polls that check the unit stays running after the answer.
+  const calls = () => all().filter((c) => !c.includes('--property=MainPID'));
+  const polls = () => all().length - calls().length;
+  return { t, main, port, app, unit, state, deploy, calls, polls };
+}
+const releaseIn = (unit: string) => unitRelease(readFileSync(unit, 'utf8'), REPO);
+const SWITCH = (unit: string) => [
+  '--user show --property=Version',
+  '--user daemon-reload',
+  `--user enable ${unit}`,
+  `--user restart ${unit}`,
+];
 
 describe(
-  'factory deploy: the verified export and the sandboxed build (T069, slice 23a)',
+  'factory deploy: the verified export, the sandboxed build and the switch-over (T069, slices 23a, 23b-2a)',
   { timeout: 240_000 },
   () => {
-    it("exports main's verified commit without .git into a new release, builds it, and stops before the switch", async () => {
-      const t = mergeSetup();
-      const main = onMain(t.repo, product('node build.mjs'), 'the product');
-      t.repo.commit({ 'src/local.ts': 'local\n' }, 'not pushed', { signWith: owner });
+    it("exports main's verified commit without .git, builds it, and switches the app's unit to it", async () => {
+      const d = deployable(product('node build.mjs'));
+      d.t.repo.commit({ 'src/local.ts': 'local\n' }, 'not pushed', { signWith: owner });
 
-      const r = await t.cli(['deploy']);
+      const r = await d.deploy();
 
-      expect(r.stderr).toContain(NOT_YET_23B);
-      expect(r.code).toBe(1);
-      const [release, ...more] = releasesOf(t.home);
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      const [release, ...more] = releasesOf(d.t.home);
       expect(more).toEqual([]);
-      expect(release).toMatch(new RegExp(`/${main}-\\d{8}T\\d{6}Z$`));
+      expect(release).toMatch(new RegExp(`/${d.main}-\\d{8}T\\d{6}Z$`));
       expect(readFileSync(join(release ?? '', 'dist', 'out.txt'), 'utf8')).toBe('built');
       expect(existsSync(join(release ?? '', '.git'))).toBe(false);
       expect(existsSync(join(release ?? '', 'src', 'local.ts'))).toBe(false);
+      expect(join(d.app.releases, releaseIn(d.unit) ?? '')).toBe(release);
+      expect(readFileSync(d.unit, 'utf8')).toContain(`--port ${String(d.port)}\n`);
+      expect(d.calls()).toEqual(SWITCH(unitName(REPO)));
+      expect(d.polls()).toBeGreaterThanOrEqual(10);
+      expect(r.stdout).toContain(`answered on 127.0.0.1:${String(d.port)}`);
     });
 
-    it('refuses when main has a first-parent commit not signed by the Owner, before exporting anything (AC-073)', async () => {
-      const t = mergeSetup();
-      onMain(t.repo, product('node build.mjs'), 'the product');
-      t.repo.checkout('main');
-      t.repo.commit({ 'src/b.ts': 'b\n' }, 'pushed past the Owner');
-      t.repo.push('main');
+    it.each([
+      ['the previous unit goes back', true],
+      ['a first unit is removed', false],
+    ])('a restart that fails refuses, and %s', async (_, earlier) => {
+      const d = deployable(product('node build.mjs'));
+      if (earlier) expect((await d.deploy()).code).toBe(0);
+      const before = existsSync(d.unit) ? readFileSync(d.unit, 'utf8') : undefined;
+      mkdirSync(d.state, { recursive: true });
+      writeFileSync(join(d.state, 'fail-restart'), '');
 
-      const r = await t.cli(['deploy']);
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(
+        earlier
+          ? /restart factory-app-\S+ failed: Job for .*; tried to switch the service back to [0-9a-f]{40}-\S+, but systemctl --user restart .* failed/
+          : /restart factory-app-\S+ failed: Job for .*; stopped and disabled the service, which had no earlier unit, and removed its unit; nothing was deployed/,
+      );
+      expect(existsSync(d.unit) ? readFileSync(d.unit, 'utf8') : undefined).toBe(before);
+    });
+
+    it('a previous unit whose release cannot be read is still put back, word for word', async () => {
+      const d = deployable(product('node build.mjs', false));
+      const older = '[Service]\nExecStart=/usr/bin/node /old/factory/main.js serve owner/project\n';
+      mkdirSync(join(d.unit, '..'), { recursive: true });
+      writeFileSync(d.unit, older);
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(
+        /did not answer HTTP .*; switched the service back to its previous unit; nothing was deployed/,
+      );
+      expect(readFileSync(d.unit, 'utf8')).toBe(older);
+      expect(d.calls().slice(-2)).toEqual([
+        '--user daemon-reload',
+        `--user restart ${unitName(REPO)}`,
+      ]);
+    }, 300_000);
+
+    it('on a first deploy, refuses when something already listens on the port, before exporting anything', async () => {
+      const d = deployable(product('node build.mjs'));
+      const stranger = createServer((_, res) => res.end('not the app'));
+      await new Promise<void>((ok) => stranger.listen(d.port, '127.0.0.1', ok));
+      onTestFinished(() => {
+        stranger.close();
+      });
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        `something already listens on 127.0.0.1:${String(d.port)}, the app's port (app_port)`,
+      );
+      expect(existsSync(d.unit)).toBe(false);
+      expect(releasesOf(d.t.home)).toEqual([]);
+      expect(d.calls()).toEqual(['--user show --property=Version']);
+    });
+
+    it('a release that never answers HTTP is switched back to the previous one, and the deploy refuses', async () => {
+      const d = deployable(product('node build.mjs'));
+      expect((await d.deploy()).code).toBe(0);
+      const first = releaseIn(d.unit);
+      onMain(d.t.repo, product('node build.mjs', false), 'stops serving', () => {
+        rmSync(join(d.t.repo.path, 'serves'));
+      });
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(
+        new RegExp(
+          `did not answer HTTP on 127.0.0.1:${String(d.port)} within 30 s; switched the service back to ${first ?? ''}`,
+        ),
+      );
+      expect(releaseIn(d.unit)).toBe(first);
+      expect(d.calls().filter((c) => c.includes('restart'))).toHaveLength(3);
+    }, 300_000);
+
+    it('on a first deploy, an app that never answers is stopped, disabled and its unit removed', async () => {
+      const d = deployable(product('node build.mjs', false));
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/did not answer HTTP .*; stopped and disabled the service/);
+      expect(existsSync(d.unit)).toBe(false);
+      expect(d.calls().slice(-3)).toEqual([
+        `--user stop ${unitName(REPO)}`,
+        `--user disable ${unitName(REPO)}`,
+        '--user daemon-reload',
+      ]);
+    }, 300_000);
+
+    it('refuses when main has a first-parent commit not signed by the Owner, before exporting anything (AC-073)', async () => {
+      const d = deployable(product('node build.mjs'));
+      d.t.repo.checkout('main');
+      d.t.repo.commit({ 'src/b.ts': 'b\n' }, 'pushed past the Owner');
+      d.t.repo.push('main');
+
+      const r = await d.deploy();
 
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(/not signed by the Owner/);
-      expect(releasesOf(t.home)).toEqual([]);
+      expect(releasesOf(d.t.home)).toEqual([]);
     });
 
     it('refuses without a working bubblewrap, before exporting anything, and never builds unsandboxed', async () => {
-      const t = mergeSetup();
-      onMain(t.repo, product('node build.mjs'), 'the product');
+      const d = deployable(product('node build.mjs'));
 
-      const r = await t.cli(['deploy'], { env: failingBwrap() });
+      const r = await d.deploy(failingBwrap());
 
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(/only inside bubblewrap.*No permissions to create new namespace/);
-      expect(releasesOf(t.home)).toEqual([]);
+      expect(releasesOf(d.t.home)).toEqual([]);
     });
 
-    it("a build that reads the Owner's key file under HOME fails, and nothing was deployed", async () => {
-      const t = mergeSetup();
-      const key = ownerKeyPath(t.home);
-      const steal = `node -e "require('fs').copyFileSync(${JSON.stringify(key).replaceAll('"', "'")}, 'stolen')"`;
-      onMain(t.repo, product(steal), 'the product');
+    it('refuses without a settings file, or with a link in its place, before exporting anything', async () => {
+      const d = deployable(product('node build.mjs'));
+      rmSync(d.app.settings);
 
-      const r = await t.cli(['deploy']);
+      const missing = await d.deploy();
+      symlinkSync(ownerKeyPath(d.t.home), d.app.settings);
+      const linked = await d.deploy();
+
+      expect(missing.stderr).toContain(`install -D -m 600 /dev/null ${d.app.settings}`);
+      expect(linked.stderr).toMatch(/settings\.env is not a regular file/);
+      expect([missing.code, linked.code]).toEqual([1, 1]);
+      expect(releasesOf(d.t.home)).toEqual([]);
+    });
+
+    it('refuses without systemctl --user, before exporting anything', async () => {
+      const d = deployable(product('node build.mjs'));
+
+      mkdirSync(join(d.t.home, '.fake-systemd'), { recursive: true });
+      writeFileSync(join(d.t.home, '.fake-systemd', 'down'), '');
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/systemctl --user.*No medium found/s);
+      expect(releasesOf(d.t.home)).toEqual([]);
+    });
+
+    it('refuses while another deploy holds the lock, or one that died left it', async () => {
+      const d = deployable(product('node build.mjs'));
+      const lock = join(d.t.home, '.factory', 'deploy.lock');
+      mkdirSync(join(lock, '..'), { recursive: true });
+      writeFileSync(lock, String(process.pid));
+
+      const running = await d.deploy();
+      writeFileSync(lock, '999999999');
+      const stale = await d.deploy();
+
+      expect(running.stderr).toContain(
+        `another factory deploy is running (pid ${String(process.pid)})`,
+      );
+      expect(stale.stderr).toContain(`no longer running (pid 999999999) left ${lock}`);
+      expect(releasesOf(d.t.home)).toEqual([]);
+      expect(d.calls()).toEqual([]);
+    });
+
+    it("a build that reads the Owner's key file under HOME fails, and the unit is untouched", async () => {
+      const d = deployable(product('node build.mjs'));
+      expect((await d.deploy()).code).toBe(0);
+      const first = releaseIn(d.unit);
+      const key = ownerKeyPath(d.t.home);
+      const steal = `node -e "require('fs').copyFileSync(${JSON.stringify(key).replaceAll('"', "'")}, 'stolen')"`;
+      onMain(d.t.repo, product(steal), 'steals');
+
+      const r = await d.deploy();
 
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(
         /the build of [0-9a-f]{40} failed at npm run build; nothing was deployed/,
       );
       expect(r.stderr).toContain('ENOENT');
-      const [release] = releasesOf(t.home);
-      expect(existsSync(join(release ?? '', 'stolen'))).toBe(false);
+      for (const release of releasesOf(d.t.home))
+        expect(existsSync(join(release, 'stolen'))).toBe(false);
+      expect(releaseIn(d.unit)).toBe(first);
+      expect(d.calls().filter((c) => c.includes('restart'))).toHaveLength(1);
     });
 
     it('a failed build refuses, naming the step, with the end of its output', async () => {
-      const t = mergeSetup();
-      onMain(
-        t.repo,
-        product(`node -e "console.error('tsc: 3 errors'); process.exit(2)"`),
-        'the product',
-      );
+      const d = deployable(product(`node -e "console.error('tsc: 3 errors'); process.exit(2)"`));
 
-      const r = await t.cli(['deploy']);
+      const r = await d.deploy();
 
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(/failed at npm run build; nothing was deployed/);
       expect(r.stderr).toContain('tsc: 3 errors');
-      expect(r.stderr).not.toContain(NOT_YET_23B);
+      expect(existsSync(d.unit)).toBe(false);
     });
   },
 );

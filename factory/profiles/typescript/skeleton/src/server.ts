@@ -3,7 +3,7 @@
 // from here.
 import { mkdirSync } from 'node:fs';
 import { createServer, type Server } from 'node:http';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
@@ -33,7 +33,8 @@ export function createApp(db: DatabaseSync): Server {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT ?? 3000);
-  const app = createApp(openStore(process.env.DB_PATH ?? 'data/app.sqlite'));
+  // factory deploy names the app's data folder in APP_DATA; locally it is ./data.
+  const app = createApp(openStore(join(process.env.APP_DATA ?? 'data', 'app.sqlite')));
   app.listen(port, () => {
     log('info', 'listening', { port });
   });

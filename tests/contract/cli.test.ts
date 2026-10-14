@@ -37,6 +37,14 @@ const ARGV: Record<string, string[]> = {
   approve: ['approve', '12'],
   merge: ['merge', '13'],
   deploy: ['deploy'],
+  service: [
+    'service',
+    'app',
+    'owner/project',
+    `${'a'.repeat(40)}-20261013T153000Z`,
+    '--port',
+    '8080',
+  ],
   pause: ['pause'],
   resume: ['resume'],
   upgrade: ['upgrade', 'v1.1.0'],
@@ -236,7 +244,16 @@ describe('factory CLI contract (contracts/cli.md)', () => {
       expect(r.code).toBe(1);
     });
 
-    it.each(Object.keys(ARGV).filter((n) => !LAPTOP_ONLY.includes(n)))(
+    it('service refuses in a cloud session, yet runs with no terminal, as systemd starts it', async () => {
+      const cloud = await cli(ARGV.service ?? [], {
+        env: { PATH: process.env.PATH ?? '', CLAUDE_CODE_REMOTE: 'true' },
+      });
+      const noTerminal = await cli(ARGV.service ?? [], { stdinIsTTY: false });
+      expect(cloud.stderr).toContain("runs only on the Owner's laptop");
+      expect(noTerminal.stderr).not.toContain("runs only on the Owner's laptop");
+    });
+
+    it.each(Object.keys(ARGV).filter((n) => !LAPTOP_ONLY.includes(n) && n !== 'service'))(
       '%s is not laptop-only',
       async (name) => {
         const r = await cli(ARGV[name] ?? [], {
@@ -298,7 +315,7 @@ describe('factory CLI contract (contracts/cli.md)', () => {
       expect(r.stderr).toContain('could not read the Owner inbox: gh: not logged in');
     });
 
-    it.each([['hook'], ['mcp'], ['ci']])(
+    it.each([['hook'], ['mcp'], ['ci'], ['service']])(
       'keeps the %s protocol output clean (session and CI channels, not the laptop)',
       async (name) => {
         let asked = false;

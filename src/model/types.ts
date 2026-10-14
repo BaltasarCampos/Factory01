@@ -24,6 +24,8 @@ export interface ProjectConfig {
   retry_limit: number;
   size_limit_lines: number;
   coverage_min: number;
+  /** The deployed app's port, from 1024 to 65535 (T069). */
+  app_port: number;
 }
 
 export const STATIONS = [

@@ -30,6 +30,7 @@ const SETTABLE: readonly string[] = [
   'retry_limit',
   'size_limit_lines',
   'coverage_min',
+  'app_port',
 ];
 const SET_BY: Readonly<Record<string, string>> = {
   factory_release: 'factory upgrade',
