@@ -4,7 +4,7 @@
 // through pasta in attach mode; from inside every run the laptop's loopback and its local sockets
 // are out of reach; the app's port answers only on the laptop's loopback; pasta never outlives a
 // run, and a pasta that fails starts no command.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import {
   chmodSync,
@@ -32,23 +32,27 @@ const RUN = 120_000;
 const PORT = 21_000 + (process.pid % 10_000);
 const outer: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '' };
 
-/** A listener on the laptop's 127.0.0.1 and one on an abstract Unix socket. */
+/** Listeners on the laptop's 127.0.0.1 and ::1, on one port, and on an abstract Unix socket. */
 let laptop: Server;
+let laptop6: Server;
 let local: Server;
 const ABSTRACT = `\0factory-test-${randomUUID()}`;
 beforeAll(async () => {
   laptop = createServer((s) => s.end()).listen(0, '127.0.0.1');
   local = createServer((s) => s.end()).listen(ABSTRACT);
   await Promise.all([once(laptop, 'listening'), once(local, 'listening')]);
+  const port = (laptop.address() as AddressInfo).port;
+  laptop6 = createServer((s) => s.end()).listen({ host: '::1', port, ipv6Only: true });
+  await once(laptop6, 'listening');
 });
 afterAll(() => {
   laptop.close();
+  laptop6.close();
   local.close();
 });
 
 /** What a run reaches, from inside it, as JSON on stdout. */
 const REACH = () => `
-const dns = require('node:dns');
 const net = require('node:net');
 const reach = (to) => new Promise((ok) => {
   const s = net.connect(to);
@@ -63,22 +67,35 @@ const gateway = () => {
     .map((r) => r.split('\\t')).find((r) => r[1] === '00000000');
   return row === undefined ? undefined : Buffer.from(row[2], 'hex').reverse().join('.');
 };
+// Every IPv6 gateway in the run's routes, a link-local one with its interface.
+const gateways6 = () =>
+  [...new Set(require('node:fs').readFileSync('/proc/net/ipv6_route', 'utf8').split('\\n')
+    .map((r) => r.trim().split(/\\s+/)).filter((r) => r.length === 10 && !/^0+$/.test(r[4]))
+    .map((r) => {
+      const address = r[4].match(/.{4}/g).join(':');
+      return address.startsWith('fe80') ? address + '%' + r[9] : address;
+    }))];
 (async () => {
   const port = ${String((laptop.address() as AddressInfo).port)};
   const via = gateway();
-  const lookup = () => new Promise((ok) => dns.lookup('registry.npmjs.org', (e, a) => ok(e ? '' : a)));
   // All at once: a dropped connection waits out its timeout.
-  const [loopback, gatewayToLaptop, socket, viaDns, address] = await Promise.all([
-    reach({ host: '127.0.0.1', port }),
-    via === undefined ? false : reach({ host: via, port }),
-    reach({ path: ${JSON.stringify(ABSTRACT)} }),
-    // pasta's DNS address carries DNS and nothing else: not the laptop's listener.
-    reach({ host: ${JSON.stringify(DNS_FORWARD)}, port }),
-    lookup(),
-  ]);
+  const [loopback, gatewayToLaptop, loopback6, gateway6ToLaptop, socket, viaDns, internet] =
+    await Promise.all([
+      reach({ host: '127.0.0.1', port }),
+      via === undefined ? false : reach({ host: via, port }),
+      reach({ host: '::1', port }),
+      Promise.all(gateways6().map((host) => reach({ host, port }))).then((r) => r.some(Boolean)),
+      reach({ path: ${JSON.stringify(ABSTRACT)} }),
+      // pasta's DNS address carries DNS and nothing else: not the laptop's listener.
+      reach({ host: ${JSON.stringify(DNS_FORWARD)}, port }),
+      // As npm connects: by name, with Node's default family selection (happy eyeballs), so a
+      // run whose IPv6 is broken still reaches the registry over IPv4, as the install would, and
+      // one whose network is broken fails.
+      reach({ host: 'registry.npmjs.org', port: 443 }),
+    ]);
   const laptop = loopback || gatewayToLaptop;
-  const internet = address !== '' && (await reach({ host: address, port: 443 }));
-  console.log(JSON.stringify({ laptop, socket, dns: viaDns, internet }));
+  const laptop6 = loopback6 || gateway6ToLaptop;
+  console.log(JSON.stringify({ laptop, laptop6, socket, dns: viaDns, internet }));
 })();
 `;
 
@@ -129,13 +146,28 @@ const ONE_DEPENDENCY = {
 };
 
 describe('what each run reaches, from inside it (T069, T164)', () => {
+  it(
+    'the probe itself, run on the laptop outside any sandbox, reaches both listeners and the socket',
+    () => {
+      // So a run that reports neither is a sandbox that keeps them out, not a probe that cannot see
+      // them: this passt build maps no IPv6 address to the laptop, even without --no-map-gw.
+      const result = spawnSync(process.execPath, ['-e', REACH()], { encoding: 'utf8' });
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        laptop: true,
+        laptop6: true,
+        socket: true,
+      });
+    },
+    RUN,
+  );
+
   it.each([
     ['install', true],
     ['build', false],
     ['app', true],
     ['backup', false],
   ] as [DeployRun, boolean][])(
-    'the deploy %s run: not the laptop’s 127.0.0.1, its abstract socket or its listener through the DNS address; the internet by name: %s',
+    'the deploy %s run: not the laptop’s 127.0.0.1 or ::1, its abstract socket or its listener through the DNS address; the internet by name: %s',
     (run, internet) => {
       const { app, release } = layout();
       const result = deployRunner(
@@ -147,6 +179,7 @@ describe('what each run reaches, from inside it (T069, T164)', () => {
       expect(result.stderr).toBe('');
       expect(JSON.parse(result.stdout)).toEqual({
         laptop: false,
+        laptop6: false,
         socket: false,
         dns: false,
         internet,
@@ -159,13 +192,14 @@ describe('what each run reaches, from inside it (T069, T164)', () => {
     ['install', true],
     ['test', false],
   ])(
-    'the test sandbox’s %s run: not the laptop’s 127.0.0.1, its abstract socket or its listener through the DNS address; the internet by name: %s',
+    'the test sandbox’s %s run: not the laptop’s 127.0.0.1 or ::1, its abstract socket or its listener through the DNS address; the internet by name: %s',
     (_, internet) => {
       const work = realpathSync(tempDir());
       const result = sandboxed(work, outer)([process.execPath, '-e', REACH()], work, internet);
       expect(result.stderr).toBe('');
       expect(JSON.parse(result.stdout)).toEqual({
         laptop: false,
+        laptop6: false,
         socket: false,
         dns: false,
         internet,
