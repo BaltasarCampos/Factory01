@@ -7,7 +7,7 @@
     "node": ">=24"
   },
   "scripts": {
-    "build": "tsc -p .",
+    "build": "tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "backup": "node dist/backup.js",
     "test": "vitest run"
