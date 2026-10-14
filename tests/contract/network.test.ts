@@ -93,8 +93,9 @@ function layout(files: Record<string, string> = {}) {
   return { app, release };
 }
 
-const gone = (pid: number | undefined) => {
-  if (pid === undefined) return true;
+/** Whether the process is gone; a PID the helper never reported fails the test, never passes it. */
+const gone = (pid: unknown) => {
+  if (typeof pid !== 'number') throw new Error(`no PID was reported: ${String(pid)}`);
   try {
     process.kill(pid, 0);
     return false;
@@ -333,7 +334,7 @@ describe('pasta never outlives the sandbox (T069, T164)', () => {
     'when the factory process running it gets %s, as when the service stops, nothing is left',
     async (signal) => {
       const run = startHelper(['/bin/sleep', '30']);
-      const [bwrap, pasta] = [await run.report('bwrap'), await run.report('pasta')] as number[];
+      const [bwrap, pasta] = [await run.report('bwrap'), await run.report('pasta')];
       expect(await run.report('ready')).toBe(true);
 
       run.helper.kill(signal);
@@ -373,8 +374,8 @@ describe('the attach helper fails closed (T069, T164)', () => {
       run.done();
 
       expect(String(refused)).toMatch(said);
-      expect(gone(bwrap as number)).toBe(true);
-      expect(gone(pasta as number)).toBe(true);
+      expect(gone(bwrap)).toBe(true);
+      expect(gone(pasta)).toBe(true);
       expect(existsSync(join(run.work, 'started'))).toBe(false);
     },
     RUN,

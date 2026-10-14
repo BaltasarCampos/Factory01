@@ -119,9 +119,16 @@ describe('the app’s systemd user service, for real (T069)', () => {
 
       expect(await answers(p.port)).toBe(true);
       const running = processes(p.unit);
-      expect(running.map((r) => r.name)).toEqual(expect.arrayContaining(['bwrap', 'pasta']));
+      // Found by name only to take their PIDs, which an exec keeps: Ubuntu 24.04's passt
+      // re-execs pasta as its AVX2 build, named pasta.avx2.
+      const bwrap = running.filter((r) => r.name === 'bwrap').map((r) => r.pid);
+      const pasta = running.filter((r) => /^pasta(\.avx2)?$/.test(r.name)).map((r) => r.pid);
+      expect(bwrap.length).toBeGreaterThan(0);
+      expect(pasta).toHaveLength(1);
+      expect([...bwrap, ...pasta].every(alive)).toBe(true);
       expect(systemctl('stop', p.unit).status).toBe(0);
       await sleep(1000);
+      expect([...bwrap, ...pasta].filter(alive)).toEqual([]);
       expect(running.filter((r) => alive(r.pid))).toEqual([]);
       // A stop is clean: the unit is inactive, not failed.
       expect(systemctl('is-failed', p.unit).stdout.trim()).toBe('inactive');
