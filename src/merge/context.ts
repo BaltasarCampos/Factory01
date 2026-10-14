@@ -33,6 +33,8 @@ export interface MainContext {
   readonly laptopKeys: ReleaseKeys;
   /** `Factory-Merge:` trailers on verified merge commits, oldest first. */
   readonly merges: MainMerges['merges'];
+  /** Main's verified first-parent commits after baseline, oldest first. */
+  readonly commits: MainMerges['commits'];
   /** The factory clone releases are read from. */
   readonly factory: string;
   /** `owner/repo` the release pinned at `main` names as its source. */
@@ -117,6 +119,7 @@ export function checkedMain(
     ...{ cwd, home, env, config, main, keysFor, laptopKeys: laptop, factory },
     keys: keysFor(config.factory_release),
     merges: history.merges,
+    commits: history.commits,
     factoryRepo: releaseSource(factory, config.factory_release.sha),
   });
 }

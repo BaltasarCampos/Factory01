@@ -16,6 +16,8 @@ export interface MainMerges {
   rejected?: { commit: string; reason: string };
   /** `Factory-Merge:` values on verified merge commits, oldest first. */
   merges: { commit: string; value: string }[];
+  /** Every verified first-parent commit after baseline, oldest first, with its parents. */
+  commits: { commit: string; parents: string[] }[];
 }
 
 export function verifiedMerges(
@@ -37,6 +39,7 @@ export function verifiedMerges(
     lastVerified: walk.lastVerified,
     ...(walk.rejected === undefined ? {} : { rejected: walk.rejected }),
     merges,
+    commits: walk.commits.map(({ commit, parents }) => ({ commit, parents })),
   };
 }
 

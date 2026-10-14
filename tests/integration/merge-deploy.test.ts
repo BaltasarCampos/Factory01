@@ -24,6 +24,7 @@ import { ownerKeyPath, sign } from '../../src/approvals/sign.js';
 import { verifyGate } from '../../src/approvals/verify.js';
 import { runCli } from '../../src/cli/commands.js';
 import { serialiseManifest } from '../../src/install/manifest.js';
+import { deploysLogPath } from '../../src/deploy/deploys-log.js';
 import { appFolder } from '../../src/deploy/sandbox.js';
 import { unitName, unitRelease } from '../../src/deploy/service.js';
 import { loadRequiredChecks } from '../../src/merge/ci.js';
@@ -813,7 +814,7 @@ function mergeSetup(o: MergeSetup = {}) {
     writeFileSync(global, `[url "${repo.origin}"]\n\tinsteadOf = ${url}\n`);
     return { env: { GIT_CONFIG_GLOBAL: global } };
   };
-  return { repo, head, home, cli, asked, mainOnOrigin, asFactoryRepository };
+  return { repo, factory, head, home, cli, asked, mainOnOrigin, asFactoryRepository };
 }
 
 interface CliOver {
@@ -2012,8 +2013,8 @@ const systemd = {
 let nextPort = 23_000 + (process.pid % 2_000) * 4;
 
 /** A project ready to deploy: main holds the product and its port; the settings file is there. */
-function deployable(files: Files) {
-  const t = mergeSetup();
+function deployable(files: Files, o: MergeSetup = {}) {
+  const t = mergeSetup(o);
   const port = nextPort++;
   const config = `${runGit(t.repo.path, ['show', 'main:.factory/config'])}\napp_port: ${String(port)}\n`;
   const main = onMain(t.repo, { ...files, '.factory/config': config }, 'the product');
@@ -2032,8 +2033,8 @@ function deployable(files: Files) {
           // Already gone.
         }
   });
-  const deploy = (env: NodeJS.ProcessEnv = {}) =>
-    t.cli(['deploy'], { env: { ...systemd, ...env } });
+  const deploy = (env: NodeJS.ProcessEnv = {}, answers: string[] = []) =>
+    t.cli(['deploy'], { env: { ...systemd, ...env }, answers });
   const all = () =>
     existsSync(join(state, 'calls'))
       ? readFileSync(join(state, 'calls'), 'utf8').trim().split('\n')
@@ -2127,7 +2128,10 @@ describe(
       ['a first unit is removed', false],
     ])('a restart that fails refuses, and %s', async (_, earlier) => {
       const d = deployable(product('node build.mjs'));
-      if (earlier) expect((await d.deploy()).code).toBe(0);
+      if (earlier) {
+        expect((await d.deploy()).code).toBe(0);
+        onMain(d.t.repo, { 'next.txt': 'next\n' }, 'next');
+      }
       const before = d.units();
       mkdirSync(d.state, { recursive: true });
       writeFileSync(join(d.state, 'fail-restart'), '');
@@ -2198,8 +2202,9 @@ describe(
           `did not answer HTTP on 127.0.0.1:${String(d.port)} within 30 s; switched the service back to ${first ?? ''}, and put the backup's units back as they were`,
         ),
       );
-      // The app's unit and the backup's, both back as they were.
+      // The app's unit and the backup's, both back as they were; the log has the first deploy only.
       expect(d.units()).toEqual(before);
+      expect(deployLines(d.t.home)).toHaveLength(1);
       expect(d.calls().slice(-2)).toEqual([`--user restart ${APP}`, `--user restart ${TIMER}`]);
     }, 300_000);
 
@@ -2316,6 +2321,204 @@ describe(
       expect(r.stderr).toMatch(/failed at npm run build; nothing was deployed/);
       expect(r.stderr).toContain('tsc: 3 errors');
       expect(existsSync(d.unit)).toBe(false);
+    });
+  },
+);
+
+const deployLog = (home: string) => deploysLogPath(home, REPO);
+const deployLines = (home: string) =>
+  existsSync(deployLog(home))
+    ? readFileSync(deployLog(home), 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l) as { main: string; release: string })
+    : [];
+/** Item #7 merged into main as `factory merge` writes it: signed, its trailer and its branch. */
+function mergeItem(repo: TestRepo): string {
+  repo.checkout('main');
+  repo.git([
+    ...['-c', 'gpg.format=ssh', '-c', `user.signingkey=${owner.privateKey}`],
+    ...['merge', '-q', '--no-ff', '-S', '-m', `Merge #${String(ITEM)} from ${ITEM_BRANCH}`],
+    ...['-m', `Factory-Merge: #${String(ITEM)}`, ITEM_BRANCH],
+  ]);
+  repo.push('main');
+  return repo.revParse('HEAD');
+}
+/** The item's records as the fake GitHub holds them. */
+const itemComments = () =>
+  readState().repos[REPO]?.issues.find((i) => i.number === ITEM)?.comments ?? [];
+const nonceOf = (body: string) => /\bnonce: ([0-9a-f]{32})\b/.exec(body)?.[1] ?? '';
+
+describe(
+  'factory deploy: the items since the last deploy, re-verified (T069, FR-016f, slice 23c-1a)',
+  { timeout: 300_000 },
+  () => {
+    it('re-verifies each item merged since the last deploy; main deployed last refuses; a config set alone deploys', async () => {
+      const d = deployable(product('node build.mjs'));
+      const merge = mergeItem(d.t.repo);
+
+      const first = await d.deploy();
+      const again = await d.deploy();
+      const config = runGit(d.t.repo.path, ['show', 'main:.factory/config']);
+      const port = nextPort++;
+      const set = onMain(
+        d.t.repo,
+        { '.factory/config': config.replace(/^app_port: \d+$/m, `app_port: ${String(port)}`) },
+        'config: app_port',
+      );
+      const third = await d.deploy();
+
+      expect(first.stderr).toBe('');
+      expect(first.code).toBe(0);
+      expect(first.stdout).toMatch(
+        /Since the baseline: \d+ commit\(s\); re-verified the approvals of #7\n/,
+      );
+      expect(d.t.asked).toEqual([]);
+      expect(again.code).toBe(1);
+      expect(again.stderr).toContain(`main is already deployed at ${merge}: there is nothing new`);
+      expect(third.stderr).toBe('');
+      expect(third.code).toBe(0);
+      expect(third.stdout).toContain(
+        `Since the last deploy (${merge.slice(0, 12)}): 1 commit(s); no items merged\n`,
+      );
+      expect(third.stdout).toContain(`answered on 127.0.0.1:${String(port)}`);
+      expect(deployLines(d.t.home).map((l) => l.main)).toEqual([merge, set]);
+      expect(releasesOf(d.t.home)).toHaveLength(2);
+    });
+
+    it('reads each merge with its own git settings: log.showSignature in the Owner’s config changes nothing', async () => {
+      const d = deployable(product('node build.mjs'));
+      mergeItem(d.t.repo);
+      const global = join(d.t.home, 'gitconfig');
+      writeFileSync(global, '[log]\n\tshowSignature = true\n');
+      d.t.repo.git(['config', 'log.showSignature', 'true']);
+
+      const r = await d.deploy({ GIT_CONFIG_GLOBAL: global });
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('re-verified the approvals of #7\n');
+    });
+
+    it('a record of a shipped item that no longer verifies refuses before anything is exported', async () => {
+      const d = deployable(product('node build.mjs'));
+      const merge = mergeItem(d.t.repo);
+      const state = readState();
+      const approved = state.repos[REPO]?.issues.find((i) => i.number === ITEM)?.comments[0];
+      if (approved === undefined) throw new Error('no approved record');
+      approved.body = approved.body.replace('tier: 2', 'tier: 1');
+      writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        `the approvals of #7 (merged in ${merge.slice(0, 12)}) do not verify: #7 has no verified owner:approved`,
+      );
+      expect(r.stderr).toMatch(/nothing was deployed/);
+      expect(releasesOf(d.t.home)).toEqual([]);
+      expect(d.units()).toEqual({});
+      expect(deployLines(d.t.home)).toEqual([]);
+    });
+
+    it('re-verifies with the key lists at main’s head: a key revoked since the merge refuses', async () => {
+      const d = deployable(product('node build.mjs'), {
+        release: [other, owner],
+        chain: ({ specBlob }) => [
+          posted(900, itemRecord('approved'), '2026-10-01T08:00:00Z', other),
+          posted(
+            901,
+            itemRecord('spec-approved', { spec_sha: specBlob }),
+            '2026-10-01T08:30:00Z',
+            other,
+          ),
+        ],
+      });
+      const merge = mergeItem(d.t.repo);
+      d.t.factory.commit({ revoked_keys: readFileSync(other.publicKeyPath, 'utf8') }, 'revoke');
+      signedReleaseTag(d.t.factory, owner, 'v1.0.1');
+      const config = runGit(d.t.repo.path, ['show', 'main:.factory/config']);
+      const pin = `v1.0.1@${d.t.factory.revParse('HEAD')}`;
+      onMain(
+        d.t.repo,
+        { '.factory/config': config.replace(/^factory_release: .*$/m, `factory_release: ${pin}`) },
+        'pin v1.0.1',
+      );
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        `the approvals of #7 (merged in ${merge.slice(0, 12)}) do not verify: #7 has no verified owner:approved`,
+      );
+      expect(releasesOf(d.t.home)).toEqual([]);
+    });
+
+    it.each([
+      ['the same item and comment', `${REPO}#7/900`, 0],
+      ['another comment', `${REPO}#9/950`, 1],
+    ])('a nonce the ledger holds for %s', async (_, ref, code) => {
+      const d = deployable(product('node build.mjs'));
+      mergeItem(d.t.repo);
+      const nonce = nonceOf(itemComments()[0]?.body ?? '');
+      mkdirSync(join(nonceLedgerPath(d.t.home), '..'), { recursive: true });
+      writeFileSync(nonceLedgerPath(d.t.home), `${nonce} ${ref}\n`);
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(code);
+      if (code === 1) {
+        expect(r.stderr).toContain(
+          `the approved record in comment 900: nonce ${nonce} was first seen on another comment`,
+        );
+        expect(releasesOf(d.t.home)).toEqual([]);
+      } else expect(r.stderr).toBe('');
+    });
+
+    it.each([
+      [
+        'a link',
+        (log: string) => {
+          symlinkSync('/dev/null', log);
+        },
+        /is not a regular file/,
+      ],
+      [
+        'a malformed line',
+        (log: string) => {
+          writeFileSync(log, 'not json\n');
+        },
+        /line 1 is not a deploy this factory wrote/,
+      ],
+      [
+        'a commit that is not on main',
+        (log: string) => {
+          writeFileSync(log, `${JSON.stringify({ at: AT, main: 'a'.repeat(40), release: 'r' })}\n`);
+        },
+        /the last deploy, a{40}, is not on main's verified first-parent history/,
+      ],
+    ])('deploys.log holding %s refuses before anything is exported', async (_, plant, said) => {
+      const d = deployable(product('node build.mjs'));
+      mkdirSync(join(deployLog(d.t.home), '..'), { recursive: true });
+      plant(deployLog(d.t.home));
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(said);
+      expect(releasesOf(d.t.home)).toEqual([]);
+    });
+
+    it('warns during a pause and refuses unless the Owner confirms (AC-078)', async () => {
+      const d = deployable(product('node build.mjs'), { inbox: [labeledAt('pause:line', AT)] });
+
+      const r = await d.deploy({}, ['n']);
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('warning: the line is paused (pause:line)');
+      expect(r.stderr).toContain('the Owner did not confirm; nothing was deployed');
+      expect(d.t.asked).toEqual(['Deploy anyway while paused? [y/N] ']);
+      expect(releasesOf(d.t.home)).toEqual([]);
     });
   },
 );

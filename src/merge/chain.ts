@@ -1,5 +1,6 @@
 // The approval chain of a work item, re-verified by `factory merge` at the checked head (T068,
-// data-model § Pull request merge checks): the `approved` record, `spec-approved` unless the
+// data-model § Pull request merge checks), and by `factory deploy` at the head each shipped
+// merge checked, with the key lists at main's verified head (T069, slice 23c-1a): the `approved` record, `spec-approved` unless the
 // verified tier is 1, and every waiver. Each record is verified with the key lists pinned at
 // main's verified head and bound to this item through `verifyGate`: same repository and issue,
 // the approved record's branch, and an `owner:` label added after its comment. A failure names
@@ -48,9 +49,23 @@ function recordsIn(comments: readonly PostedComment[]) {
   });
 }
 
-const RUN_AGAIN = 'and run merge again; nothing was merged';
+/** What the chain needs: main's keys, and the head and branch the item was checked at. */
+export type ChainContext = Pick<
+  MergeContext,
+  'config' | 'env' | 'keys' | 'home' | 'cwd' | 'branch' | 'head'
+>;
 
-export async function verifyChain(c: MergeContext, issue: number): Promise<Chain> {
+/**
+ * The item's chain, verified for `merge` before it merges, or for `deploy` before it ships the
+ * merged item; the refusals say which command to run again.
+ */
+export async function verifyChain(
+  c: ChainContext,
+  issue: number,
+  command: 'merge' | 'deploy' = 'merge',
+): Promise<Chain> {
+  const NOTHING = `nothing was ${command === 'merge' ? 'merged' : 'deployed'}`;
+  const RUN_AGAIN = `and run ${command} again; ${NOTHING}`;
   const { repo } = c.config;
   const options = { env: c.env };
   const comments = await listComments(repo, issue, options);
@@ -83,7 +98,7 @@ export async function verifyChain(c: MergeContext, issue: number): Promise<Chain
         `spec.md changed since it was approved${what}; run factory approve ${String(issue)} spec`,
       );
     throw new RefusedError(
-      `#${String(issue)} has no verified owner:${expected.gate}${target}: ${verdict.reason}${what}; nothing was merged`,
+      `#${String(issue)} has no verified owner:${expected.gate}${target}: ${verdict.reason}${what}; ${NOTHING}`,
     );
   };
   const item = { repo, issue, branch: c.branch };
@@ -132,7 +147,7 @@ export async function verifyChain(c: MergeContext, issue: number): Promise<Chain
     const earlier = seen.get(v.record.nonce);
     if (earlier !== undefined)
       throw new RefusedError(
-        `records share nonce ${v.record.nonce}: comment ${earlier.comment.id} (${earlier.record.gate}) and comment ${v.comment.id} (${v.record.gate}); nothing was merged`,
+        `records share nonce ${v.record.nonce}: comment ${earlier.comment.id} (${earlier.record.gate}) and comment ${v.comment.id} (${v.record.gate}); ${NOTHING}`,
       );
     seen.set(v.record.nonce, v);
   }
@@ -140,7 +155,7 @@ export async function verifyChain(c: MergeContext, issue: number): Promise<Chain
   for (const v of chain)
     if (!ledger.claim(v.record.nonce, `${repo}#${String(issue)}/${v.comment.id}`))
       throw new RefusedError(
-        `the ${v.record.gate} record in comment ${v.comment.id}: nonce ${v.record.nonce} was first seen on another comment (${ledger.path}); nothing was merged`,
+        `the ${v.record.gate} record in comment ${v.comment.id}: nonce ${v.record.nonce} was first seen on another comment (${ledger.path}); ${NOTHING}`,
       );
   const waivers = chain.flatMap((v) => (v.record.gate === 'waiver' ? [v.record.waives ?? ''] : []));
   return { tier, branch: c.branch, stale, waivers };
