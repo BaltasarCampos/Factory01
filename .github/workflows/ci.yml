@@ -54,6 +54,14 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+      # factory deploy's service tests run against a real systemd user manager (T069, slice
+      # 23b-2a): linger starts one for the runner's user without a login session.
+      - name: Start a systemd user manager
+        run: |
+          sudo loginctl enable-linger "$USER"
+          for i in $(seq 1 30); do [ -S "/run/user/$(id -u)/bus" ] && break; sleep 1; done
+          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemctl --user show --property=Version
       # The scan tests run their lever cases against the real pinned tools too: with CI=true
       # they fail, never skip, without them (T136).
       - name: Install semgrep and gitleaks (pinned)
