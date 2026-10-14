@@ -12,7 +12,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, onTestFinished } from 'vitest';
 import { appFolder } from '../../src/deploy/sandbox.js';
-import { switchService, unitName, unitRelease } from '../../src/deploy/service.js';
+import { lastBackup, switchService, unitName, unitRelease } from '../../src/deploy/service.js';
 import { tempDir } from '../helpers/keys.js';
 
 const RUN = 180_000;
@@ -38,12 +38,17 @@ function project() {
   mkdirSync(join(app.settings, '..'), { recursive: true });
   writeFileSync(app.settings, 'TOKEN=settings\n', { mode: 0o600 });
   const unit = unitName(repo);
+  const backup = unitName(repo, 'backup');
+  const timer = unitName(repo, 'backup', 'timer');
+  writeFileSync(join(home, 'secret'), 'the Owner’s');
   onTestFinished(() => {
-    systemctl('stop', unit);
-    systemctl('disable', '--runtime', unit);
-    rmSync(join(place.dir, unit), { force: true });
+    for (const name of [timer, backup, unit]) {
+      systemctl('stop', name);
+      systemctl('disable', '--runtime', name);
+      rmSync(join(place.dir, name), { force: true });
+    }
     systemctl('daemon-reload');
-    systemctl('reset-failed', unit);
+    systemctl('reset-failed', unit, backup);
   });
   let n = 0;
   const release = (serves: boolean) => {
@@ -52,7 +57,21 @@ function project() {
     mkdirSync(folder, { recursive: true });
     writeFileSync(
       join(folder, 'package.json'),
-      JSON.stringify({ name: 'p', version: '1.0.0', scripts: { start: 'node server.mjs' } }),
+      JSON.stringify({
+        ...{ name: 'p', version: '1.0.0' },
+        scripts: { start: 'node server.mjs', backup: 'node backup.mjs' },
+      }),
+    );
+    // Fails when the test leaves `fail` in the data folder; else records what reading a file
+    // under the Owner's home gave it.
+    writeFileSync(
+      join(folder, 'backup.mjs'),
+      `import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+if (existsSync(process.env.APP_DATA + '/fail')) process.exit(3);
+let saw;
+try { saw = readFileSync(${JSON.stringify(join(home, 'secret'))}, 'utf8'); } catch (err) { saw = err.code; }
+writeFileSync(process.env.APP_BACKUPS + '/made', saw);
+`,
     );
     writeFileSync(
       join(folder, 'server.mjs'),
@@ -71,7 +90,11 @@ function project() {
     factory: ROOT,
     program: PROGRAM,
   });
-  return { repo, unit, release, spec, port };
+  const units = () =>
+    [unit, backup, timer].map((name) =>
+      existsSync(join(place.dir, name)) ? readFileSync(join(place.dir, name), 'utf8') : undefined,
+    );
+  return { repo, app, unit, backup, timer, release, spec, port, units };
 }
 
 /** Whether 127.0.0.1:<port> answers HTTP now. */
@@ -143,17 +166,43 @@ describe('the app’s systemd user service, for real (T069)', () => {
       const good = p.release(true);
       await switchService(place, p.spec(good), env);
 
+      const before = p.units();
       await expect(switchService(place, p.spec(p.release(false)), env)).rejects.toThrow(
-        `switched the service back to ${good}`,
+        `switched the service back to ${good}, and put the backup's units back as they were`,
       );
 
-      expect(unitRelease(readFileSync(join(place.dir, p.unit), 'utf8'), p.repo)).toBe(good);
+      // The app's unit and the backup's, both back as they were, and the timer running again.
+      expect(p.units()).toEqual(before);
+      expect(unitRelease(before[1] ?? '', p.repo, 'backup')).toBe(good);
+      expect(systemctl('is-active', p.timer).stdout.trim()).toBe('active');
       let back = false;
       for (let i = 0; i < 60 && !back; i++) {
         back = await answers(p.port);
         if (!back) await sleep(500);
       }
       expect(back).toBe(true);
+    },
+    RUN,
+  );
+
+  it(
+    'the backup runs from its unit in the sandbox, its timer is active, and a failed backup shows in its last result',
+    async () => {
+      const p = project();
+      await switchService(place, p.spec(p.release(true)), env);
+      expect(systemctl('is-active', p.timer).stdout.trim()).toBe('active');
+      expect(lastBackup(env, p.repo)).toBe('no backup has run yet');
+
+      expect(systemctl('start', p.backup).status).toBe(0);
+
+      expect(readFileSync(join(p.app.backups, 'made'), 'utf8')).toBe('ENOENT');
+      expect(lastBackup(env, p.repo)).toMatch(/^the last backup succeeded at \S/);
+      expect(processes(p.backup)).toEqual([]);
+
+      writeFileSync(join(p.app.data, 'fail'), '');
+      expect(systemctl('start', p.backup).status).not.toBe(0);
+
+      expect(lastBackup(env, p.repo)).toMatch(/^the last backup FAILED \(exit-code\) at \S/);
     },
     RUN,
   );
@@ -169,10 +218,10 @@ describe('the app’s systemd user service, for real (T069)', () => {
       });
 
       await expect(switchService(place, p.spec(p.release(true)), env)).rejects.toThrow(
-        /did not stay running with one main process for 10 s .*; stopped and disabled the service, which had no earlier unit, and removed its unit/,
+        /did not stay running with one main process for 10 s .*; stopped and disabled the service, which had no earlier unit, and removed its unit, and removed the backup's units/,
       );
 
-      expect(existsSync(join(place.dir, p.unit))).toBe(false);
+      expect(p.units()).toEqual([undefined, undefined, undefined]);
       expect(systemctl('is-active', p.unit).stdout.trim()).not.toBe('active');
     },
     RUN,

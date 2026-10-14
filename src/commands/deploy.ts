@@ -5,8 +5,9 @@
 // the app folder; then `npm ci --ignore-scripts`, with the network, and the build, without, run
 // in the deploy sandbox; then the app's systemd user unit is switched to the new release, and
 // switched back if anything after the rewrite fails or the app does not answer and keep
-// running (slice 23b-2a). The backup timer comes with 23b-2b; the signed `deployed` record, the
-// summary and the health check with 23c. One deploy runs at a time.
+// running (slice 23b-2a); the backup's service and timer are switched with it, old releases
+// are removed, and the backup's last result is printed (slice 23b-2b). The signed `deployed`
+// record and the summary come with 23c-1, the health check with 23c-2. One deploy runs at a time.
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -14,6 +15,7 @@ import { factoryRoot } from '../ci/sandbox.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode } from '../cli/env.js';
 import { buildRelease } from '../deploy/build.js';
+import { cleanReleases } from '../deploy/cleanup.js';
 import { withDeployLock } from '../deploy/lock.js';
 import { newRelease } from '../deploy/release.js';
 import { appFolder, deployRunner } from '../deploy/sandbox.js';
@@ -22,6 +24,7 @@ import {
   assertUserManager,
   checkSettings,
   factoryProgram,
+  lastBackup,
   switchService,
   userUnits,
 } from '../deploy/service.js';
@@ -46,8 +49,9 @@ export function deploy(ctx: CommandContext): Promise<number> {
       const release = newRelease(app, ctx.cwd, at.main, ctx.now(), ctx.env);
       ctx.io.stdout.write(`Exported main's verified ${at.main} to ${release}\n`);
       buildRelease(deployRunner(app, release, ctx.env), at.main, ctx.io.stdout);
-      await switchService(
-        userUnits(home),
+      const units = userUnits(home);
+      const previous = await switchService(
+        units,
         {
           ...{ repo: at.config.repo, release: basename(release), port, home },
           ...{ factory: factoryRoot(), program: factoryProgram() },
@@ -57,6 +61,17 @@ export function deploy(ctx: CommandContext): Promise<number> {
       ctx.io.stdout.write(
         `Switched the service to ${basename(release)}; it answered on 127.0.0.1:${String(port)}\n`,
       );
+      const cleanup = cleanReleases(app, units, at.config.repo, previous);
+      if (cleanup.removed.length > 0)
+        ctx.io.stdout.write(`Removed old releases: ${cleanup.removed.join(', ')}\n`);
+      for (const line of cleanup.failed) ctx.io.stderr.write(`warning: ${line}\n`);
+      let backup: string;
+      try {
+        backup = lastBackup(ctx.env, at.config.repo);
+      } catch (err) {
+        backup = `could not be read: ${(err as Error).message}`;
+      }
+      ctx.io.stdout.write(`Backup: ${backup}\n`);
       return ExitCode.Ok;
     } finally {
       rmSync(scratch, { recursive: true, force: true });

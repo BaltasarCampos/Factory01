@@ -14,7 +14,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { ReleaseKeys } from '../../src/approvals/keys.js';
@@ -2041,18 +2041,32 @@ function deployable(files: Files) {
   // Without the polls that check the unit stays running after the answer.
   const calls = () => all().filter((c) => !c.includes('--property=MainPID'));
   const polls = () => all().length - calls().length;
-  return { t, main, port, app, unit, state, deploy, calls, polls };
+  // Every unit file, by name: the app's and the backup's, never a fourth.
+  const units = () => {
+    const dir = join(unit, '..');
+    return existsSync(dir)
+      ? Object.fromEntries(readdirSync(dir).map((f) => [f, readFileSync(join(dir, f), 'utf8')]))
+      : {};
+  };
+  return { t, main, port, app, unit, state, deploy, calls, polls, units };
 }
 const releaseIn = (unit: string) => unitRelease(readFileSync(unit, 'utf8'), REPO);
-const SWITCH = (unit: string) => [
+const [APP, BACKUP, TIMER] = [
+  unitName(REPO),
+  unitName(REPO, 'backup'),
+  unitName(REPO, 'backup', 'timer'),
+];
+const SWITCH = [
   '--user show --property=Version',
   '--user daemon-reload',
-  `--user enable ${unit}`,
-  `--user restart ${unit}`,
+  `--user enable ${APP} ${TIMER}`,
+  `--user restart ${APP}`,
+  `--user restart ${TIMER}`,
+  `--user show --property=Result,ExecMainExitTimestamp ${BACKUP}`,
 ];
 
 describe(
-  'factory deploy: the verified export, the sandboxed build and the switch-over (T069, slices 23a, 23b-2a)',
+  'factory deploy: the verified export, the sandboxed build and the switch-over (T069, slices 23a, 23b-2a, 23b-2b)',
   { timeout: 240_000 },
   () => {
     it("exports main's verified commit without .git, builds it, and switches the app's unit to it", async () => {
@@ -2071,10 +2085,42 @@ describe(
       expect(existsSync(join(release ?? '', 'src', 'local.ts'))).toBe(false);
       expect(join(d.app.releases, releaseIn(d.unit) ?? '')).toBe(release);
       expect(readFileSync(d.unit, 'utf8')).toContain(`--port ${String(d.port)}\n`);
-      expect(d.calls()).toEqual(SWITCH(unitName(REPO)));
+      expect(d.calls()).toEqual(SWITCH);
       expect(d.polls()).toBeGreaterThanOrEqual(10);
       expect(r.stdout).toContain(`answered on 127.0.0.1:${String(d.port)}`);
+      expect(unitRelease(d.units()[BACKUP] ?? '', REPO, 'backup')).toBe(releaseIn(d.unit));
+      expect(r.stdout).toContain('Backup: no backup has run yet');
     });
+
+    it('a second deploy rewrites the three units, never adds a fourth, removes old releases and prints a failed backup', async () => {
+      const d = deployable(product('node build.mjs'));
+      const old = [1, 2, 3].map((day) =>
+        join(d.app.releases, `${'0'.repeat(40)}-2020010${String(day)}T000000Z`),
+      );
+      for (const folder of old) mkdirSync(folder, { recursive: true });
+      expect((await d.deploy()).code).toBe(0);
+      const first = releaseIn(d.unit) ?? '';
+      onMain(d.t.repo, { 'next.txt': 'next\n' }, 'next');
+      writeFileSync(
+        join(d.state, 'backup-result'),
+        'Result=exit-code\nExecMainExitTimestamp=Wed 2026-10-14 03:00:05 UTC',
+      );
+
+      const r = await d.deploy();
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      const second = releaseIn(d.unit) ?? '';
+      expect(Object.keys(d.units()).sort()).toEqual([APP, BACKUP, TIMER].sort());
+      expect(unitRelease(d.units()[BACKUP] ?? '', REPO, 'backup')).toBe(second);
+      expect(releasesOf(d.t.home).sort()).toEqual(
+        [join(d.app.releases, first), join(d.app.releases, second), old[2]].sort(),
+      );
+      expect(r.stdout).toContain(`Removed old releases: ${basename(old[1] ?? '')}`);
+      expect(r.stdout).toContain(
+        'Backup: the last backup FAILED (exit-code) at Wed 2026-10-14 03:00:05 UTC',
+      );
+    }, 300_000);
 
     it.each([
       ['the previous unit goes back', true],
@@ -2082,7 +2128,7 @@ describe(
     ])('a restart that fails refuses, and %s', async (_, earlier) => {
       const d = deployable(product('node build.mjs'));
       if (earlier) expect((await d.deploy()).code).toBe(0);
-      const before = existsSync(d.unit) ? readFileSync(d.unit, 'utf8') : undefined;
+      const before = d.units();
       mkdirSync(d.state, { recursive: true });
       writeFileSync(join(d.state, 'fail-restart'), '');
 
@@ -2091,10 +2137,10 @@ describe(
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(
         earlier
-          ? /restart factory-app-\S+ failed: Job for .*; tried to switch the service back to [0-9a-f]{40}-\S+, but systemctl --user restart .* failed/
-          : /restart factory-app-\S+ failed: Job for .*; stopped and disabled the service, which had no earlier unit, and removed its unit; nothing was deployed/,
+          ? /restart factory-app-\S+ failed: Job for .*; tried to switch the service back to [0-9a-f]{40}-\S+ and put the backup's units back as they were, but systemctl --user restart .* failed/
+          : /restart factory-app-\S+ failed: Job for .*; stopped and disabled the service, which had no earlier unit, and removed its unit, and removed the backup's units; nothing was deployed/,
       );
-      expect(existsSync(d.unit) ? readFileSync(d.unit, 'utf8') : undefined).toBe(before);
+      expect(d.units()).toEqual(before);
     });
 
     it('a previous unit whose release cannot be read is still put back, word for word', async () => {
@@ -2107,9 +2153,9 @@ describe(
 
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(
-        /did not answer HTTP .*; switched the service back to its previous unit; nothing was deployed/,
+        /did not answer HTTP .*; switched the service back to its previous unit, and removed the backup's units; nothing was deployed/,
       );
-      expect(readFileSync(d.unit, 'utf8')).toBe(older);
+      expect(d.units()).toEqual({ [APP]: older });
       expect(d.calls().slice(-2)).toEqual([
         '--user daemon-reload',
         `--user restart ${unitName(REPO)}`,
@@ -2139,6 +2185,7 @@ describe(
       const d = deployable(product('node build.mjs'));
       expect((await d.deploy()).code).toBe(0);
       const first = releaseIn(d.unit);
+      const before = d.units();
       onMain(d.t.repo, product('node build.mjs', false), 'stops serving', () => {
         rmSync(join(d.t.repo.path, 'serves'));
       });
@@ -2148,11 +2195,12 @@ describe(
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(
         new RegExp(
-          `did not answer HTTP on 127.0.0.1:${String(d.port)} within 30 s; switched the service back to ${first ?? ''}`,
+          `did not answer HTTP on 127.0.0.1:${String(d.port)} within 30 s; switched the service back to ${first ?? ''}, and put the backup's units back as they were`,
         ),
       );
-      expect(releaseIn(d.unit)).toBe(first);
-      expect(d.calls().filter((c) => c.includes('restart'))).toHaveLength(3);
+      // The app's unit and the backup's, both back as they were.
+      expect(d.units()).toEqual(before);
+      expect(d.calls().slice(-2)).toEqual([`--user restart ${APP}`, `--user restart ${TIMER}`]);
     }, 300_000);
 
     it('on a first deploy, an app that never answers is stopped, disabled and its unit removed', async () => {
@@ -2162,11 +2210,10 @@ describe(
 
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(/did not answer HTTP .*; stopped and disabled the service/);
-      expect(existsSync(d.unit)).toBe(false);
-      expect(d.calls().slice(-3)).toEqual([
-        `--user stop ${unitName(REPO)}`,
-        `--user disable ${unitName(REPO)}`,
-        '--user daemon-reload',
+      expect(d.units()).toEqual({});
+      expect(d.calls().slice(-6)).toEqual([
+        ...[`--user stop ${TIMER}`, `--user disable ${TIMER}`, `--user stop ${BACKUP}`],
+        ...[`--user stop ${APP}`, `--user disable ${APP}`, '--user daemon-reload'],
       ]);
     }, 300_000);
 
@@ -2256,7 +2303,8 @@ describe(
       for (const release of releasesOf(d.t.home))
         expect(existsSync(join(release, 'stolen'))).toBe(false);
       expect(releaseIn(d.unit)).toBe(first);
-      expect(d.calls().filter((c) => c.includes('restart'))).toHaveLength(1);
+      // Only the first deploy's restarts, the app's and the timer's.
+      expect(d.calls().filter((c) => c.includes('restart'))).toHaveLength(2);
     });
 
     it('a failed build refuses, naming the step, with the end of its output', async () => {

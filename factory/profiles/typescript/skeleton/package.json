@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc -p .",
     "start": "node dist/server.js",
+    "backup": "node dist/backup.js",
     "test": "vitest run"
   },
   "devDependencies": {

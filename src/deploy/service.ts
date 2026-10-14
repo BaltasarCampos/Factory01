@@ -1,12 +1,14 @@
-// The app's systemd user service (T069, slice 23b-2a; design v1.8, Owner decisions 2026-10-13):
-// one unit per project, written only by `factory deploy` from the fixed template below. The unit
-// names its release folder explicitly, never through a `current` link, and runs factory code,
-// `factory service app`, which starts the app in the deploy sandbox through the attach helper
-// and pasta; never pasta or bwrap directly. To switch, the deploy rewrites the unit, reloads and
-// restarts it, then waits for the app to answer HTTP on the laptop's loopback and for the unit to
-// stay running with one main process; on any failure after the unit is rewritten, the previous
-// unit's text goes back, or, on a first deploy, the service is stopped, disabled and removed.
-// The previous release is read back from the unit itself, its only record.
+// The app's systemd user service and its daily backup (T069, slices 23b-2a and 23b-2b; design
+// v1.8, Owner decisions 2026-10-13 and 2026-10-14): three units per project, written only by
+// `factory deploy` from the fixed templates below: the app's service, the backup's service and
+// its timer. The services name their release folder explicitly, never through a `current` link,
+// and run factory code, `factory service app` or `factory service backup`, which start the run in
+// the deploy sandbox; never pasta or bwrap directly. To switch, the deploy rewrites all three,
+// reloads, restarts the app, then waits for it to answer HTTP on the laptop's loopback and for
+// its unit to stay running with one main process, and only then restarts the timer; on any
+// failure after the rewrite, each unit goes back as it was: its previous text, or, when there
+// was none, stopped, disabled and removed. The previous release is read back from the app's unit
+// itself, its only record.
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
@@ -34,8 +36,12 @@ export const RELEASE_NAME = /^[0-9a-f]{40}-\d{8}T\d{6}Z$/;
 export const repoName = (repo: string) =>
   REPO.test(repo) && !repo.split('/').some((part) => part === '.' || part === '..');
 
-/** `factory-app-<owner>--<name>.service`: an owner never holds two hyphens in a row. */
-export const unitName = (repo: string) => `factory-app-${repo.replace('/', '--')}.service`;
+/** `factory-<run>-<owner>--<name>.<type>`: an owner never holds two hyphens in a row. */
+export const unitName = (
+  repo: string,
+  run: 'app' | 'backup' = 'app',
+  type: 'service' | 'timer' = 'service',
+) => `factory-${run}-${repo.replace('/', '--')}.${type}`;
 
 /** Where units go: the Owner's `~/.config/systemd/user`, or the runtime folder in the tests. */
 export interface UnitPlace {
@@ -68,8 +74,8 @@ export interface AppService {
 /** Characters a unit line can hold without quoting or systemd's `%` specifiers. */
 const PLAIN = /^[A-Za-z0-9._/@+-]+$/;
 
-/** The unit's text: fixed here, with only names the factory checked. */
-export function appUnit(s: AppService): string {
+/** The names a unit holds, checked; refuses anything a unit line would need to quote. */
+function checked(s: AppService): void {
   const refuse = (what: string) =>
     new RefusedError(`${what}: refusing to write the unit for ${s.repo}`);
   if (!repoName(s.repo)) throw refuse(`${JSON.stringify(s.repo)} is not owner/name`);
@@ -77,8 +83,15 @@ export function appUnit(s: AppService): string {
     throw refuse(`${JSON.stringify(s.release)} is not a release name`);
   for (const path of [s.home, s.factory, ...s.program])
     if (!PLAIN.test(path)) throw refuse(`${JSON.stringify(path)} needs quoting in a unit`);
+}
+
+const WRITTEN = '# Written by factory deploy (T069): do not edit; the next deploy rewrites it.';
+
+/** The app unit's text: fixed here, with only names the factory checked. */
+export function appUnit(s: AppService): string {
+  checked(s);
   const port = String(appPort(s.port));
-  return `# Written by factory deploy (T069): do not edit; the next deploy rewrites it.
+  return `${WRITTEN}
 # Runs ${s.repo}'s app from release ${s.release} in the deploy sandbox, through the
 # factory code in ${s.factory}: whatever dist/ was last built there is what
 # runs at the service's next restart.
@@ -100,12 +113,55 @@ WantedBy=default.target
 `;
 }
 
-/** The release a unit of this template names for `repo`; undefined for anything else. */
-export function unitRelease(text: string, repo: string): string | undefined {
+/** The backup service's text: one run of the release's `npm run backup`, from its timer. */
+export function backupUnit(s: AppService): string {
+  checked(s);
+  return `${WRITTEN}
+# Backs up ${s.repo}'s data with release ${s.release} in the deploy sandbox, through the
+# factory code in ${s.factory}: whatever dist/ was last built there is what
+# runs at the next backup.
+[Unit]
+Description=factory: the daily backup of ${s.repo}
+
+[Service]
+Type=oneshot
+Environment=PATH=/usr/bin:/bin
+Environment=HOME=${s.home}
+ExecStart=${s.program.join(' ')} service backup ${s.repo} ${s.release}
+TimeoutStartSec=1h
+IgnoreSIGPIPE=no
+KillMode=control-group
+`;
+}
+
+/** The backup timer's text: daily, and at the next start when the laptop was off. */
+export function backupTimer(s: AppService): string {
+  checked(s);
+  return `${WRITTEN}
+[Unit]
+Description=factory: the daily backup of ${s.repo}
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=${unitName(s.repo, 'backup')}
+
+[Install]
+WantedBy=timers.target
+`;
+}
+
+/** The release a unit of these templates names for `repo`; undefined for anything else. */
+export function unitRelease(
+  text: string,
+  repo: string,
+  run: 'app' | 'backup' = 'app',
+): string | undefined {
   const starts = text.split('\n').filter((line) => line.startsWith('ExecStart='));
   const escaped = repo.replace(/[.]/g, '\\.');
+  const port = run === 'app' ? ' --port \\d+' : '';
   const match = new RegExp(
-    `^ExecStart=\\S+(?: \\S+)* service app ${escaped} (\\S+) --port \\d+$`,
+    `^ExecStart=\\S+(?: \\S+)* service ${run} ${escaped} (\\S+)${port}$`,
   ).exec(starts.length === 1 ? (starts[0] ?? '') : '');
   const release = match?.[1];
   return release !== undefined && RELEASE_NAME.test(release) ? release : undefined;
@@ -231,9 +287,15 @@ async function steady(env: NodeJS.ProcessEnv, name: string, ms: number): Promise
   return true;
 }
 
+/** A unit's text in `place`, or undefined when it is not there. */
+export const readUnit = (place: UnitPlace, name: string) => {
+  const path = join(place.dir, name);
+  return existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+};
+
 /**
- * Switches the app's unit to `s.release` and restarts it; refuses, after putting the previous
- * unit back or removing a first one, when any step after the rewrite fails or the app does not
+ * Switches the app's unit and the backup's to `s.release` and restarts them; refuses, after
+ * putting every unit back as it was, when any step after the rewrite fails or the app does not
  * answer and keep running. Returns the release it replaced, when the previous unit names one.
  */
 export async function switchService(
@@ -242,22 +304,32 @@ export async function switchService(
   env: NodeJS.ProcessEnv,
 ): Promise<string | undefined> {
   const name = unitName(s.repo);
-  const path = join(place.dir, name);
-  const before = existsSync(path) ? readFileSync(path, 'utf8') : undefined;
-  const previous = before === undefined ? undefined : unitRelease(before, s.repo);
+  const backup = unitName(s.repo, 'backup');
+  const timer = unitName(s.repo, 'backup', 'timer');
+  const units: [string, string][] = [
+    [name, appUnit(s)],
+    [backup, backupUnit(s)],
+    [timer, backupTimer(s)],
+  ];
+  const before = new Map(units.map(([unit]) => [unit, readUnit(place, unit)]));
+  const app = before.get(name);
+  const previous = app === undefined ? undefined : unitRelease(app, s.repo);
   const runtime = place.runtime ? ['--runtime'] : [];
   const port = `127.0.0.1:${String(s.port)}`;
-  writeUnit(place, name, appUnit(s));
+  for (const [unit, text] of units) writeUnit(place, unit, text);
   let why: string;
   try {
     systemctl(env, ['daemon-reload']);
-    systemctl(env, ['enable', ...runtime, name]);
+    systemctl(env, ['enable', ...runtime, name, timer]);
     systemctl(env, ['restart', name]);
     if (!(await answersHttp(s.port, START_MS)))
       why = `the new release ${s.release} did not answer HTTP on ${port} within 30 s`;
     else if (!(await steady(env, name, STEADY_MS)))
       why = `the service of the new release ${s.release} did not stay running with one main process for 10 s after ${port} answered; something else may be answering there`;
-    else return previous;
+    else {
+      systemctl(env, ['restart', timer]);
+      return previous;
+    }
   } catch (err) {
     why = (err as Error).message;
   }
@@ -271,30 +343,55 @@ export async function switchService(
       failed.push((err as Error).message);
     }
   };
-  const [goal, done] =
-    before !== undefined
-      ? [
-          `switch the service back to ${previous ?? 'its previous unit'}`,
-          `switched the service back to ${previous ?? 'its previous unit'}`,
-        ]
+  const target = previous ?? 'its previous unit';
+  const backupThere = [...before].some(([unit, text]) => unit !== name && text !== undefined);
+  const [appGoal, appDone] =
+    app !== undefined
+      ? [`switch the service back to ${target}`, `switched the service back to ${target}`]
       : [
           "stop, disable and remove the service's first unit",
           'stopped and disabled the service, which had no earlier unit, and removed its unit',
         ];
-  if (before !== undefined) {
+  const [backupGoal, backupDone] = backupThere
+    ? ["put the backup's units back as they were", "put the backup's units back as they were"]
+    : ["remove the backup's units", "removed the backup's units"];
+  // Units that were not there are stopped, the timer first, and disabled while systemd still
+  // knows them; the backup's service has no [Install] section, so nothing enables it.
+  for (const [unit] of [...units].reverse())
+    if (before.get(unit) === undefined) {
+      step(() => systemctl(env, ['stop', unit]));
+      if (unit !== backup) step(() => systemctl(env, ['disable', ...runtime, unit]));
+    }
+  for (const [unit] of units)
     step(() => {
-      writeUnit(place, name, before);
+      const text = before.get(unit);
+      if (text === undefined) rmSync(join(place.dir, unit), { force: true });
+      else writeUnit(place, unit, text);
     });
-    step(() => systemctl(env, ['daemon-reload']));
-    step(() => systemctl(env, ['restart', name]));
-  } else {
-    step(() => systemctl(env, ['stop', name]));
-    step(() => systemctl(env, ['disable', ...runtime, name]));
-    step(() => {
-      rmSync(path, { force: true });
-    });
-    step(() => systemctl(env, ['daemon-reload']));
-  }
-  const undone = failed.length === 0 ? done : `tried to ${goal}, but ${failed.join('; ')}`;
+  step(() => systemctl(env, ['daemon-reload']));
+  for (const unit of [name, timer])
+    if (before.get(unit) !== undefined) step(() => systemctl(env, ['restart', unit]));
+  const undone =
+    failed.length === 0
+      ? `${appDone}, and ${backupDone}`
+      : `tried to ${appGoal} and ${backupGoal}, but ${failed.join('; ')}`;
   throw new RefusedError(`${why}; ${undone}; nothing was deployed`);
+}
+
+/**
+ * The backup's last result and time, from its service, so a failed backup is never unseen; or
+ * that none has run yet.
+ */
+export function lastBackup(env: NodeJS.ProcessEnv, repo: string): string {
+  const out = systemctl(env, [
+    'show',
+    '--property=Result,ExecMainExitTimestamp',
+    unitName(repo, 'backup'),
+  ]);
+  const result = /^Result=(.*)$/m.exec(out)?.[1] ?? '';
+  const at = /^ExecMainExitTimestamp=(.*)$/m.exec(out)?.[1] ?? '';
+  if (at === '') return 'no backup has run yet';
+  return result === 'success'
+    ? `the last backup succeeded at ${at}`
+    : `the last backup FAILED (${result}) at ${at}`;
 }

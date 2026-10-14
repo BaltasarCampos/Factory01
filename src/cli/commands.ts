@@ -163,8 +163,9 @@ export const COMMANDS: Readonly<Record<string, CommandSpec>> = {
     run: deploy,
   },
   service: {
-    summary: 'Run a deployed app in the deploy sandbox (what its systemd unit runs)',
-    usage: 'factory service app <owner>/<repo> <release> --port <port>',
+    summary:
+      'Run a deployed app, or its backup, in the deploy sandbox (what their systemd units run)',
+    usage: 'factory service app|backup <owner>/<repo> <release> [--port <port>]',
     // Started by systemd, with no terminal; it refuses in a cloud session itself.
     laptopOnly: false,
     requires: [],
