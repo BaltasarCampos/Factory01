@@ -44,6 +44,7 @@ describe('.factory/config loading (AC-002)', () => {
       retry_limit: 3,
       size_limit_lines: RELEASE_LIMITS.sizeLimitLines,
       coverage_min: RELEASE_LIMITS.coverageMin,
+      app_port: 3000,
     });
   });
 
@@ -208,6 +209,20 @@ describe('.factory/config loading (AC-002)', () => {
     it('rejects a value above 100', () => {
       expect(problems(yaml({ ...base, coverage_min: '101' }))).toEqual([
         'coverage_min: must be at most 100',
+      ]);
+    });
+  });
+
+  describe('app_port: the deployed app’s port, default 3000 (T069)', () => {
+    it('defaults to the skeleton’s 3000 and takes any port from 1024 to 65535', () => {
+      expect(parseConfig(yaml(base)).app_port).toBe(3000);
+      expect(parseConfig(yaml({ ...base, app_port: '8080' })).app_port).toBe(8080);
+      expect(parseConfig(yaml({ ...base, app_port: '65535' })).app_port).toBe(65535);
+    });
+
+    it.each(['80', '1023', '65536', '0', '-1', 'http', '3000.5'])('rejects %s', (port) => {
+      expect(problems(yaml({ ...base, app_port: port }))).toEqual([
+        'app_port: must be an integer from 1024 to 65535',
       ]);
     });
   });

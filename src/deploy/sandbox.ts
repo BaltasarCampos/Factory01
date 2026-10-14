@@ -67,7 +67,12 @@ export function appFolder(home: string, repo: string): AppFolder {
 }
 
 /** The bubblewrap arguments for `run` of `release`, a folder under `app.releases`. */
-export function deployArgs(run: DeployRun, app: AppFolder, release: string): string[] {
+export function deployArgs(
+  run: DeployRun,
+  app: AppFolder,
+  release: string,
+  port?: number,
+): string[] {
   const row = RUNS[run];
   const bind = (access: 'rw' | 'ro' | undefined, from: string, to: string) =>
     access === undefined ? [] : [access === 'rw' ? '--bind' : '--ro-bind', from, to];
@@ -80,6 +85,10 @@ export function deployArgs(run: DeployRun, app: AppFolder, release: string): str
     ...['--setenv', 'PATH', `${nodeBin()}:/usr/bin:/bin`],
     ...['--setenv', 'HOME', row.home],
     ...(row.settings === undefined ? [] : ['--setenv', 'APP_SETTINGS', INSIDE.settings]),
+    // Where the app keeps its data: the product's own code reads it, never a path it assumes.
+    ...(row.data === undefined ? [] : ['--setenv', 'APP_DATA', INSIDE.data]),
+    // Only the app listens, on the port pasta forwards: a number, so --setenv shows no secret.
+    ...(run === 'app' && port !== undefined ? ['--setenv', 'PORT', String(appPort(port))] : []),
     ...baseBinds(),
     ...['--proc', '/proc', ...DEV, '--tmpfs', '/tmp'],
     ...bind(row.code, release, INSIDE.code),
@@ -107,13 +116,16 @@ const NO_PASTA =
 /**
  * The runner for `release`, after bubblewrap's probe and pasta's, together, on the install's
  * arguments: a missing `bwrap` or `pasta`, or user namespaces that do not work, refuse, and
- * nothing ever runs unsandboxed or on the shared network. The app run forwards `port`.
+ * nothing ever runs unsandboxed or on the shared network. The app run forwards `port`. With
+ * `service`, as `factory service` runs the app, output goes to this process's and nothing
+ * times out.
  */
 export function deployRunner(
   app: AppFolder,
   release: string,
   env: NodeJS.ProcessEnv,
   port?: number,
+  service = false,
 ): DeployRunner {
   const outer = probeBwrap(
     deployArgs('build', app, release),
@@ -122,14 +134,15 @@ export function deployRunner(
   );
   attached(deployArgs('install', app, release), ['true'], undefined, outer, NO_PASTA);
   return (run, argv) => {
-    if (!RUNS[run].network)
-      return spawnSync('bwrap', [...deployArgs(run, app, release), ...argv], {
-        env: outer,
-        ...SPAWN,
-      });
     if (run === 'app' && port === undefined)
       throw new RefusedError('the app run needs its port: nothing was started');
+    const args = deployArgs(run, app, release, port);
+    if (!RUNS[run].network)
+      return spawnSync('bwrap', [...args, ...argv], {
+        env: outer,
+        ...(service ? { encoding: 'utf8', stdio: 'inherit' } : SPAWN),
+      });
     const forward = run === 'app' && port !== undefined ? appPort(port) : undefined;
-    return attached(deployArgs(run, app, release), argv, forward, outer, NO_PASTA);
+    return attached(args, argv, forward, outer, NO_PASTA, service);
   };
 }

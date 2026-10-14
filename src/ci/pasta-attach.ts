@@ -45,10 +45,13 @@ const children: ChildProcess[] = [bwrap];
 const killAll = () => {
   for (const child of children) child.kill('SIGKILL');
 };
+// Stopped, as when the app's service stops: the run ends by that signal, which is no failure of
+// the helper's.
 for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP'] as const)
   process.on(signal, () => {
     killAll();
-    process.exit(128 + (signal === 'SIGTERM' ? 15 : signal === 'SIGINT' ? 2 : 1));
+    report({ status: null, signal });
+    process.exit(0);
   });
 
 /** The sandbox's PID from bwrap's info fd; undefined when bwrap exits first. */

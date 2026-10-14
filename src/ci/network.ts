@@ -109,7 +109,8 @@ export type Attached = SpawnSyncReturns<string> & { pasta: number | undefined };
 /**
  * Runs `argv` in bubblewrap with pasta's network, through the helper; `outer` holds only PATH.
  * Refuses, with `what` and pasta's own error, when pasta fails: the command never starts
- * without its network.
+ * without its network. With `service`, as the app's unit runs it, the command's output goes
+ * straight to this process's, for the journal, and there is no time limit.
  */
 export function attached(
   args: readonly string[],
@@ -117,14 +118,15 @@ export function attached(
   port: number | undefined,
   outer: NodeJS.ProcessEnv,
   what: string,
+  service = false,
 ): Attached {
   const command = attachCommand(args, argv, port);
   try {
     const run = spawnSync(command.command, command.args, {
-      ...SPAWN,
+      ...(service ? { encoding: 'utf8' } : SPAWN),
       env: { PATH: outer.PATH ?? '' },
       input: command.input,
-      stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+      stdio: ['pipe', service ? 'inherit' : 'pipe', service ? 'inherit' : 'pipe', 'pipe'],
     });
     const reports = (run.output[3] ?? '')
       .split('\n')
@@ -139,7 +141,7 @@ export function attached(
     const status = said('status');
     if (run.error !== undefined || run.status !== 0 || status === undefined)
       throw new RefusedError(
-        `${what}: ${run.error?.message ?? `the attach helper failed: ${run.stderr.trim()}`}`,
+        `${what}: ${run.error?.message ?? `the attach helper failed: ${((run.stderr as string | null) ?? '').trim()}`}`,
       );
     return {
       ...run,

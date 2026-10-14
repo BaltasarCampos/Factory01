@@ -19,7 +19,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "typecheck": "tsc -p tsconfig.eslint.json",
-    "check:sandbox": "vitest run --project contract --reporter=verbose tests/contract/network.test.ts"
+    "check:sandbox": "vitest run --project contract --reporter=verbose tests/contract/network.test.ts",
+    "check:service": "vitest run --project contract --reporter=verbose tests/contract/service.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.0",
