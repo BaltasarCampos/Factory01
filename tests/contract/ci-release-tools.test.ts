@@ -3,7 +3,9 @@
 // tsc, Vitest and ESLint with the release's configs on a tree written from raw blobs that leaves
 // out every tool config and ignore file the project could supply. Inline suppression is off.
 // Off GitHub Actions they run in the laptop sandbox, which installs the head's dependencies.
+import { spawnSync } from 'node:child_process';
 import {
+  cpSync,
   existsSync,
   readdirSync,
   mkdirSync,
@@ -324,6 +326,87 @@ describe('the profile skeleton (T047, T130)', () => {
         expect(await ci(repo, [check, 'HEAD', '--install', install], actions)).toMatchObject({
           code: 0,
         });
+    },
+    RUN,
+  );
+});
+
+describe('the skeleton’s own tsconfig files (T130, slice 23b-3)', () => {
+  const skeleton = fileURLToPath(
+    new URL('../../factory/profiles/typescript/skeleton', import.meta.url),
+  );
+  const modules = fileURLToPath(new URL('../../node_modules', import.meta.url));
+
+  /**
+   * The factory's own tsc on a copy of the skeleton, with `config` as shipped. No install: as the
+   * CI type check does (`tsconfig()` in src/ci/test.ts), a small config beside it extends it and
+   * adds only `typeRoots` at the factory's `node_modules/@types` and a `vitest` path to its
+   * `dist/index.d.ts`, so Node's and Vitest's types come from the factory's install, at the
+   * versions the skeleton pins. Whatever else the shipped config says, include, rootDir, outDir
+   * and noEmit among it, stands.
+   */
+  function tsc(copy: string, config: string) {
+    writeFileSync(
+      join(copy, `types.${config}`),
+      JSON.stringify({
+        extends: `./${config}`,
+        compilerOptions: {
+          typeRoots: [join(modules, '@types')],
+          paths: { vitest: [join(modules, 'vitest', 'dist', 'index.d.ts')] },
+        },
+      }),
+    );
+    return spawnSync(
+      process.execPath,
+      [join(modules, 'typescript', 'bin', 'tsc'), '-p', `types.${config}`, '--pretty', 'false'],
+      { cwd: copy, encoding: 'utf8' },
+    );
+  }
+  const copy = () => {
+    const dir = join(tempDir(), 'app');
+    cpSync(skeleton, dir, { recursive: true });
+    return dir;
+  };
+
+  it(
+    'tsconfig.json type-checks src/ and tests/ and emits nothing: a type error in a test fails it',
+    () => {
+      const clean = copy();
+      const broken = copy();
+      writeFileSync(
+        join(broken, 'tests', 'typo.test.ts'),
+        "const n: number = 'one';\nexport { n };\n",
+      );
+
+      const passes = tsc(clean, 'tsconfig.json');
+      const fails = tsc(broken, 'tsconfig.json');
+
+      expect(passes.stdout + passes.stderr).toBe('');
+      expect(passes.status).toBe(0);
+      expect(existsSync(join(clean, 'dist'))).toBe(false);
+      expect(fails.status).not.toBe(0);
+      expect(fails.stdout).toMatch(/^tests\/typo\.test\.ts\(1,7\): error TS2322/m);
+    },
+    RUN,
+  );
+
+  it(
+    'tsconfig.build.json, which npm run build uses, emits only src/ to dist/',
+    () => {
+      const dir = copy();
+      const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')) as {
+        scripts: Record<string, string>;
+      };
+
+      const build = tsc(dir, 'tsconfig.build.json');
+
+      expect(pkg.scripts.build).toBe('tsc -p tsconfig.build.json');
+      expect(build.stdout + build.stderr).toBe('');
+      expect(build.status).toBe(0);
+      expect(readdirSync(join(dir, 'dist'), { recursive: true }).sort()).toEqual([
+        'backup.js',
+        'server.js',
+      ]);
     },
     RUN,
   );
