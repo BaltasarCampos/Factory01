@@ -429,11 +429,16 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
       ...(branch === null ? {} : { branch }),
       ...(tier === null ? {} : { tier }),
     };
-    const merges = over.merged ? [{ commit: t.project.revParse('main'), value: '#2' }] : [];
+    const main = t.project.revParse('main');
+    const merges = over.merged ? [{ commit: main, value: '#2' }] : [];
+    // The merge commit, with its parents, as the signed-history walk lists it.
+    const parents = t.project.git(['rev-list', '--parents', '-n', '1', main]).split(' ').slice(1);
+    const commits = over.merged ? [{ commit: main, parents }] : [];
     const config = configOnMain(t.project.path);
     return gatherEvidence({ projectDir: t.project.path })(item, config, {
       lastVerified: undefined,
       merges,
+      commits,
     });
   };
   const tipOf = (t: ReturnType<typeof setup>) => t.project.git(['rev-parse', `origin/${BRANCH}`]);
