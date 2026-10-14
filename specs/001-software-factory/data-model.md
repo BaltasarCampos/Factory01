@@ -463,6 +463,11 @@ Markdown files on `claude/factory-log`:
 `.factory/ops/health/<ts>.md` (version, status, checks), `.factory/ops/incidents/<id>.md`,
 `.factory/ops/metrics/<yyyy-Www>.md` (nine metrics, AC-047), `.factory/lessons/<role>.md`
 (append sections), `.factory/releases/<version>.md` (notes + rollback path).
+A health summary, `.factory/ops/health/<YYYYMMDDTHHMMSSZ>.md`, is written by `factory deploy` after
+the switch: the version (main's commit and the release), the status (healthy, unhealthy and kept
+running, or unhealthy and switched back), the `deployed` record's comment id and nonce, and the
+checks (start check, unit, `GET /health`, the backup's last result). It is unsigned, so it is
+never release evidence on its own (slice 23c-2).
 A release note names each item it covers as `#N` and gives its rollback steps under
 `## Rollback`; `factory deploy` refuses a shipped item that no note on main or on
 `claude/factory-log` covers (slice 23c-1b).
