@@ -75,7 +75,7 @@ const ROWS: [DeployRun, Record<string, string | undefined>, boolean, Record<stri
       '/app/settings.env': undefined,
     },
     false,
-    { HOME: '/app/data', APP_DATA: '/app/data' },
+    { HOME: '/app/data', APP_DATA: '/app/data', APP_BACKUPS: '/app/backups' },
   ],
 ];
 

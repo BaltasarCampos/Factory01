@@ -3,7 +3,8 @@
 // a test puts it. It records each call in $HOME/.fake-systemd/calls; `restart` starts what the
 // unit would serve: an HTTP server on the unit's port when the release the unit names holds a
 // file `serves`, else nothing, as an app that never listens; `show` reports the unit active, with
-// that server as its main process, while it runs. With a file `down` in that folder it fails as
+// that server as its main process, while it runs, and the backup's last result as the file
+// `backup-result` holds it, else none yet. With a file `down` in that folder it fails as
 // it does without a user manager, and with `fail-restart` every `restart` fails: systemctl gets
 // only PATH, HOME and the bus's variables, so no other variable reaches it.
 import { spawn } from 'node:child_process';
@@ -32,6 +33,12 @@ const pidFile = join(state, `${unit}.pid`);
 if (verb === 'restart' && existsSync(join(state, 'fail-restart'))) {
   console.error(`Job for ${unit} failed because the control process exited with error code.`);
   process.exit(1);
+}
+if (verb === 'show' && rest.includes('--property=Result,ExecMainExitTimestamp')) {
+  const result = join(state, 'backup-result');
+  console.log(
+    existsSync(result) ? readFileSync(result, 'utf8') : 'Result=success\nExecMainExitTimestamp=',
+  );
 }
 if (verb === 'show' && rest.includes('--property=MainPID')) {
   const pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8') : '0';

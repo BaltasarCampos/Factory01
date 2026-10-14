@@ -1,7 +1,7 @@
 // `factory service app` (T069, slice 23b-2a): what the app's unit runs. It checks every argument
 // again, though only factory code wrote them, runs the app in the deploy sandbox until it exits,
 // and exits non-zero when the app does, so the unit's Restart=on-failure starts it again.
-import { mkdirSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/commands.js';
@@ -10,7 +10,7 @@ import { tempDir } from '../helpers/keys.js';
 
 const RELEASE = `${'a'.repeat(40)}-20261013T153000Z`;
 
-function project(start = 'node -e "process.exit(3)"') {
+function project(start = 'node -e "process.exit(3)"', backup = start) {
   const home = realpathSync(tempDir());
   const app = appFolder(home, 'owner/project');
   const release = join(app.releases, RELEASE);
@@ -19,7 +19,7 @@ function project(start = 'node -e "process.exit(3)"') {
   writeFileSync(app.settings, 'TOKEN=settings\n', { mode: 0o600 });
   writeFileSync(
     join(release, 'package.json'),
-    JSON.stringify({ name: 'p', version: '1.0.0', scripts: { start } }),
+    JSON.stringify({ name: 'p', version: '1.0.0', scripts: { start, backup } }),
   );
   return { home, app, release };
 }
@@ -45,7 +45,32 @@ describe('factory service app (T069)', () => {
     expect(r.stderr).toMatch(/the app of owner\/project exited with 3/);
   }, 120_000);
 
+  it('runs the release’s backup once in the sandbox: data and backups writable, no settings', async () => {
+    const backup = `node -e "const fs = require('fs'); fs.writeFileSync(process.env.APP_BACKUPS + '/made', [process.env.APP_DATA, String(process.env.APP_SETTINGS), String(fs.existsSync('/app/settings.env'))].join(' '))"`;
+    const p = project(undefined, backup);
+
+    const r = await service(p.home, ['backup', 'owner/project', RELEASE]);
+
+    expect(r.stderr).toBe('');
+    expect(r.code).toBe(0);
+    expect(readFileSync(`${p.app.backups}/made`, 'utf8')).toBe('/app/data undefined false');
+  }, 120_000);
+
+  it('a backup that fails exits non-zero, so its unit shows the failure', async () => {
+    const p = project();
+
+    const r = await service(p.home, ['backup', 'owner/project', RELEASE]);
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toMatch(/the backup of owner\/project exited with 3/);
+  }, 120_000);
+
   it.each([
+    [
+      'a backup given a port',
+      ['backup', 'owner/project', RELEASE, '--port', '8080'],
+      /takes no port/,
+    ],
     [
       'a repository that is not owner/name',
       ['app', 'owner/../x', RELEASE, '--port', '8080'],
@@ -66,7 +91,7 @@ describe('factory service app (T069)', () => {
       ['app', 'owner/project', RELEASE, '--port', '8080x'],
       /1024 to 65535/,
     ],
-    ['a run other than app', ['build', 'owner/project', RELEASE, '--port', '8080'], /app/],
+    ['a run other than app or backup', ['build', 'owner/project', RELEASE], /app or backup/],
   ])('refuses %s', async (_, args, said) => {
     const p = project();
     const r = await service(p.home, args);

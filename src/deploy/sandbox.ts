@@ -87,6 +87,7 @@ export function deployArgs(
     ...(row.settings === undefined ? [] : ['--setenv', 'APP_SETTINGS', INSIDE.settings]),
     // Where the app keeps its data: the product's own code reads it, never a path it assumes.
     ...(row.data === undefined ? [] : ['--setenv', 'APP_DATA', INSIDE.data]),
+    ...(row.backups === undefined ? [] : ['--setenv', 'APP_BACKUPS', INSIDE.backups]),
     // Only the app listens, on the port pasta forwards: a number, so --setenv shows no secret.
     ...(run === 'app' && port !== undefined ? ['--setenv', 'PORT', String(appPort(port))] : []),
     ...baseBinds(),
