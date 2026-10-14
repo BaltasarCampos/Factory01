@@ -261,7 +261,7 @@ missing the summary says "unavailable (telemetry missing)" and goes on.
 | Waiver, other targets (`finding:`, `dep:`, `check:`) | R: target | — | — | — | R: what stays unfixed or accepted |
 | Merge, item | R: diffstat of the checked head; every changed test file, even when its counts net to zero; every removed, skipped, focused or retried test, removed assertion and changed setup or helper file (AC-061), each with the `test:` waiver that covers it, or "none" | R: each `AC-###` → its tagged tests | R: CI on the checked head; verify report | S | R: tier; open findings; waivers in force |
 | Merge, Define / upgrade / log / factory repository | R: the pull request and branch; diffstat of the merge result against main, labelled so, since main may have moved since the branch was cut (Owner decision 2026-10-13, slice 22c) | — | R: CI on the checked head; the branch's own check: Define output check, manifest equality, the log rules, the factory-repository path rule | — | R: upgrade — the keys it revokes and the in-flight items whose approvals used them; Define, log and factory repository — the per-branch check results |
-| Deploy | R: items merged since the last deploy | — | R: CI on main's head | S | R: rollback step from the release notes |
+| Deploy | R: the commits since the last deploy, or the baseline; each item merged since then, and the other merges | — | R: CI on main's head (the push run's `main` jobs); each item's approvals re-verified with the key lists at main's head, and its tier | S: from the shipped items' `events.jsonl` at main | R: each shipped item's rollback steps from its release note, quoted with the note's source; none needed when no item shipped (slice 23c-1b) |
 | Resume | R: items whose state changed since the pause | — | — | — | R: what was paused, when and by whom (label history), and the alerts raised during the pause |
 
 ## Keys and rotation
@@ -463,6 +463,9 @@ Markdown files on `claude/factory-log`:
 `.factory/ops/health/<ts>.md` (version, status, checks), `.factory/ops/incidents/<id>.md`,
 `.factory/ops/metrics/<yyyy-Www>.md` (nine metrics, AC-047), `.factory/lessons/<role>.md`
 (append sections), `.factory/releases/<version>.md` (notes + rollback path).
+A release note names each item it covers as `#N` and gives its rollback steps under
+`## Rollback`; `factory deploy` refuses a shipped item that no note on main or on
+`claude/factory-log` covers (slice 23c-1b).
 
 ## Benchmark item
 

@@ -5,6 +5,7 @@ import {
   GATE_PARTS,
   PART_TITLES,
   type BranchMergeView,
+  type DeployView,
   type MergeView,
   type SummaryFacts,
 } from '../../src/notify/summary.js';
@@ -671,5 +672,120 @@ describe('merge summary of a Define, log or factory-repository branch (T068, sli
     const s = buildSummary(branchMerge({ checks: [], ci: [] }));
 
     expect(s.ok ? [] : s.missing).toContainEqual(expect.stringMatching(/^Tests and review: /));
+  });
+});
+
+describe('deploy summary (T069, AC-095, slice 23c-1b)', () => {
+  const MAIN = 'a'.repeat(40);
+  const SINCE = 'b'.repeat(40);
+  const MERGE = 'c'.repeat(40);
+  const view = (over: Partial<DeployView> = {}): DeployView => ({
+    ...{ main: MAIN, since: SINCE, commits: 3 },
+    items: [{ issue: 7, title: 'Add login', merge: MERGE, branch: 'claude/7-add-login', tier: 2 }],
+    others: [{ commit: 'd'.repeat(40), value: 'factory-log' }],
+    ci: [
+      {
+        ...{ job: 'build-test', workflow: '.github/workflows/ci.yml', state: 'success' },
+        ...{ failedBefore: 1, failedRuns: 0 },
+      },
+    ],
+    rollback: [
+      {
+        issue: 7,
+        notes: [
+          {
+            path: '.factory/releases/2026-10-14.md',
+            source: 'origin/claude/factory-log at dddddddddddd, not merged',
+            steps: ['Run factory deploy at the previous commit.', 'Drop the sessions table.'],
+          },
+        ],
+      },
+    ],
+    ...over,
+  });
+  const deploy = (deploy: DeployView | undefined) =>
+    facts({
+      ...{ gate: 'deployed', kind: 'deploy', commit: MAIN, deploy },
+      ...{ tier: undefined, branch: undefined, files: undefined },
+      issue: { number: 1, title: 'Owner inbox', body: '', labels: [] },
+    });
+
+  it("shows the commits and items since the last deploy, CI on main's head, the re-verified tiers and each item's rollback steps", () => {
+    const t = text(deploy(view()));
+
+    expect(t).toContain(`Approval summary for #1 (deployed) at ${MAIN}:`);
+    expect(part(t, PART_TITLES.changed)).toEqual([
+      `Main at ${MAIN}, since the last deploy at ${SINCE}`,
+      "3 commits on main's verified first-parent history",
+      'Items merged:',
+      `#7 merged in ${MERGE.slice(0, 12)} from claude/7-add-login`,
+      'quoted from issue #7 (its title, issue text):',
+      '> Add login',
+      `Other merges: factory-log in ${'d'.repeat(12)}`,
+    ]);
+    expect(part(t, PART_TITLES.mapping)).toEqual(['—']);
+    expect(part(t, PART_TITLES.results)).toEqual([
+      "CI on main's head (GitHub Actions workflow runs):",
+      'build-test (.github/workflows/ci.yml): success; 1 earlier attempt failed',
+      "Approvals re-verified with the key lists at main's head:",
+      '#7: tier 2',
+    ]);
+    expect(part(t, PART_TITLES.usage)).toEqual(['unavailable (telemetry missing)']);
+    expect(part(t, PART_TITLES.risks)).toEqual([
+      'Rollback steps for #7:',
+      'quoted from .factory/releases/2026-10-14.md on origin/claude/factory-log at dddddddddddd, not merged:',
+      '> Run factory deploy at the previous commit.',
+      '> Drop the sessions table.',
+    ]);
+  });
+
+  it('shows a first deploy from the baseline, and with no item shipped needs no release note', () => {
+    const t = text(deploy(view({ since: undefined, items: [], others: [], rollback: [] })));
+
+    expect(part(t, PART_TITLES.changed)).toEqual([
+      `Main at ${MAIN}, since the baseline (no deploy yet)`,
+      "3 commits on main's verified first-parent history",
+      'Items merged: none',
+      'Other merges: none',
+    ]);
+    expect(part(t, PART_TITLES.results)).toContain('No item to re-verify');
+    expect(part(t, PART_TITLES.risks)).toEqual([
+      'No item merged since the last deploy: no release note needed',
+    ]);
+  });
+
+  it('shows issue titles, branch names and rollback steps through visible(), labelled as quoted text', () => {
+    const t = text(
+      deploy(
+        view({
+          items: [
+            { issue: 7, title: 'Add\u202e login', merge: MERGE, branch: 'claude/7-a', tier: 1 },
+          ],
+          rollback: [
+            {
+              issue: 7,
+              notes: [{ path: 'r\u200b.md', source: 'main at x', steps: ['undo\u001b[2J'] }],
+            },
+          ],
+        }),
+      ),
+    );
+
+    for (const shown of [
+      '> Add\\u{202e} login',
+      'quoted from r\\u{200b}.md on main at x:',
+      '> undo\\u{1b}[2J',
+    ])
+      expect(t).toContain(shown);
+  });
+
+  it('refuses when the deploy checks were not passed in', () => {
+    const s = buildSummary(deploy(undefined));
+
+    expect(s.ok ? [] : s.missing.map((m) => m.split(':')[0])).toEqual([
+      PART_TITLES.changed,
+      PART_TITLES.results,
+      PART_TITLES.risks,
+    ]);
   });
 });

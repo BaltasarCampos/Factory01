@@ -50,15 +50,18 @@ import { projectHere } from './pause.js';
 type Project = Awaited<ReturnType<typeof projectHere>>;
 type RecordFields = Pick<ApprovalRecord, 'tier' | 'branch' | 'spec_sha' | 'waives' | 'head'>;
 type Issue = SummaryFacts['issue'];
-/** The gates `approve` signs records for; `merge` is a summary, never a record. */
-type RecordGate = Exclude<SummaryFacts['gate'], 'merge'>;
+/** The gates `approve` signs records for; `merge` is a summary, never a record; `deploy` signs its own. */
+type RecordGate = Exclude<SummaryFacts['gate'], 'merge' | 'deployed'>;
 
-/** Sign a record, post it on its issue and claim its nonce in the laptop ledger. */
+/**
+ * Sign a record, post it on its issue and claim its nonce in the laptop ledger; returns the posted
+ * comment's id.
+ */
 export async function postSigned(
   ctx: CommandContext,
-  project: Project,
+  project: Pick<Project, 'repo' | 'home' | 'env'>,
   record: ApprovalRecord,
-): Promise<void> {
+): Promise<string> {
   const signed = sign(record, ownerKeyPath(project.home), {
     stdinIsTTY: ctx.stdinIsTTY,
     env: ctx.env,
@@ -71,6 +74,7 @@ export async function postSigned(
     throw new RefusedError(`the record posted on #${String(record.issue)} could not be read back`);
   const ref = `${project.repo}#${String(record.issue)}/${posted.id}`;
   new NonceLedger(nonceLedgerPath(project.home)).claim(record.nonce, ref);
+  return posted.id;
 }
 
 export async function viewIssue(project: Project, issue: number) {

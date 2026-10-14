@@ -13,14 +13,14 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { keyOf, newestKey, secondCopy } from '../approvals/keys.js';
-import { ownerKeyPath } from '../approvals/sign.js';
+import { secondCopy } from '../approvals/keys.js';
+import { assertNewestKey } from '../approvals/newest-key.js';
 import { checkedSet, type CheckedSet } from '../ci/ac-map.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { pendingManifest } from '../dispatcher/manifest.js';
 import { mergeBase, safeDiff, safeGit, type FileChange } from '../git/diff.js';
-import { checkedHead, checkedMain, type MainContext, type MergeContext } from '../merge/context.js';
+import { checkedHead, checkedMain, type MergeContext } from '../merge/context.js';
 import { verifyChain, type Chain } from '../merge/chain.js';
 import {
   ciAt,
@@ -39,15 +39,6 @@ import { confirm, confirmPause } from '../pause/confirm.js';
 import { coveredAt, signHeadBoundWaiver, viewAt, viewIssue } from './approve.js';
 
 const NOTHING = 'nothing was merged';
-
-/** The key this laptop signs with must be the newest listed, non-revoked key at main's pin. */
-function assertNewestKey(at: MainContext): void {
-  const mine = keyOf(secondCopy(at.env, at.home) ?? '');
-  if (mine === undefined || mine !== newestKey(at.keys))
-    throw new RefusedError(
-      `finish the rotation: ${ownerKeyPath(at.home)}.pub is not the newest listed, non-revoked key of the release pinned on main (factory keygen --rotate --finish); ${NOTHING}`,
-    );
-}
 
 async function confirmSession(ctx: CommandContext, c: MergeContext): Promise<void> {
   const manifest = pendingManifest({ projectDir: c.cwd, now: ctx.now, env: c.env }, c.head);
@@ -299,7 +290,7 @@ export async function merge(ctx: CommandContext): Promise<number> {
   const scratch = mkdtempSync(join(tmpdir(), 'factory-merge-'));
   try {
     const at = checkedMain(ctx.cwd, ctx.env, ctx.env.HOME ?? homedir(), scratch);
-    assertNewestKey(at);
+    assertNewestKey(at, NOTHING);
     await confirmPause(ctx, at, 'Merge anyway while paused?', NOTHING);
     const c = await checkedHead(at, Number(arg));
     ctx.io.stdout.write(

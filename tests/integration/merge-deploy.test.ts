@@ -19,9 +19,9 @@ import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it, onTestFinished, vi } from 'vitest';
 import type { ReleaseKeys } from '../../src/approvals/keys.js';
 import { NonceLedger, nonceLedgerPath } from '../../src/approvals/nonces.js';
-import { renderComment } from '../../src/approvals/record.js';
+import { extractFromComment, parse, renderComment } from '../../src/approvals/record.js';
 import { ownerKeyPath, sign } from '../../src/approvals/sign.js';
-import { verifyGate } from '../../src/approvals/verify.js';
+import { matchFields, verifyGate, verifySignature } from '../../src/approvals/verify.js';
 import { runCli } from '../../src/cli/commands.js';
 import { serialiseManifest } from '../../src/install/manifest.js';
 import { deploysLogPath } from '../../src/deploy/deploys-log.js';
@@ -604,6 +604,31 @@ function actionsAt(sha: string, jobs: ActionsJob[] = allGreen(), earlierFailed: 
       jobs: ran,
     };
   }
+  writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
+}
+/**
+ * CI on main's head as GitHub Actions shows it: one push run of ci.yml at `sha` on `branch`, its
+ * `job` with `conclusion`, null while it runs (slice 23c-1b). `event` is the run's own field: the
+ * fake answers the push query with it, as a filter GitHub might ignore; `none`: no run at all.
+ */
+function pushRunAt(
+  sha: string,
+  conclusion: string | null = 'success',
+  { branch = 'main', job = 'build-test', event = 'push', none = false } = {},
+) {
+  const state = readState();
+  const repo = state.repos[REPO];
+  if (repo === undefined) throw new Error('seed the fake GitHub first');
+  const status = conclusion === null ? 'in_progress' : 'completed';
+  const run = { id: nextRun++, path: CI, head_sha: sha, head_branch: branch, event };
+  repo.api[`repos/${REPO}/actions/runs?head_sha=${sha}&event=push&per_page=100`] = {
+    total_count: none ? 0 : 1,
+    workflow_runs: none ? [] : [{ ...run, status, conclusion }],
+  };
+  repo.api[`repos/${REPO}/actions/runs/${String(run.id)}/jobs?filter=all&per_page=100`] = {
+    total_count: 1,
+    jobs: [{ id: run.id * 100, name: job, run_attempt: 1, status, conclusion }],
+  };
   writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
 }
 const signersOf = (keys: TestKeys[]) => keys.map((k) => `${k.allowedSignersLine}\n`).join('');
@@ -2033,8 +2058,11 @@ function deployable(files: Files, o: MergeSetup = {}) {
           // Already gone.
         }
   });
-  const deploy = (env: NodeJS.ProcessEnv = {}, answers: string[] = []) =>
-    t.cli(['deploy'], { env: { ...systemd, ...env }, answers });
+  // By default CI on main's head is green and the Owner answers yes (slice 23c-1b).
+  const deploy = (env: NodeJS.ProcessEnv = {}, answers: string[] = ['y'], ci = true) => {
+    if (ci) pushRunAt(t.mainOnOrigin());
+    return t.cli(['deploy'], { env: { ...systemd, ...env }, answers });
+  };
   const all = () =>
     existsSync(join(state, 'calls'))
       ? readFileSync(join(state, 'calls'), 'utf8').trim().split('\n')
@@ -2333,8 +2361,25 @@ const deployLines = (home: string) =>
         .split('\n')
         .map((l) => JSON.parse(l) as { main: string; release: string })
     : [];
-/** Item #7 merged into main as `factory merge` writes it: signed, its trailer and its branch. */
-function mergeItem(repo: TestRepo): string {
+const NOTE_PATH = '.factory/releases/v1.md';
+const NOTE = [
+  ...['# Release v1', '', '- #7 Add login', '', '## Rollback', ''],
+  ...['1. Run factory deploy at the previous commit.', '', '## Notes', '', 'Nothing else.', ''],
+].join('\n');
+/** `files` committed on claude/factory-log, cut from main the first time, and pushed. */
+function onLog(repo: TestRepo, files: Files): string {
+  const exists = repo.git(['branch', '--list', LOG_BRANCH]) !== '';
+  repo.checkout(LOG_BRANCH, { create: !exists });
+  const sha = repo.commit(files, 'release note');
+  repo.push(LOG_BRANCH);
+  repo.checkout('main');
+  return sha;
+}
+/**
+ * Item #7 merged into main as `factory merge` writes it: signed, its trailer and its branch; its
+ * release note, unless null, on claude/factory-log.
+ */
+function mergeItem(repo: TestRepo, note: string | null = NOTE): string {
   repo.checkout('main');
   repo.git([
     ...['-c', 'gpg.format=ssh', '-c', `user.signingkey=${owner.privateKey}`],
@@ -2342,7 +2387,9 @@ function mergeItem(repo: TestRepo): string {
     ...['-m', `Factory-Merge: #${String(ITEM)}`, ITEM_BRANCH],
   ]);
   repo.push('main');
-  return repo.revParse('HEAD');
+  const merge = repo.revParse('HEAD');
+  if (note !== null) onLog(repo, { [NOTE_PATH]: note });
+  return merge;
 }
 /** The item's records as the fake GitHub holds them. */
 const itemComments = () =>
@@ -2373,7 +2420,10 @@ describe(
       expect(first.stdout).toMatch(
         /Since the baseline: \d+ commit\(s\); re-verified the approvals of #7\n/,
       );
-      expect(d.t.asked).toEqual([]);
+      expect(d.t.asked).toEqual([
+        `Deploy ${merge} to this laptop? [y/N] `,
+        `Deploy ${set} to this laptop? [y/N] `,
+      ]);
       expect(again.code).toBe(1);
       expect(again.stderr).toContain(`main is already deployed at ${merge}: there is nothing new`);
       expect(third.stderr).toBe('');
@@ -2518,6 +2568,213 @@ describe(
       expect(r.stderr).toContain('warning: the line is paused (pause:line)');
       expect(r.stderr).toContain('the Owner did not confirm; nothing was deployed');
       expect(d.t.asked).toEqual(['Deploy anyway while paused? [y/N] ']);
+      expect(releasesOf(d.t.home)).toEqual([]);
+    });
+  },
+);
+
+/** The comments on the Owner inbox as the fake GitHub holds them. */
+const inboxComments = () =>
+  readState().repos[REPO]?.issues.find((i) => i.number === 1)?.comments ?? [];
+const NO_ROLLBACK = `no release note on main or origin/claude/factory-log gives rollback steps for #7`;
+
+describe(
+  "factory deploy: CI on main's head, the rollback steps, the summary and the signed deployed record (T069, AC-095, slice 23c-1b)",
+  { timeout: 300_000 },
+  () => {
+    it('shows the summary, asks, then signs and posts the deployed record on the inbox, and logs its comment id', async () => {
+      const d = deployable(product('node build.mjs'));
+      const merge = mergeItem(d.t.repo);
+
+      const r = await d.deploy();
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(d.t.asked).toEqual([`Deploy ${merge} to this laptop? [y/N] `]);
+      for (const shown of [
+        `Approval summary for #1 (deployed) at ${merge}:`,
+        `  #7 merged in ${merge.slice(0, 12)} from ${ITEM_BRANCH}\n  quoted from issue #7 (its title, issue text):\n  > Add login\n`,
+        "  CI on main's head (GitHub Actions workflow runs):\n  build-test (.github/workflows/ci.yml): success\n",
+        '  #7: tier 2\n',
+      ])
+        expect(r.stdout).toContain(shown);
+      expect(r.stdout).toMatch(
+        /Rollback steps for #7:\n {2}quoted from \.factory\/releases\/v1\.md on origin\/claude\/factory-log at [0-9a-f]{12}, not merged:\n {2}> 1\. Run factory deploy at the previous commit\.\n\n/,
+      );
+      expect(r.stdout.indexOf('Approval summary')).toBeLessThan(r.stdout.indexOf('Exported'));
+      const [comment, ...more] = inboxComments();
+      expect(more).toEqual([]);
+      const signed = extractFromComment(comment?.body ?? '');
+      expect(verifySignature(signed, writeKeyFiles([owner]))).toBe(true);
+      expect(
+        matchFields(parse(signed.text), { repo: REPO, issue: 1, gate: 'deployed', head: merge }),
+      ).toBeUndefined();
+      const id = String(comment?.id);
+      expect(readFileSync(nonceLedgerPath(d.t.home), 'utf8')).toContain(
+        `${nonceOf(comment?.body ?? '')} ${REPO}#1/${id}`,
+      );
+      expect(deployLines(d.t.home)).toMatchObject([{ main: merge, record: id }]);
+    });
+
+    it('a build that fails after the record is signed leaves the record and logs no deploy', async () => {
+      const d = deployable(product(`node -e "process.exit(2)"`));
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('nothing was deployed');
+      expect(inboxComments()).toHaveLength(1);
+      expect(deployLines(d.t.home)).toEqual([]);
+    });
+
+    it('signs and exports nothing when the Owner declines', async () => {
+      const d = deployable(product('node build.mjs'));
+
+      const r = await d.deploy({}, ['n']);
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain('the Owner did not confirm the deploy; nothing was deployed');
+      expect(d.t.asked).toEqual([`Deploy ${d.main} to this laptop? [y/N] `]);
+      expect(inboxComments()).toEqual([]);
+      expect(releasesOf(d.t.home)).toEqual([]);
+    });
+
+    it.each([
+      [
+        'still running',
+        (sha: string) => {
+          pushRunAt(sha, null);
+        },
+        /CI on main's head is still running; run factory deploy again when it finishes/,
+      ],
+      [
+        'failed',
+        (sha: string) => {
+          pushRunAt(sha, 'failure');
+        },
+        /CI on main's head is not green at [0-9a-f]{40}[^]*build-test \(\.github\/workflows\/ci\.yml\): failure/,
+      ],
+      [
+        'with no run at all',
+        (sha: string) => {
+          pushRunAt(sha, 'success', { none: true });
+        },
+        /no CI run on main's head yet: it may still be starting, or the project's \.github\/workflows\/ci\.yml predates CI on main \(install the pinned release's workflows\/ci\.yml\); run factory deploy again shortly/,
+      ],
+      [
+        'only in a push run of the same commit on a claude/** branch',
+        (sha: string) => {
+          pushRunAt(sha, 'success', { branch: 'claude/7-add-login' });
+        },
+        /no CI run on main's head yet: it may still be starting, or the project's \.github\/workflows\/ci\.yml predates CI on main \(install the pinned release's workflows\/ci\.yml\); run factory deploy again shortly/,
+      ],
+      [
+        'only in a workflow_dispatch run at the same commit',
+        (sha: string) => {
+          pushRunAt(sha, 'success', { event: 'workflow_dispatch' });
+        },
+        /no CI run on main's head yet: it may still be starting, or the project's \.github\/workflows\/ci\.yml predates CI on main \(install the pinned release's workflows\/ci\.yml\); run factory deploy again shortly/,
+      ],
+      [
+        'in a run without build-test',
+        (sha: string) => {
+          pushRunAt(sha, 'success', { job: 'lint' });
+        },
+        /build-test \(\.github\/workflows\/ci\.yml\): missing\n {2}a required job is not in the run on main[^]*may predate CI on main/,
+      ],
+    ])('CI on main %s refuses before anything is signed', async (_, ci, said) => {
+      const d = deployable(product('node build.mjs'));
+      ci(d.main);
+
+      const r = await d.deploy({}, ['y'], false);
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(said);
+      expect(r.stderr).toContain('nothing was deployed');
+      expect(d.t.asked).toEqual([]);
+      expect(inboxComments()).toEqual([]);
+      expect(releasesOf(d.t.home)).toEqual([]);
+    });
+
+    it.each([
+      ['no release note', (repo: TestRepo) => mergeItem(repo, null), NO_ROLLBACK],
+      [
+        'a note naming only #70',
+        (repo: TestRepo) => mergeItem(repo, NOTE.replace('#7 ', '#70 ')),
+        NO_ROLLBACK,
+      ],
+      [
+        'a note without a Rollback section',
+        (repo: TestRepo) => mergeItem(repo, NOTE.replace('## Rollback', '## Undo')),
+        /\.factory\/releases\/v1\.md on origin\/claude\/factory-log at [0-9a-f]{12}, not merged, has no ## Rollback section/,
+      ],
+      [
+        'an empty Rollback section',
+        (repo: TestRepo) =>
+          mergeItem(repo, NOTE.replace('1. Run factory deploy at the previous commit.', '  ')),
+        /\.factory\/releases\/v1\.md on origin\/claude\/factory-log at [0-9a-f]{12}, not merged, has an empty ## Rollback section/,
+      ],
+      [
+        'a note that is a link',
+        (repo: TestRepo) => {
+          mergeItem(repo, null);
+          onLog(repo, { '.factory/releases/notes.txt': NOTE });
+          repo.checkout(LOG_BRANCH);
+          symlinkSync('notes.txt', join(repo.path, NOTE_PATH));
+          repo.git(['add', NOTE_PATH]);
+          repo.git(['commit', '-q', '-m', 'a link']);
+          repo.push(LOG_BRANCH);
+          repo.checkout('main');
+        },
+        NO_ROLLBACK,
+      ],
+      [
+        'a note over 64 KiB',
+        (repo: TestRepo) => mergeItem(repo, `${NOTE}${'x'.repeat(65 * 1024)}\n`),
+        /\.factory\/releases\/v1\.md on origin\/claude\/factory-log at [0-9a-f]{12}, not merged, is over 64 KiB/,
+      ],
+    ])('a shipped item with %s refuses before anything is signed', async (_, plant, said) => {
+      const d = deployable(product('node build.mjs'));
+      plant(d.t.repo);
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(said);
+      expect(r.stderr).toContain('nothing was deployed');
+      expect(inboxComments()).toEqual([]);
+      expect(releasesOf(d.t.home)).toEqual([]);
+    });
+
+    it("main's note wins: with differing notes on main and on the log branch, only main's steps are shown", async () => {
+      const d = deployable(product('node build.mjs'));
+      mergeItem(d.t.repo);
+      const ours = NOTE.replace(
+        'Run factory deploy at the previous commit.',
+        'Restore the backup.',
+      );
+      const main = onMain(d.t.repo, { [NOTE_PATH]: ours }, 'release note');
+
+      const r = await d.deploy();
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain(
+        `Rollback steps for #7:\n  quoted from .factory/releases/v1.md on main at ${main.slice(0, 12)}:\n  > 1. Restore the backup.\n\n`,
+      );
+      expect(r.stdout).not.toContain('Run factory deploy at the previous commit.');
+      expect(r.stdout).not.toContain('origin/claude/factory-log at');
+    });
+
+    it("refuses before anything else when this laptop's key is not the newest listed one", async () => {
+      const d = deployable(product('node build.mjs'), { release: [owner, other] });
+
+      const r = await d.deploy();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(/finish the rotation: .* \(factory keygen --rotate --finish\)/);
+      expect(r.stderr).toContain('nothing was deployed');
+      expect(inboxComments()).toEqual([]);
       expect(releasesOf(d.t.home)).toEqual([]);
     });
   },

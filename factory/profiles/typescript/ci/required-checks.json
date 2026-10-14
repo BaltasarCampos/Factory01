@@ -1,12 +1,12 @@
 {
-  "comment": "The GitHub Actions jobs factory merge requires green on the checked head, by branch kind. workflow is the template under factory/, installed the path it runs from in a project (the factory repository runs self/ci.yml as factory-self.yml); a job is read only from runs of its installed workflow file. A job with paths is required only when the pull request changes a matching file; the only pattern form is **/<file name>. tests/contract/required-checks.test.ts ties this list to the workflow templates.",
+  "comment": "The GitHub Actions jobs factory merge requires green on the checked head, by branch kind; the kind main is what factory deploy requires of the push run on main. workflow is the template under factory/, installed the path it runs from in a project (the factory repository runs self/ci.yml as factory-self.yml); a job is read only from runs of its installed workflow file. A job with paths is required only when the pull request changes a matching file; the only pattern form is **/<file name>. tests/contract/required-checks.test.ts ties this list to the workflow templates.",
   "jobs": [
     {
       "workflow": "workflows/ci.yml",
       "installed": ".github/workflows/ci.yml",
       "job": "build-test",
       "if": null,
-      "kinds": ["item", "define", "upgrade", "log"]
+      "kinds": ["item", "define", "upgrade", "log", "main"]
     },
     {
       "workflow": "workflows/ci.yml",

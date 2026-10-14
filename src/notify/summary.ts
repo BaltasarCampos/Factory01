@@ -73,7 +73,9 @@ export interface PauseFacts {
 }
 
 export interface SummaryFacts {
-  gate: Extract<ApprovalGate, 'approved' | 'spec-approved' | 'waiver' | 'resume'> | 'merge';
+  gate:
+    | Extract<ApprovalGate, 'approved' | 'spec-approved' | 'waiver' | 'resume' | 'deployed'>
+    | 'merge';
   /** The row of the per-gate list; derived from `gate` when absent (merge and deploy set it). */
   kind?: SummaryGate | undefined;
   issue: { number: number; title: string; body: string; labels: readonly string[] };
@@ -104,6 +106,27 @@ export interface SummaryFacts {
   merge?: MergeView | undefined;
   /** `factory merge` of a Define, log or factory-repository branch (T068, slice 22c). */
   branchMerge?: BranchMergeView | undefined;
+  /** `factory deploy`: what its checks found since the last deploy (T069, slice 23c-1b). */
+  deploy?: DeployView | undefined;
+}
+
+/** What `factory deploy`'s checks found at main's verified head; nothing is re-run. */
+export interface DeployView {
+  main: string;
+  /** The commit deployed last; undefined before the first deploy. */
+  since: string | undefined;
+  /** Main's verified first-parent commits since then. */
+  commits: number;
+  /** Each item merged since then, its chain re-verified with the key lists at main's head. */
+  items: readonly { issue: number; title: string; merge: string; branch: string; tier: Tier }[];
+  /** The other `Factory-Merge:` values since then. */
+  others: readonly { commit: string; value: string }[];
+  ci: MergeView['ci'];
+  /** Each item's rollback steps from the release notes, with each note's source. */
+  rollback: readonly {
+    issue: number;
+    notes: readonly { path: string; source: string; steps: readonly string[] }[];
+  }[];
 }
 
 /** What `factory merge`'s checks found for a work item at the checked head; nothing is re-run. */
@@ -180,6 +203,7 @@ const plural = (n: number, word: string) => `${String(n)} ${word}${n === 1 ? '' 
 export function summaryGate(f: SummaryFacts): SummaryGate {
   if (f.kind !== undefined) return f.kind;
   if (f.gate === 'resume') return 'resume';
+  if (f.gate === 'deployed') return 'deploy';
   if (f.gate === 'approved') return 'admission';
   if (f.gate === 'spec-approved') return 'spec';
   if (f.branch === undefined) return 'waiver-other';
@@ -263,11 +287,11 @@ const mergeMapping = (m: MergeView): string[] =>
     return `${id} → ${tests.length > 0 ? tests.join('; ') : 'no passing test'}`;
   });
 
-const ciLines = (ci: MergeView['ci']): string[] =>
+const ciLines = (ci: MergeView['ci'], at = 'the checked head'): string[] =>
   ci.length === 0
     ? []
     : [
-        'CI on the checked head (GitHub Actions workflow runs):',
+        `CI on ${at} (GitHub Actions workflow runs):`,
         ...ci.map((j) =>
           [
             `${j.job} (${j.workflow}): ${j.state}`,
@@ -312,8 +336,50 @@ const BRANCH_PARTS: Readonly<
 const branchPart = (f: SummaryFacts, key: keyof typeof BRANCH_PARTS): Part =>
   f.branchMerge === undefined ? noMerge : BRANCH_PARTS[key](f.branchMerge);
 
+/** A deploy: each part from its view; issue titles, branches and notes are agent-written. */
+const DEPLOY_PARTS: Readonly<Record<'changed' | 'results' | 'risks', (d: DeployView) => string[]>> =
+  {
+    changed: (d) => [
+      `Main at ${d.main}, since ${d.since === undefined ? 'the baseline (no deploy yet)' : `the last deploy at ${d.since}`}`,
+      `${plural(d.commits, 'commit')} on main's verified first-parent history`,
+      ...(d.items.length === 0
+        ? ['Items merged: none']
+        : [
+            'Items merged:',
+            ...d.items.flatMap((i) => [
+              `#${String(i.issue)} merged in ${short(i.merge)} from ${visible(i.branch)}`,
+              ...quoted(`issue #${String(i.issue)} (its title, issue text)`, [visible(i.title)]),
+            ]),
+          ]),
+      `Other merges: ${d.others.map((o) => `${visible(o.value)} in ${short(o.commit)}`).join(', ') || 'none'}`,
+    ],
+    results: (d) => [
+      ...ciLines(d.ci, "main's head"),
+      ...(d.items.length === 0
+        ? ['No item to re-verify']
+        : [
+            "Approvals re-verified with the key lists at main's head:",
+            ...d.items.map((i) => `#${String(i.issue)}: tier ${String(i.tier)}`),
+          ]),
+    ],
+    risks: (d) =>
+      d.rollback.length === 0
+        ? ['No item merged since the last deploy: no release note needed']
+        : d.rollback.flatMap((r) => [
+            `Rollback steps for #${String(r.issue)}:`,
+            ...r.notes.flatMap((n) =>
+              quoted(`${visible(n.path)} on ${n.source}`, n.steps.map(visible)),
+            ),
+          ]),
+  };
+
+const noDeploy = { missing: "the deploy checks' results were not passed in" };
+const deployPart = (f: SummaryFacts, key: keyof typeof DEPLOY_PARTS): Part =>
+  f.deploy === undefined ? noDeploy : DEPLOY_PARTS[key](f.deploy);
+
 function changed(f: SummaryFacts, gate: SummaryGate): Part {
   if (gate === 'merge-branch') return branchPart(f, 'changed');
+  if (gate === 'deploy') return deployPart(f, 'changed');
   if (gate === 'merge') return f.merge === undefined ? noMerge : mergeChanged(f, f.merge);
   if (gate === 'resume') {
     const p = f.pause;
@@ -389,6 +455,7 @@ const isTestWaiver = (f: SummaryFacts) => (f.waives ?? '').startsWith('test:');
 
 function results(f: SummaryFacts, gate: SummaryGate): Part {
   if (gate === 'merge-branch') return branchPart(f, 'results');
+  if (gate === 'deploy') return deployPart(f, 'results');
   if (isTestWaiver(f)) {
     const covered = f.covered ?? [];
     if (covered.length === 0)
@@ -445,6 +512,7 @@ function usage(f: SummaryFacts): Part {
 
 function risks(f: SummaryFacts, gate: SummaryGate): Part {
   if (gate === 'merge-branch') return branchPart(f, 'risks');
+  if (gate === 'deploy') return deployPart(f, 'risks');
   if (gate === 'resume') {
     const p = f.pause;
     if (p === undefined) return noPause;

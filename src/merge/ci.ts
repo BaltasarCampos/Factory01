@@ -5,11 +5,20 @@
 // from GitHub Actions workflow runs for exactly the checked commit; commit statuses are never read,
 // since anyone with write access, an agent included, can post one. For each required job the
 // latest attempt in the latest run decides; earlier failed attempts are kept for the summary.
+// `factory deploy` reads main's head the same way, from the push run on `main` (slice 23c-1b).
 import { spawnSync } from 'node:child_process';
 import { RefusedError } from '../cli/env.js';
 import { gh, repoArg, type GhOptions } from '../github/gh.js';
 
-export const BRANCH_KINDS = ['item', 'define', 'upgrade', 'log', 'factory-repository'] as const;
+/** `main` is not a branch `merge` checks: it is main's head, as `factory deploy` reads it. */
+export const BRANCH_KINDS = [
+  'item',
+  'define',
+  'upgrade',
+  'log',
+  'factory-repository',
+  'main',
+] as const;
 export type BranchKind = (typeof BRANCH_KINDS)[number];
 
 export interface RequiredJob {
@@ -43,6 +52,8 @@ export interface JobResult {
    * from closing and reopening the pull request, would otherwise hide them.
    */
   failedRuns: number;
+  /** Whether the workflow file ran at all at the commit: `missing` without one is no run yet. */
+  ran: boolean;
 }
 
 const FILE = 'required-checks.json';
@@ -74,13 +85,18 @@ export function loadRequiredChecks(text: string): RequiredChecks {
 }
 
 /** The list in the release pinned at `sha`, in the factory clone. */
-export function requiredChecksAt(factory: string, sha: string, profile: string): RequiredChecks {
+export function requiredChecksAt(
+  factory: string,
+  sha: string,
+  profile: string,
+  nothing = 'nothing was merged',
+): RequiredChecks {
   const shown = spawnSync('git', ['show', `${sha}:factory/profiles/${profile}/ci/${FILE}`], {
     cwd: factory,
     encoding: 'utf8',
   });
   if (shown.status !== 0)
-    throw new RefusedError(`the release pinned on main has no ${FILE}; nothing was merged`);
+    throw new RefusedError(`the release pinned on main has no ${FILE}; ${nothing}`);
   return loadRequiredChecks(shown.stdout);
 }
 
@@ -103,6 +119,7 @@ interface WorkflowRun {
   id: number;
   path: string;
   head_sha: string;
+  head_branch: string | null;
   event: string;
   status: string;
   conclusion: string | null;
@@ -117,12 +134,17 @@ interface Job {
 }
 
 /** A page `gh api` returned, refused unless it holds every entry. */
-async function page<T>(path: string, key: string, options: GhOptions): Promise<T[]> {
+async function page<T>(
+  path: string,
+  key: string,
+  options: GhOptions,
+  nothing: string,
+): Promise<T[]> {
   const out = (await gh(['api', path], { ...options, json: true })) as Record<string, unknown>;
   const list = out[key];
   const entries = Array.isArray(list) ? (list as T[]) : [];
   if (typeof out.total_count !== 'number' || out.total_count > entries.length)
-    throw new RefusedError(`cannot read every entry of ${path} in one page; nothing was merged`);
+    throw new RefusedError(`cannot read every entry of ${path} in one page; ${nothing}`);
   return entries;
 }
 
@@ -130,22 +152,32 @@ async function page<T>(path: string, key: string, options: GhOptions): Promise<T
  * Each required job's state at `sha`, read from the latest `pull_request` workflow run of the
  * workflow file it is installed at, and that run's jobs over all its attempts. Only GitHub Actions
  * creates workflow runs, so no other app can report one; a job of the same name in another
- * workflow file counts for nothing.
+ * workflow file counts for nothing. With `push`, from the push runs on that branch instead: a run
+ * of the same commit pushed to another branch counts for nothing.
  */
 export async function ciAt(
   repo: string,
   sha: string,
   jobs: readonly RequiredJob[],
   options: GhOptions,
+  push?: { branch: string; nothing: string },
 ): Promise<JobResult[]> {
   const base = `repos/${repoArg(repo)}/actions/runs`;
+  const event = push === undefined ? 'pull_request' : 'push';
+  const nothing = push?.nothing ?? 'nothing was merged';
   const runs = (
     await page<WorkflowRun>(
-      `${base}?head_sha=${sha}&event=pull_request&per_page=100`,
+      `${base}?head_sha=${sha}&event=${event}&per_page=100`,
       'workflow_runs',
       options,
+      nothing,
     )
-  ).filter((r) => r.head_sha === sha && r.event === 'pull_request');
+  ).filter(
+    (r) =>
+      r.head_sha === sha &&
+      r.event === event &&
+      (push === undefined || r.head_branch === push.branch),
+  );
   const results: JobResult[] = [];
   for (const installed of new Set(jobs.map((j) => j.installed))) {
     const ofFile = runs.filter((r) => r.path === installed).sort((a, b) => a.id - b.id);
@@ -160,6 +192,7 @@ export async function ciAt(
             `${base}/${String(latest.id)}/jobs?filter=all&per_page=100`,
             'jobs',
             options,
+            nothing,
           );
     for (const { job } of jobs.filter((j) => j.installed === installed)) {
       const attempts = ran
@@ -175,7 +208,10 @@ export async function ciAt(
       const failedBefore = attempts
         .slice(0, -1)
         .filter((r) => r.status === 'completed' && r.conclusion !== 'success').length;
-      results.push({ job, workflow: installed, state, failedBefore, failedRuns });
+      results.push({
+        ...{ job, workflow: installed, state, failedBefore, failedRuns },
+        ran: latest !== undefined,
+      });
     }
   }
   return results;
