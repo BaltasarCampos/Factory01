@@ -51,7 +51,7 @@ type Project = Awaited<ReturnType<typeof projectHere>>;
 type RecordFields = Pick<ApprovalRecord, 'tier' | 'branch' | 'spec_sha' | 'waives' | 'head'>;
 type Issue = SummaryFacts['issue'];
 /** The gates `approve` signs records for; `merge` is a summary, never a record; `deploy` signs its own. */
-type RecordGate = Exclude<SummaryFacts['gate'], 'merge' | 'deployed'>;
+type RecordGate = Exclude<SummaryFacts['gate'], 'merge' | 'deployed' | 'deploy-healthy'>;
 
 /**
  * Sign a record, post it on its issue and claim its nonce in the laptop ledger; returns the posted

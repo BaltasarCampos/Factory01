@@ -40,6 +40,7 @@ import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
 import { LaunchRefused, type Launchers } from './launcher/types.js';
 import { writeStationManifest } from './manifest.js';
+import { isReleased, releasedHeads } from './released.js';
 import {
   nextTransition,
   ownerBasisMissing,
@@ -225,6 +226,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     inboxIssue: config.inbox_issue,
   });
   const pause = derivePause(await timeline(repo, config.inbox_issue, options), resumes);
+  const released = releasedHeads(inboxComments, { keys, repo, inboxIssue: config.inbox_issue });
   if (pause.line) return { ...result, halted: 'pause:line in effect' };
 
   const git = { projectDir: ctx.projectDir, now: ctx.now ?? (() => new Date()) };
@@ -284,6 +286,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       owner: verdicts,
       rotationPending: false,
       historySigned: true,
+      released: isReleased(released, history, issue.number),
     });
     const decision = nextTransition(status, evidence(), pause);
     if (decision.ok) {

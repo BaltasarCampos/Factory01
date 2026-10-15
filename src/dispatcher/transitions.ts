@@ -56,10 +56,11 @@ export interface Evidence {
   findingsResolved?: boolean;
   /** Main has an Owner-signed merge commit of the item's checked head. */
   ownerMerge?: boolean;
-  /** Release notes and rollback path are on `claude/factory-log`. */
-  releaseNotes?: boolean;
-  /** A verified `deployed` record covers the merge. */
-  deployed?: boolean;
+  /**
+   * A verified `deploy-healthy` record names a verified `deployed` record whose head contains the
+   * merge (T160).
+   */
+  released?: boolean;
 }
 
 /** `alert`: the dispatcher tells the Owner, e.g. a gate failed after the Owner's merge. */
@@ -148,7 +149,7 @@ export function ownerBasisMissing(state: State, e: Evidence): string | undefined
     if (missing) return missing;
   }
   if (i >= at('releasing') && !e.ownerMerge) return 'no Owner-signed merge of the item on main';
-  if (i >= at('done') && !e.deployed) return 'no Owner deploy of the merge';
+  if (i >= at('done') && !e.released) return 'no healthy Owner deploy of the merge';
   return undefined;
 }
 
@@ -193,7 +194,9 @@ function forward(state: State, e: Evidence): Decision {
     case 'integrating':
       return move('releasing', 'merged by the Owner');
     case 'releasing':
-      return e.releaseNotes ? move('done', 'released and deployed') : stay('no release notes');
+      return e.released
+        ? move('done', "deployed and healthy, by the Owner's signed records")
+        : stay('no verified deploy-healthy record covering the merge');
     default:
       return stay(`no forward row from state:${state}`);
   }

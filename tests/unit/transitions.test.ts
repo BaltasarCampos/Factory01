@@ -173,15 +173,15 @@ describe('transition table rows (data-model.md § State machine)', () => {
     stays('integrating', gated);
   });
 
-  it('releasing → done needs release notes and an Owner deploy', () => {
-    const ready = { ...gated, ownerMerge: true, releaseNotes: true, deployed: true };
+  it('releasing → done needs a verified deploy-healthy record covering the merge (T160)', () => {
+    const ready = { ...gated, ownerMerge: true, released: true };
     moves('releasing', ready, 'done');
-    stays('releasing', { ...ready, deployed: false });
-    stays('releasing', { ...ready, releaseNotes: false });
+    stays('releasing', { ...ready, released: false });
+    stays('releasing', { ...gated, ownerMerge: true });
   });
 
   it('done and escalated are final for the dispatcher', () => {
-    stays('done', { ...gated, ownerMerge: true, deployed: true, questionOpen: true });
+    stays('done', { ...gated, ownerMerge: true, released: true, questionOpen: true });
     stays('escalated', { ...gated, owner: { ...gated.owner, waiver: no('tampering') } });
   });
 });
@@ -198,8 +198,7 @@ describe('a state: label never stands in for an Owner gate', () => {
     verifyReport: true,
     findingsResolved: true,
     ownerMerge: true,
-    releaseNotes: true,
-    deployed: true,
+    released: true,
   };
 
   it('refuses every forward move past triaged without a verified owner:approved', () => {

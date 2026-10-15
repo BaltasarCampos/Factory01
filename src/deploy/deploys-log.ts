@@ -1,8 +1,8 @@
 // The laptop's record of successful deploys (T069, slice 23c-1a; Owner decisions 2026-10-14):
 // `~/.factory/verified/<owner>/<repo>.deploys.log`, beside the signed-history ledger and outside
 // the app folder, so nothing the app runs can shorten the next deploy's re-check. One JSON line
-// per deploy, with its `deployed` record's comment id, appended only after the switch passes,
-// never through a link, mode 600. Its last
+// per deploy, with its `deployed` and `deploy-healthy` records' comment ids, appended only once
+// the second is posted (slice 23d), never through a link, mode 600. Its last
 // line names the commit deployed last; no file means nothing was deployed yet.
 import { closeSync, constants, lstatSync, openSync, readFileSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
@@ -19,6 +19,8 @@ export interface DeployEntry {
   release: string;
   /** The comment id of the signed `deployed` record on the inbox issue (slice 23c-1b). */
   record?: string;
+  /** The comment id of the signed `deploy-healthy` record on the inbox issue (slice 23d). */
+  healthy?: string;
 }
 
 export const deploysLogPath = (home: string, repo: string) =>

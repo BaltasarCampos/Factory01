@@ -86,6 +86,12 @@ const record: fc.Arbitrary<ApprovalRecord> = fc.oneof(
   fc
     .record({ c: common, issue, head: hex(40) })
     .map(({ c, issue, head }) => ({ ...c, issue, gate: 'deployed' as const, head })),
+  fc
+    .record({ c: common, issue, head: hex(40), deployed: hex(32) })
+    .map(({ c, issue, head, deployed }) => ({
+      ...{ ...c, issue, gate: 'deploy-healthy' as const },
+      ...{ head, deployed },
+    })),
 );
 
 describe('approval records (properties)', () => {

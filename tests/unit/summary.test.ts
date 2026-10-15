@@ -6,6 +6,7 @@ import {
   PART_TITLES,
   type BranchMergeView,
   type DeployView,
+  type HealthView,
   type MergeView,
   type SummaryFacts,
 } from '../../src/notify/summary.js';
@@ -781,6 +782,59 @@ describe('deploy summary (T069, AC-095, slice 23c-1b)', () => {
 
   it('refuses when the deploy checks were not passed in', () => {
     const s = buildSummary(deploy(undefined));
+
+    expect(s.ok ? [] : s.missing.map((m) => m.split(':')[0])).toEqual([
+      PART_TITLES.changed,
+      PART_TITLES.results,
+      PART_TITLES.risks,
+    ]);
+  });
+});
+
+describe('deploy health summary (T069, T160, slice 23d)', () => {
+  const MAIN = 'a'.repeat(40);
+  const NONCE = '0123456789abcdef0123456789abcdef';
+  const health = (over: Partial<HealthView> = {}): HealthView => ({
+    ...{ main: MAIN, release: `${MAIN}-20261015T090000Z` },
+    deployed: { id: '1001', nonce: NONCE },
+    answer: 'GET /health answered 200 {"status":"ok"}',
+    rollback: [
+      {
+        issue: 7,
+        notes: [{ path: '.factory/releases/7.md', source: 'main at x', steps: ['Undo\u001b'] }],
+      },
+    ],
+    ...over,
+  });
+  const healthFacts = (view: HealthView | undefined) =>
+    facts({
+      ...{ gate: 'deploy-healthy', commit: MAIN, health: view },
+      ...{ tier: undefined, branch: undefined, files: undefined },
+      issue: { number: 1, title: 'Owner inbox', body: '', labels: [] },
+    });
+
+  it("shows the deployed record it confirms, the health check's result and the rollback steps; nothing else applies", () => {
+    const t = text(healthFacts(health()));
+
+    expect(t).toContain(`Approval summary for #1 (deploy-healthy) at ${MAIN}:`);
+    expect(part(t, PART_TITLES.changed)).toEqual([
+      `The deployed record it confirms: comment 1001 on the inbox, nonce ${NONCE}`,
+      `Main at ${MAIN}, running as release ${MAIN}-20261015T090000Z`,
+    ]);
+    expect(part(t, PART_TITLES.mapping)).toEqual(['—']);
+    expect(part(t, PART_TITLES.results)).toEqual([
+      'Health check, run on this laptop: GET /health answered 200 {"status":"ok"}',
+    ]);
+    expect(part(t, PART_TITLES.usage)).toEqual(['—']);
+    expect(part(t, PART_TITLES.risks)).toEqual([
+      'Rollback steps for #7:',
+      'quoted from .factory/releases/7.md on main at x:',
+      '> Undo\\u{1b}',
+    ]);
+  });
+
+  it('refuses when the health check was not passed in', () => {
+    const s = buildSummary(healthFacts(undefined));
 
     expect(s.ok ? [] : s.missing.map((m) => m.split(':')[0])).toEqual([
       PART_TITLES.changed,
