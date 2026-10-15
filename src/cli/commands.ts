@@ -56,6 +56,10 @@ export interface CommandContext {
   launchers: Launchers;
   /** How long `factory deploy`'s health check waits, in ms: 30 s unless a test sets less. */
   healthMs?: number;
+  /** How long its start check waits for an answer, in ms: 30 s unless a test sets less. */
+  startMs?: number;
+  /** How long the app must then keep one main process, in ms: 10 s unless a test sets less. */
+  steadyMs?: number;
 }
 
 export interface CommandSpec {
@@ -93,6 +97,10 @@ export interface CliDeps {
   launchers?: Launchers;
   /** Default: 30 s. Tests only; main.ts never sets it. */
   healthMs?: number;
+  /** Default: 30 s. Tests only; main.ts never sets it. */
+  startMs?: number;
+  /** Default: 10 s, and never under 1 s. Tests only; main.ts never sets it. */
+  steadyMs?: number;
   /** Unread Owner-inbox alerts (src/notify/inbox.ts `projectUnreadAlerts` in main.ts). */
   unreadAlerts: () => Promise<readonly Alert[]>;
   /** Override the command table (tests). */
@@ -380,6 +388,8 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       ask: deps.ask ?? askTerminal,
       launchers: deps.launchers ?? {},
       ...(deps.healthMs === undefined ? {} : { healthMs: deps.healthMs }),
+      ...(deps.startMs === undefined ? {} : { startMs: deps.startMs }),
+      ...(deps.steadyMs === undefined ? {} : { steadyMs: deps.steadyMs }),
     });
   } catch (err) {
     if (err instanceof UsageError) {
