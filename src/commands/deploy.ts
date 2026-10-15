@@ -242,6 +242,10 @@ export function deploy(ctx: CommandContext): Promise<number> {
             ...{ factory: factoryRoot(), program: factoryProgram() },
           },
           ctx.env,
+          {
+            ...(ctx.startMs === undefined ? {} : { startMs: ctx.startMs }),
+            ...(ctx.steadyMs === undefined ? {} : { steadyMs: ctx.steadyMs }),
+          },
         );
       } catch (err) {
         await failedAfterSigning(ctx, at, step);
@@ -268,7 +272,7 @@ export function deploy(ctx: CommandContext): Promise<number> {
         ...{ repo: at.config.repo, at: ctx.now(), main: at.main, release: basename(release) },
         status: unhealthy?.status ?? 'healthy',
         record: { id: record, inbox: at.config.inbox_issue, nonce },
-        ...{ port, health, backup },
+        ...{ port, steadyMs: switched.steadyMs, health, backup },
       });
       try {
         const path = `.factory/ops/health/${stamp(ctx.now())}.md`;

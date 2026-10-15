@@ -215,6 +215,12 @@ function writeUnit(place: UnitPlace, name: string, text: string): void {
 const START_MS = 30_000;
 const STEADY_MS = 10_000;
 
+/** The start check's windows: 30 s for an answer, then 10 s steady, unless a test sets less. */
+export interface StartWaits {
+  startMs?: number;
+  steadyMs?: number;
+}
+
 /** Whether anything accepts a connection on 127.0.0.1:<port> now. */
 const listens = (port: number) =>
   new Promise<boolean>((ok) => {
@@ -294,6 +300,8 @@ export function mainPid(env: NodeJS.ProcessEnv, name: string): string | undefine
 }
 
 export interface Switched {
+  /** How long the app had to keep one main process after it answered, in ms. */
+  steadyMs: number;
   /** The release the previous unit named, when it names one. */
   previous: string | undefined;
   /** Whether there was a unit before this switch, so something to switch back to. */
@@ -320,7 +328,12 @@ export async function switchService(
   place: UnitPlace,
   s: AppService,
   env: NodeJS.ProcessEnv,
+  waits: StartWaits = {},
 ): Promise<Switched> {
+  const { startMs = START_MS, steadyMs = STEADY_MS } = waits;
+  // steady() reads the main process once a second: under 1 s it would read it only once.
+  if (steadyMs < 1000)
+    throw new Error(`the steady check needs at least 1 s, not ${String(steadyMs)} ms`);
   const name = unitName(s.repo);
   const backup = unitName(s.repo, 'backup');
   const timer = unitName(s.repo, 'backup', 'timer');
@@ -385,15 +398,15 @@ export async function switchService(
     systemctl(env, ['daemon-reload']);
     systemctl(env, ['enable', ...runtime, name, timer]);
     systemctl(env, ['restart', name]);
-    const pid = (await answersHttp(s.port, START_MS)) ? await steady(env, name, STEADY_MS) : null;
+    const pid = (await answersHttp(s.port, startMs)) ? await steady(env, name, steadyMs) : null;
     if (typeof pid === 'string') {
       systemctl(env, ['restart', timer]);
-      return { previous, hadUnit: app !== undefined, pid, switchBack };
+      return { steadyMs, previous, hadUnit: app !== undefined, pid, switchBack };
     }
     why =
       pid === null
-        ? `the new release ${s.release} did not answer HTTP on ${port} within 30 s`
-        : `the service of the new release ${s.release} did not stay running with one main process for 10 s after ${port} answered; something else may be answering there`;
+        ? `the new release ${s.release} did not answer HTTP on ${port} within ${String(startMs / 1000)} s`
+        : `the service of the new release ${s.release} did not stay running with one main process for ${String(steadyMs / 1000)} s after ${port} answered; something else may be answering there`;
   } catch (err) {
     why = (err as Error).message;
   }

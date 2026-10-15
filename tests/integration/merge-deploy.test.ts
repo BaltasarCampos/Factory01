@@ -825,6 +825,8 @@ function mergeSetup(o: MergeSetup = {}) {
       ...{ env, stdinIsTTY: over.tty ?? true, cwd: repo.path },
       unreadAlerts: () => Promise.resolve([]),
       ...(over.healthMs === undefined ? {} : { healthMs: over.healthMs }),
+      ...(over.startMs === undefined ? {} : { startMs: over.startMs }),
+      ...(over.steadyMs === undefined ? {} : { steadyMs: over.steadyMs }),
       ...(over.now === undefined ? {} : { now: over.now }),
       ask: (question) => {
         asked.push(question);
@@ -854,6 +856,9 @@ interface CliOver {
   tty?: boolean;
   /** The deploy's health check window, through the command context (slice 23c-2). */
   healthMs?: number;
+  /** The start check's windows, the same way. */
+  startMs?: number;
+  steadyMs?: number;
   now?: () => Date;
 }
 
@@ -2070,7 +2075,8 @@ function deployable(files: Files, o: MergeSetup = {}) {
         }
   });
   // By default CI on main's head is green and the Owner answers yes (slice 23c-1b); the health
-  // check waits 3 s, not 30 (slice 23c-2).
+  // check waits 3 s, not 30 (slice 23c-2); the start check 10 s for an answer, not 30, then 2 s
+  // steady, not 10, still read three times. tests/contract/service.test.ts keeps both real.
   const deploy = (
     env: NodeJS.ProcessEnv = {},
     answers: CliOver['answers'] = ['y'],
@@ -2078,7 +2084,10 @@ function deployable(files: Files, o: MergeSetup = {}) {
     over: CliOver = {},
   ) => {
     if (ci) pushRunAt(t.mainOnOrigin());
-    return t.cli(['deploy'], { healthMs: 3000, ...over, env: { ...systemd, ...env }, answers });
+    return t.cli(['deploy'], {
+      ...{ healthMs: 3000, startMs: 10_000, steadyMs: 2000 },
+      ...{ ...over, env: { ...systemd, ...env }, answers },
+    });
   };
   const all = () =>
     existsSync(join(state, 'calls'))
@@ -2132,7 +2141,8 @@ describe(
       expect(join(d.app.releases, releaseIn(d.unit) ?? '')).toBe(release);
       expect(readFileSync(d.unit, 'utf8')).toContain(`--port ${String(d.port)}\n`);
       expect(d.calls()).toEqual(SWITCH);
-      expect(d.polls()).toBeGreaterThanOrEqual(10);
+      // At the start of the steady window and after each of its 2 s, then by the health check.
+      expect(d.polls()).toBeGreaterThanOrEqual(4);
       expect(r.stdout).toContain(`answered on 127.0.0.1:${String(d.port)}`);
       expect(unitRelease(d.units()[BACKUP] ?? '', REPO, 'backup')).toBe(releaseIn(d.unit));
       expect(r.stdout).toContain('Backup: no backup has run yet');
@@ -2244,7 +2254,7 @@ describe(
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(
         new RegExp(
-          `did not answer HTTP on 127.0.0.1:${String(d.port)} within 30 s; switched the service back to ${first ?? ''}, and put the backup's units back as they were`,
+          `did not answer HTTP on 127.0.0.1:${String(d.port)} within 10 s; switched the service back to ${first ?? ''}, and put the backup's units back as they were`,
         ),
       );
       // The app's unit and the backup's, both back as they were; the log has the first deploy only.
@@ -2830,7 +2840,7 @@ describe(
         `- Version: main ${merge}, release ${releaseIn(d.unit) ?? ''}`,
         '- Status: healthy',
         `- Deployed record: comment ${String(record?.id)} on #1, nonce ${nonceOf(record?.body ?? '')}`,
-        `  - Start check: answered on 127.0.0.1:${String(d.port)}, one main process for 10 s`,
+        `  - Start check: answered on 127.0.0.1:${String(d.port)}, one main process for 2 s`,
         '  - Health: GET /health answered 200 {"status":"ok"}',
         '  - Backup: no backup has run yet',
       ])

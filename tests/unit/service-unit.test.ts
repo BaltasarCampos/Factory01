@@ -2,14 +2,18 @@
 // 2026-10-13 and 2026-10-14): fixed by factory code, naming their release explicitly and running
 // factory code, never pasta or bwrap; nothing from the project or the release reaches them but
 // the names the factory checked.
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   appUnit,
   backupTimer,
   backupUnit,
+  switchService,
   unitName,
   unitRelease,
 } from '../../src/deploy/service.js';
+import { tempDir } from '../helpers/keys.js';
 
 const RELEASE = `${'a'.repeat(40)}-20261013T153000Z`;
 const SPEC = {
@@ -114,4 +118,18 @@ WantedBy=timers.target
       for (const unit of [backupUnit, backupTimer])
         expect(() => unit({ ...SPEC, ...change })).toThrow(/refusing to write the unit/);
   });
+});
+
+describe('the start check’s steady window (T069)', () => {
+  it.each([0, 500, 999])(
+    'refuses %i ms before writing any unit: steady() reads once a second, so it would read once',
+    async (steadyMs) => {
+      const dir = join(tempDir(), 'units');
+
+      await expect(switchService({ dir, runtime: true }, SPEC, {}, { steadyMs })).rejects.toThrow(
+        `the steady check needs at least 1 s, not ${String(steadyMs)} ms`,
+      );
+      expect(existsSync(dir)).toBe(false);
+    },
+  );
 });

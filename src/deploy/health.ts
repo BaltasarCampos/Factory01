@@ -112,6 +112,8 @@ export interface HealthFacts {
   status: string;
   record: { id: string; inbox: number; nonce: string };
   port: number;
+  /** The start check's steady window, in ms. */
+  steadyMs: number;
   health: Health;
   backup: string;
 }
@@ -126,7 +128,7 @@ export function healthSummary(f: HealthFacts): string {
     `- Status: ${f.status}`,
     `- Deployed record: comment ${f.record.id} on #${String(f.record.inbox)}, nonce ${f.record.nonce}`,
     '- Checks:',
-    `  - Start check: answered on 127.0.0.1:${String(f.port)}, one main process for 10 s`,
+    `  - Start check: answered on 127.0.0.1:${String(f.port)}, one main process for ${String(f.steadyMs / 1000)} s`,
     `  - Health: ${f.health.answer}`,
     `  - Backup: ${f.backup}`,
     '',
