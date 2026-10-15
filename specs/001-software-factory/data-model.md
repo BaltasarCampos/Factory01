@@ -395,7 +395,8 @@ count toward `retry_limit`; attempts are the gate failures the dispatcher saw it
 
 ## Role
 
-`.claude/agents/<role>.md` frontmatter (`name`, `model`, `tools`, `version`) + body.
+`.claude/agents/<role>.md` frontmatter (exactly `name`, `description`, `tools`, `model`, `version`;
+`version` is the factory's own key, which Claude Code ignores) + body.
 Permission row in `.claude/settings.json` and in `src/guard/policy.ts` (generated from one
 source table, `factory/policy/roles.yaml`). Twelve roles, fixed set.
 
