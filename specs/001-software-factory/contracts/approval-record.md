@@ -58,6 +58,9 @@ event log is untrusted telemetry, and the record verifies from the comment (Owne
      however late the record is posted. Its nonce must be the first occurrence among all
      record comments on the inbox issue.
    - `deployed`: the nonce must be the first occurrence among all records in the repo.
+   - `deploy-healthy`: its nonce, and that of the `deployed` record it names, must be the first
+     occurrence among the record comments on the inbox issue, which is where the dispatcher reads
+     both.
    Laptop commands also keep `~/.factory/nonces.log`, one `<nonce> <repo>#<issue>/<comment id>`
    line per nonce, appended the first time the laptop issues or sees it. A nonce already
    recorded against another comment → replay (AC-079); the same comment verifies again, so
@@ -90,6 +93,15 @@ for main's first-parent history: [data-model.md § Signed main history](../data-
 Signed by `factory deploy` **before** it pulls main: `gate: deployed`, `head` (the main
 commit being deployed), posted to the Owner inbox issue. If signing fails, nothing is pulled,
 built or restarted.
+
+Signed by `factory deploy` only after its health check passes: `gate: deploy-healthy`, `head`
+(the same commit) and `deployed` (the `deployed` record's nonce), posted to the Owner inbox
+issue after the health summary. If signing or the post fails, the release keeps running, no old
+release is removed and nothing is written to `deploys.log`, so the next deploy redeploys the
+commit and signs both. The dispatcher moves an item to `done` only when a `deploy-healthy` record
+verifies, names the nonce of a verified `deployed` record with the same `head`, and that head is
+on main's verified first-parent history at or after the item's merge (T160, slice 23d). A
+`deployed` record alone, or a health summary, never moves an item.
 
 ## Release tags
 
