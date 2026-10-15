@@ -272,19 +272,36 @@ async function answersHttp(port: number, ms: number): Promise<boolean> {
  * active the moment it forks, so an answer alone could come from something else on the port
  * while the service, whose pasta cannot bind it, starts and fails over and over.
  */
-async function steady(env: NodeJS.ProcessEnv, name: string, ms: number): Promise<boolean> {
-  const state = () => {
-    const out = systemctl(env, ['show', '--property=ActiveState', '--property=MainPID', name]);
-    const pid = /^MainPID=(\d+)$/m.exec(out)?.[1] ?? '0';
-    return /^ActiveState=active$/m.test(out) && pid !== '0' ? pid : undefined;
-  };
-  const first = state();
-  if (first === undefined) return false;
+async function steady(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  ms: number,
+): Promise<string | undefined> {
+  const first = mainPid(env, name);
+  if (first === undefined) return undefined;
   for (let waited = 0; waited < ms; waited += 1000) {
     await sleep(1000);
-    if (state() !== first) return false;
+    if (mainPid(env, name) !== first) return undefined;
   }
-  return true;
+  return first;
+}
+
+/** The unit's main process while it is active, else undefined. */
+export function mainPid(env: NodeJS.ProcessEnv, name: string): string | undefined {
+  const out = systemctl(env, ['show', '--property=ActiveState', '--property=MainPID', name]);
+  const pid = /^MainPID=(\d+)$/m.exec(out)?.[1] ?? '0';
+  return /^ActiveState=active$/m.test(out) && pid !== '0' ? pid : undefined;
+}
+
+export interface Switched {
+  /** The release the previous unit named, when it names one. */
+  previous: string | undefined;
+  /** Whether there was a unit before this switch, so something to switch back to. */
+  hadUnit: boolean;
+  /** The app's main process once it stayed up. */
+  pid: string;
+  /** Puts every unit back as it was, as a failed start does; says what it did and what failed. */
+  switchBack: () => { text: string; failed: string[] };
 }
 
 /** A unit's text in `place`, or undefined when it is not there. */
@@ -296,13 +313,14 @@ export const readUnit = (place: UnitPlace, name: string) => {
 /**
  * Switches the app's unit and the backup's to `s.release` and restarts them; refuses, after
  * putting every unit back as it was, when any step after the rewrite fails or the app does not
- * answer and keep running. Returns the release it replaced, when the previous unit names one.
+ * answer and keep running. Returns the release it replaced, when the previous unit names one,
+ * and the switch back, for a deploy whose health check then fails (slice 23c-2).
  */
 export async function switchService(
   place: UnitPlace,
   s: AppService,
   env: NodeJS.ProcessEnv,
-): Promise<string | undefined> {
+): Promise<Switched> {
   const name = unitName(s.repo);
   const backup = unitName(s.repo, 'backup');
   const timer = unitName(s.repo, 'backup', 'timer');
@@ -316,66 +334,70 @@ export async function switchService(
   const previous = app === undefined ? undefined : unitRelease(app, s.repo);
   const runtime = place.runtime ? ['--runtime'] : [];
   const port = `127.0.0.1:${String(s.port)}`;
+  // Every step of the undo runs, even after one fails; the result names what failed.
+  const switchBack = () => {
+    const failed: string[] = [];
+    const step = (run: () => unknown) => {
+      try {
+        run();
+      } catch (err) {
+        failed.push((err as Error).message);
+      }
+    };
+    const target = previous ?? 'its previous unit';
+    const backupThere = [...before].some(([unit, text]) => unit !== name && text !== undefined);
+    const [appGoal, appDone] =
+      app !== undefined
+        ? [`switch the service back to ${target}`, `switched the service back to ${target}`]
+        : [
+            "stop, disable and remove the service's first unit",
+            'stopped and disabled the service, which had no earlier unit, and removed its unit',
+          ];
+    const [backupGoal, backupDone] = backupThere
+      ? ["put the backup's units back as they were", "put the backup's units back as they were"]
+      : ["remove the backup's units", "removed the backup's units"];
+    // Units that were not there are stopped, the timer first, and disabled while systemd still
+    // knows them; the backup's service has no [Install] section, so nothing enables it.
+    for (const [unit] of [...units].reverse())
+      if (before.get(unit) === undefined) {
+        step(() => systemctl(env, ['stop', unit]));
+        if (unit !== backup) step(() => systemctl(env, ['disable', ...runtime, unit]));
+      }
+    for (const [unit] of units)
+      step(() => {
+        const text = before.get(unit);
+        if (text === undefined) rmSync(join(place.dir, unit), { force: true });
+        else writeUnit(place, unit, text);
+      });
+    step(() => systemctl(env, ['daemon-reload']));
+    for (const unit of [name, timer])
+      if (before.get(unit) !== undefined) step(() => systemctl(env, ['restart', unit]));
+    const text =
+      failed.length === 0
+        ? `${appDone}, and ${backupDone}`
+        : `tried to ${appGoal} and ${backupGoal}, but ${failed.join('; ')}`;
+    return { text, failed };
+  };
+
   for (const [unit, text] of units) writeUnit(place, unit, text);
   let why: string;
   try {
     systemctl(env, ['daemon-reload']);
     systemctl(env, ['enable', ...runtime, name, timer]);
     systemctl(env, ['restart', name]);
-    if (!(await answersHttp(s.port, START_MS)))
-      why = `the new release ${s.release} did not answer HTTP on ${port} within 30 s`;
-    else if (!(await steady(env, name, STEADY_MS)))
-      why = `the service of the new release ${s.release} did not stay running with one main process for 10 s after ${port} answered; something else may be answering there`;
-    else {
+    const pid = (await answersHttp(s.port, START_MS)) ? await steady(env, name, STEADY_MS) : null;
+    if (typeof pid === 'string') {
       systemctl(env, ['restart', timer]);
-      return previous;
+      return { previous, hadUnit: app !== undefined, pid, switchBack };
     }
+    why =
+      pid === null
+        ? `the new release ${s.release} did not answer HTTP on ${port} within 30 s`
+        : `the service of the new release ${s.release} did not stay running with one main process for 10 s after ${port} answered; something else may be answering there`;
   } catch (err) {
     why = (err as Error).message;
   }
-
-  // Every step of the undo runs, even after one fails; the message names what failed.
-  const failed: string[] = [];
-  const step = (run: () => unknown) => {
-    try {
-      run();
-    } catch (err) {
-      failed.push((err as Error).message);
-    }
-  };
-  const target = previous ?? 'its previous unit';
-  const backupThere = [...before].some(([unit, text]) => unit !== name && text !== undefined);
-  const [appGoal, appDone] =
-    app !== undefined
-      ? [`switch the service back to ${target}`, `switched the service back to ${target}`]
-      : [
-          "stop, disable and remove the service's first unit",
-          'stopped and disabled the service, which had no earlier unit, and removed its unit',
-        ];
-  const [backupGoal, backupDone] = backupThere
-    ? ["put the backup's units back as they were", "put the backup's units back as they were"]
-    : ["remove the backup's units", "removed the backup's units"];
-  // Units that were not there are stopped, the timer first, and disabled while systemd still
-  // knows them; the backup's service has no [Install] section, so nothing enables it.
-  for (const [unit] of [...units].reverse())
-    if (before.get(unit) === undefined) {
-      step(() => systemctl(env, ['stop', unit]));
-      if (unit !== backup) step(() => systemctl(env, ['disable', ...runtime, unit]));
-    }
-  for (const [unit] of units)
-    step(() => {
-      const text = before.get(unit);
-      if (text === undefined) rmSync(join(place.dir, unit), { force: true });
-      else writeUnit(place, unit, text);
-    });
-  step(() => systemctl(env, ['daemon-reload']));
-  for (const unit of [name, timer])
-    if (before.get(unit) !== undefined) step(() => systemctl(env, ['restart', unit]));
-  const undone =
-    failed.length === 0
-      ? `${appDone}, and ${backupDone}`
-      : `tried to ${appGoal} and ${backupGoal}, but ${failed.join('; ')}`;
-  throw new RefusedError(`${why}; ${undone}; nothing was deployed`);
+  throw new RefusedError(`${why}; ${switchBack().text}; nothing was deployed`);
 }
 
 /**

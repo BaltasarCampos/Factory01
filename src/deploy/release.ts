@@ -10,7 +10,7 @@ import { exportTree } from '../git/export.js';
 import type { AppFolder } from './sandbox.js';
 
 /** `20261013T153000Z` for 2026-10-13 15:30:00 UTC. */
-const stamp = (now: Date) =>
+export const stamp = (now: Date) =>
   now
     .toISOString()
     .replace(/[-:]/g, '')
