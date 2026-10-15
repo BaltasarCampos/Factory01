@@ -171,3 +171,9 @@ export function fetchBranch(at: MainContext, branch: string, nothing: string): s
   if (!fetched.ok) throw new RefusedError(`cannot fetch ${branch}: ${fetched.err}; ${nothing}`);
   return run(at.cwd, at.env, ['rev-parse', '--verify', `${ref}^{commit}`]).out.trim();
 }
+
+/** Push `commit` to `branch` on origin, as `merge` pushes: fast-forward only, never forced. */
+export function pushBranch(at: MainContext, commit: string, branch: string): string | undefined {
+  const pushed = run(at.cwd, at.env, ['push', '-q', 'origin', `${commit}:refs/heads/${branch}`]);
+  return pushed.ok ? undefined : pushed.err;
+}

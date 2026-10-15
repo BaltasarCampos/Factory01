@@ -48,13 +48,15 @@ const GITLINK = '160000';
  * add config past `GIT_CONFIG_GLOBAL`, `GIT_DIFF_OPTS` overrides `-U`, and `GIT_DIR`,
  * `GIT_INDEX_FILE` or `GIT_OBJECT_DIRECTORY` could point at another repository. Dropping the
  * global config also drops a CI runner's `safe.directory`, so the repository is named on the
- * command line, which git counts as protected configuration.
+ * command line, which git counts as protected configuration. `index` is a temporary index file
+ * the factory made, set after the drop.
  */
 export function safeGit(
   repo: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
   input?: string,
+  index?: string,
 ) {
   const clean = Object.fromEntries(
     Object.entries(env).filter(([name]) => !name.startsWith('GIT_')),
@@ -72,6 +74,7 @@ export function safeGit(
         GIT_CONFIG_GLOBAL: '/dev/null',
         GIT_CONFIG_NOSYSTEM: '1',
         GIT_ATTR_NOSYSTEM: '1',
+        ...(index === undefined ? {} : { GIT_INDEX_FILE: index }),
       },
       maxBuffer: 1024 * 1024 * 1024,
       ...(input === undefined ? {} : { input }),

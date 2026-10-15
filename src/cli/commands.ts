@@ -54,6 +54,8 @@ export interface CommandContext {
   ask: (question: string) => Promise<string>;
   /** Session launchers by `agents:` mode. */
   launchers: Launchers;
+  /** How long `factory deploy`'s health check waits, in ms: 30 s unless a test sets less. */
+  healthMs?: number;
 }
 
 export interface CommandSpec {
@@ -89,6 +91,8 @@ export interface CliDeps {
   ask?: (question: string) => Promise<string>;
   /** Default: none; `dispatch` and `run` then use the local and cloud launchers (T061). */
   launchers?: Launchers;
+  /** Default: 30 s. Tests only; main.ts never sets it. */
+  healthMs?: number;
   /** Unread Owner-inbox alerts (src/notify/inbox.ts `projectUnreadAlerts` in main.ts). */
   unreadAlerts: () => Promise<readonly Alert[]>;
   /** Override the command table (tests). */
@@ -375,6 +379,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       now: deps.now ?? (() => new Date()),
       ask: deps.ask ?? askTerminal,
       launchers: deps.launchers ?? {},
+      ...(deps.healthMs === undefined ? {} : { healthMs: deps.healthMs }),
     });
   } catch (err) {
     if (err instanceof UsageError) {

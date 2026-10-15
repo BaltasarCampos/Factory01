@@ -2,12 +2,15 @@
 // A stand-in for `systemctl --user` in the deploy tests (T069, slice 23b-2a), on PATH only where
 // a test puts it. It records each call in $HOME/.fake-systemd/calls; `restart` starts what the
 // unit would serve: an HTTP server on the unit's port when the release the unit names holds a
-// file `serves`, else nothing, as an app that never listens; `show` reports the unit active, with
-// that server as its main process, while it runs, and the backup's last result as the file
-// `backup-result` holds it, else none yet. With a file `down` in that folder it fails as
-// it does without a user manager, and with `fail-restart` every `restart` fails: systemctl gets
-// only PATH, HOME and the bus's variables, so no other variable reaches it.
-import { spawn } from 'node:child_process';
+// file `serves`, else nothing, as an app that never listens. That server answers `/health` with
+// 200 and `{"status":"ok"}` when `serves` is empty, else with 503 and its text. A restart runs
+// the command in the file `on-restart.<unit>`, once, when there is one; `show` reports the unit
+// active, with that server as its main process, while it runs, and the backup's last result as
+// the file `backup-result` holds it, else none yet. With a file `down` in that folder it fails as
+// it does without a user manager, with `fail-restart` every `restart` fails, and with `fail-show`
+// every `show` of a main process does: systemctl gets only PATH, HOME and the bus's variables, so
+// no other variable reaches it.
+import { spawn, spawnSync } from 'node:child_process';
 import {
   appendFileSync,
   existsSync,
@@ -41,6 +44,10 @@ if (verb === 'show' && rest.includes('--property=Result,ExecMainExitTimestamp'))
   );
 }
 if (verb === 'show' && rest.includes('--property=MainPID')) {
+  if (existsSync(join(state, 'fail-show'))) {
+    console.error('Failed to get properties: Connection timed out');
+    process.exit(1);
+  }
   const pid = existsSync(pidFile) ? readFileSync(pidFile, 'utf8') : '0';
   console.log(`MainPID=${pid}\nActiveState=${pid === '0' ? 'inactive' : 'active'}`);
 }
@@ -60,9 +67,17 @@ if (verb === 'restart') {
     / service app (\S+) (\S+) --port (\d+)$/m.exec(text) ?? [];
   const folder = join(home, '.local', 'share', 'factory', 'apps', repo, 'releases', release);
   if (existsSync(join(folder, 'serves'))) {
-    const serve = `require('node:http').createServer((q, s) => s.end('ok')).listen(${port}, '127.0.0.1'); setTimeout(() => process.exit(0), 120000);`;
+    const body = readFileSync(join(folder, 'serves'), 'utf8');
+    const health = body === '' ? [200, '{"status":"ok"}'] : [503, body];
+    const serve = `const [code, body] = ${JSON.stringify(health)}; require('node:http').createServer((q, s) => { if (q.url !== '/health') return s.end('ok'); s.writeHead(code, { 'content-type': 'application/json' }); s.end(body); }).listen(${port}, '127.0.0.1'); setTimeout(() => process.exit(0), 120000);`;
     const child = spawn(process.execPath, ['-e', serve], { detached: true, stdio: 'ignore' });
     child.unref();
     writeFileSync(pidFile, String(child.pid));
   }
+}
+const hook = join(state, `on-restart.${unit}`);
+if (verb === 'restart' && existsSync(hook)) {
+  const command = readFileSync(hook, 'utf8');
+  rmSync(hook);
+  spawnSync('sh', ['-c', command], { stdio: 'ignore' });
 }

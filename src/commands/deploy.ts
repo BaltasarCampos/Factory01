@@ -11,8 +11,11 @@
 // re-verified (slice 23c-1a); then CI on main's head, each item's rollback steps from the release
 // notes, the approval summary, the Owner's yes, and the signed `deployed` record posted on the
 // inbox issue, so nothing runs before it is signed and a refused deploy leaves no record (slice
-// 23c-1b); a successful deploy is appended to `deploys.log` with the record's comment id. The
-// health check comes with 23c-2. One deploy runs at a time.
+// 23c-1b); a failure after signing, at the export, the build or the switch, says so on the inbox,
+// unsigned. After the switch, the health check, and on failure the rollback steps and the
+// Owner's choice to switch back; the health summary on `claude/factory-log`; only a healthy
+// deploy removes old releases and is appended to `deploys.log`, with the record's comment id
+// (slice 23c-2). One deploy runs at a time.
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -26,7 +29,8 @@ import { buildRelease } from '../deploy/build.js';
 import { cleanReleases } from '../deploy/cleanup.js';
 import { appendDeploy, deploysLogPath, lastDeploy } from '../deploy/deploys-log.js';
 import { withDeployLock } from '../deploy/lock.js';
-import { newRelease } from '../deploy/release.js';
+import { checkHealth, healthSummary, pushHealth } from '../deploy/health.js';
+import { newRelease, stamp } from '../deploy/release.js';
 import { releaseNotes, rollbackFor } from '../deploy/release-notes.js';
 import { appFolder, deployRunner } from '../deploy/sandbox.js';
 import {
@@ -36,12 +40,15 @@ import {
   factoryProgram,
   lastBackup,
   switchService,
+  unitName,
   userUnits,
+  type Switched,
 } from '../deploy/service.js';
 import { ciOnMain, shippedSince, verifyShipped } from '../deploy/shipped.js';
 import { safeGit } from '../git/diff.js';
 import { checkedMain, fetchBranch, type MainContext } from '../merge/context.js';
-import { buildSummary, type DeployView } from '../notify/summary.js';
+import { postComment } from '../github/comments.js';
+import { buildSummary, visible, type DeployView } from '../notify/summary.js';
 import { confirmPause } from '../pause/confirm.js';
 import { postSigned, viewIssue } from './approve.js';
 
@@ -55,6 +62,56 @@ function eventsAt(at: MainContext, items: readonly { branch: string }[]): string
     return shown.status === 0 ? [shown.stdout.toString('utf8')] : [];
   });
   return texts.length === 0 ? undefined : texts.join('\n');
+}
+
+/** A deploy that fails after signing says so on the inbox, unsigned and best effort. */
+async function failedAfterSigning(ctx: CommandContext, at: MainContext, step: string) {
+  const text = `deploy of ${at.main} failed at the ${step}; ${NOTHING}`;
+  try {
+    await postComment(at.config.repo, at.config.inbox_issue, text, { env: at.env });
+  } catch (err) {
+    ctx.io.stderr.write(
+      `warning: could not post "${text}" on the inbox: ${(err as Error).message}\n`,
+    );
+  }
+}
+
+/**
+ * An unhealthy release (AC-060): the rollback steps, then the Owner's choice to switch back,
+ * default no; a first deploy has nothing to switch back to. Returns the summary's status and what
+ * the refusal says happened.
+ */
+async function offerSwitchBack(
+  ctx: CommandContext,
+  switched: Switched,
+  release: string,
+  rollback: DeployView['rollback'],
+): Promise<{ status: string; outcome: string }> {
+  const steps = rollback.flatMap((r) => [
+    `Rollback steps for #${String(r.issue)}:`,
+    ...r.notes.flatMap((n) => [
+      `  quoted from ${visible(n.path)} on ${n.source}:`,
+      ...n.steps.map((line) => `  > ${visible(line)}`),
+    ]),
+  ]);
+  ctx.io.stdout.write(
+    `${(steps.length > 0 ? steps : ['No item shipped, so the release notes give no rollback steps']).join('\n')}\n`,
+  );
+  const kept = {
+    status: 'unhealthy, kept running',
+    outcome: `the new release ${release} keeps running`,
+  };
+  if (!switched.hadUnit)
+    return { ...kept, outcome: `there is no earlier release to switch back to; ${kept.outcome}` };
+  const target = switched.previous ?? 'its previous unit';
+  const answer = await ctx.ask(`Switch back to ${target}? [y/N] `);
+  if (!['y', 'yes'].includes(answer.trim().toLowerCase())) return kept;
+  const back = switched.switchBack();
+  const status =
+    back.failed.length === 0
+      ? `unhealthy, switched back to ${target}`
+      : `unhealthy, switch back to ${target} failed: ${back.failed.join('; ')}`;
+  return { status, outcome: back.text };
 }
 
 export function deploy(ctx: CommandContext): Promise<number> {
@@ -116,32 +173,46 @@ export function deploy(ctx: CommandContext): Promise<number> {
       const answer = await ctx.ask(`Deploy ${at.main} to this laptop? [y/N] `);
       if (!['y', 'yes'].includes(answer.trim().toLowerCase()))
         throw new RefusedError(`the Owner did not confirm the deploy; ${NOTHING}`);
+      const nonce = newNonce();
       const record = await postSigned(ctx, project, {
         ...{ repo: at.config.repo, issue: at.config.inbox_issue, gate: 'deployed', head: at.main },
-        ...{ timestamp: recordTimestamp(ctx.now()), nonce: newNonce() },
+        ...{ timestamp: recordTimestamp(ctx.now()), nonce },
       });
       ctx.io.stdout.write(
         `Signed the deployed record: comment ${record} on #${String(at.config.inbox_issue)}\n`,
       );
-      const release = newRelease(app, ctx.cwd, at.main, ctx.now(), ctx.env);
-      ctx.io.stdout.write(`Exported main's verified ${at.main} to ${release}\n`);
-      buildRelease(deployRunner(app, release, ctx.env), at.main, ctx.io.stdout);
       const units = userUnits(home);
-      const previous = await switchService(
-        units,
-        {
-          ...{ repo: at.config.repo, release: basename(release), port, home },
-          ...{ factory: factoryRoot(), program: factoryProgram() },
-        },
-        ctx.env,
-      );
+      let step = 'export';
+      let release = '';
+      let switched: Switched;
+      try {
+        release = newRelease(app, ctx.cwd, at.main, ctx.now(), ctx.env);
+        ctx.io.stdout.write(`Exported main's verified ${at.main} to ${release}\n`);
+        step = 'build';
+        buildRelease(deployRunner(app, release, ctx.env), at.main, ctx.io.stdout);
+        step = 'switch';
+        switched = await switchService(
+          units,
+          {
+            ...{ repo: at.config.repo, release: basename(release), port, home },
+            ...{ factory: factoryRoot(), program: factoryProgram() },
+          },
+          ctx.env,
+        );
+      } catch (err) {
+        await failedAfterSigning(ctx, at, step);
+        throw err;
+      }
       ctx.io.stdout.write(
         `Switched the service to ${basename(release)}; it answered on 127.0.0.1:${String(port)}\n`,
       );
-      const cleanup = cleanReleases(app, units, at.config.repo, previous);
-      if (cleanup.removed.length > 0)
-        ctx.io.stdout.write(`Removed old releases: ${cleanup.removed.join(', ')}\n`);
-      for (const line of cleanup.failed) ctx.io.stderr.write(`warning: ${line}\n`);
+      const name = unitName(at.config.repo);
+      const unit = { env: ctx.env, name, pid: switched.pid };
+      const health = await checkHealth(port, unit, ctx.healthMs);
+      ctx.io.stdout.write(`Health: ${health.answer}\n`);
+      const unhealthy = health.healthy
+        ? undefined
+        : await offerSwitchBack(ctx, switched, basename(release), view.rollback);
       let backup: string;
       try {
         backup = lastBackup(ctx.env, at.config.repo);
@@ -149,6 +220,27 @@ export function deploy(ctx: CommandContext): Promise<number> {
         backup = `could not be read: ${(err as Error).message}`;
       }
       ctx.io.stdout.write(`Backup: ${backup}\n`);
+      const text = healthSummary({
+        ...{ repo: at.config.repo, at: ctx.now(), main: at.main, release: basename(release) },
+        status: unhealthy?.status ?? 'healthy',
+        record: { id: record, inbox: at.config.inbox_issue, nonce },
+        ...{ port, health, backup },
+      });
+      try {
+        const path = `.factory/ops/health/${stamp(ctx.now())}.md`;
+        pushHealth(at, scratch, path, text);
+        ctx.io.stdout.write(`Wrote the health summary ${path} on claude/factory-log\n`);
+      } catch (err) {
+        ctx.io.stderr.write(`warning: ${(err as Error).message}\n`);
+        ctx.io.stdout.write(text);
+      }
+      if (unhealthy !== undefined)
+        throw new RefusedError(`the health check failed: ${health.answer}; ${unhealthy.outcome}`);
+      // Old releases go only once the new one is healthy: a switch back needs the previous one.
+      const cleanup = cleanReleases(app, units, at.config.repo, switched.previous);
+      if (cleanup.removed.length > 0)
+        ctx.io.stdout.write(`Removed old releases: ${cleanup.removed.join(', ')}\n`);
+      for (const line of cleanup.failed) ctx.io.stderr.write(`warning: ${line}\n`);
       appendDeploy(log, {
         ...{ at: ctx.now().toISOString(), main: at.main, release: basename(release) },
         record,
