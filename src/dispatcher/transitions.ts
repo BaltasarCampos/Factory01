@@ -36,6 +36,8 @@ export interface Evidence {
   owner: Record<OwnerGate, Verdict>;
   /** Intake's output check passes with the confirmed tier (src/stations/checks/intake.ts). */
   intakeComplete?: boolean;
+  /** Intake marked the item a duplicate of this issue: it waits in `new` for the Owner. */
+  duplicateOf?: number;
   /** The highest `tier:` label on the issue; above the confirmed tier, it holds `new`. */
   proposedTier?: Tier;
   /** An agent's question to the Owner is open on the issue. */
@@ -160,6 +162,9 @@ export function ownerBasisMissing(state: State, e: Evidence): string | undefined
 function forward(state: State, e: Evidence): Decision {
   switch (state) {
     case 'new': {
+      // Closing it, or deleting the marker, is the Owner's (slice 24a-2).
+      if (e.duplicateOf !== undefined)
+        return stay(`marked a duplicate of #${String(e.duplicateOf)}; waits for the Owner`);
       // A raise waits for a new `factory approve --tier` (data-model § State machine).
       const confirmed = ownerRecord(e, 'approved')?.tier;
       const proposed = e.proposedTier;

@@ -3,8 +3,9 @@
 // label (the Owner confirms the tier in the signed `approved` record, never through this label).
 // Intake runs after approval and may keep the confirmed tier or propose a higher one, never a
 // lower one (AC-009).
-// A duplicate gets no labels: it is closed with a `<!-- duplicate-of #<n> -->` comment, so it
-// never enters the line twice.
+// A duplicate gets no labels: Intake marks it with a `<!-- duplicate-of #<n> -->` comment and
+// leaves it open, since closing an approved item is the Owner's; the dispatcher holds it in `new`
+// and alerts the Owner (slice 24a-2), so it never enters the line twice.
 import { gh, Fields, GhError, numberArg, repoArg, type GhOptions } from '../../github/gh.js';
 import { ITEM_TYPES, type ItemType, type Priority, type Tier } from '../../model/types.js';
 import type { CheckResult } from '../../hooks/stop.js';
@@ -70,11 +71,7 @@ export function checkIntake(issue: IntakeIssue): IntakeResult {
   const [original] = marked;
   if (original !== undefined) {
     if (original === issue.number) return done([`${at}: marked a duplicate of itself`]);
-    const open = issue.state === 'OPEN';
-    const missing = open
-      ? [`${at}: marked a duplicate of #${String(original)} but still open; close it`]
-      : [];
-    return done(missing, { duplicateOf: original });
+    return done([], { duplicateOf: original });
   }
 
   const missing = issue.state === 'OPEN' ? [] : [`${at}: closed without a duplicate-of comment`];

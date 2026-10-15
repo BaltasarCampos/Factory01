@@ -98,10 +98,9 @@ describe('Intake output check: duplicates (AC-009)', () => {
     expect(result).toEqual({ complete: true, missing: [], duplicateOf: 3 });
   });
 
-  it('AC-009: a duplicate left open is not done', () => {
+  it('AC-009: a duplicate left open, as Intake leaves it, is done with no labels; closing it is the Owner’s (slice 24a-2)', () => {
     const result = checkIntake(issue({ labels: [], comments: [marked(3)] }));
-    expect(result.complete).toBe(false);
-    expect(result.missing.join('\n')).toMatch(/duplicate of #3 but still open; close it/);
+    expect(result).toEqual({ complete: true, missing: [], duplicateOf: 3 });
   });
 
   it('AC-009: an item cannot be a duplicate of itself', () => {

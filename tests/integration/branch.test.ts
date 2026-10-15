@@ -7,10 +7,11 @@ import { dispatchOnce, type DispatchContext } from '../../src/dispatcher/dispatc
 import { gatherEvidence } from '../../src/dispatcher/evidence.js';
 import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
 import { configOnMain } from '../../src/model/config.js';
+import { parseAlert } from '../../src/notify/inbox.js';
 import { STATES, STATIONS, type ApprovalRecord, type Tier } from '../../src/model/types.js';
 import { FakeClock } from '../helpers/fake-clock.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
-import { readState, seedState, type FakeComment } from '../helpers/fake-gh.js';
+import { readState, seedState, type FakeComment, type FakeIssue } from '../helpers/fake-gh.js';
 import { makeRepo, mergeBrief, mergeIntoMain, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
@@ -312,6 +313,103 @@ describe('Intake before triage (AC-009)', { timeout: 60_000 }, () => {
       expect.objectContaining({ role: 'intake', station: 1, branch: 'main', item: ISSUE }),
     ]);
     expect(t.project.git(['ls-remote', '--heads', 'origin', BRANCH])).toBe('');
+  });
+});
+
+describe('Intake duplicates (AC-009, slice 24a-2)', { timeout: 60_000 }, () => {
+  const ORIGINAL = 9;
+  const AT = '2026-10-01T08:30:00Z';
+  const mark = (n = ORIGINAL) => ({
+    body: `Same as #${String(n)}.\n<!-- duplicate-of #${String(n)} -->`,
+    createdAt: AT,
+  });
+  /** The issue the marker names; Intake's check requires it to exist. */
+  const original = () => {
+    editState((repo) =>
+      repo.issues.push({
+        ...{ number: ORIGINAL, title: 'The original', body: '', author: 'owner', state: 'OPEN' },
+        ...{ labels: [], comments: [], events: [], isPinned: false, createdAt: BEFORE },
+      }),
+    );
+  };
+  /** The duplicate alerts on the inbox, as their text. */
+  const alerts = (t: ReturnType<typeof setup>) =>
+    t.inbox().flatMap((c) => {
+      const a = parseAlert({ ...c, id: String(c.id) });
+      return a?.kind === 'duplicate' ? [a.text] : [];
+    });
+  const text = (comment: number) =>
+    `#${String(ISSUE)} is marked a duplicate of #${String(ORIGINAL)} (comment ${String(comment)}): close #${String(ISSUE)}, or delete the marker if it is not a duplicate`;
+  /** Changes the item in the fake GitHub's state. */
+  const editItem = (edit: (item: FakeIssue) => void) => {
+    editState((repo) => {
+      const found = repo.issues.find((i) => i.number === ISSUE);
+      if (found === undefined) throw new Error('no item');
+      edit(found);
+    });
+  };
+
+  it('an open item Intake marked a duplicate stays in new with no labels, starts no session and alerts the Owner once, naming the first marker', async () => {
+    const t = setup({ labels: [], comments: [mark(), mark()] });
+    original();
+
+    const first = await dispatchOnce(t.ctx);
+    const second = await dispatchOnce(t.ctx);
+
+    expect([...first.moves, ...second.moves]).toEqual([]);
+    expect(t.labels()).toEqual(['owner:approved']);
+    expect(t.local.launches).toEqual([]);
+    expect(alerts(t)).toEqual([text(5001)]);
+  });
+
+  it('with the marker deleted Intake runs again on the next pass; marked again, the item gets a new alert', async () => {
+    const t = setup({ labels: [], comments: [mark()] });
+    original();
+    await dispatchOnce(t.ctx);
+    editItem((i) => {
+      i.comments = i.comments.filter((c) => !c.body.includes('duplicate-of'));
+    });
+
+    await dispatchOnce(t.ctx);
+
+    expect(t.local.launches).toEqual([
+      expect.objectContaining({ role: 'intake', station: 1, branch: 'main', item: ISSUE }),
+    ]);
+    editItem((i) => i.comments.push({ id: 9001, author: 'owner', ...mark() }));
+
+    const again = await dispatchOnce(t.ctx);
+
+    expect(again.moves).toEqual([]);
+    expect(t.local.launches).toHaveLength(1);
+    expect(alerts(t)).toEqual([text(5001), text(9001)]);
+  });
+
+  it('a closed marked item drops out of the line: no move, no session, no further alert', async () => {
+    const t = setup({ labels: [], comments: [mark()] });
+    original();
+    await dispatchOnce(t.ctx);
+    editItem((i) => {
+      i.state = 'CLOSED';
+    });
+
+    const result = await dispatchOnce(t.ctx);
+
+    expect(result.moves).toEqual([]);
+    expect(t.local.launches).toEqual([]);
+    expect(alerts(t)).toEqual([text(5001)]);
+  });
+
+  it('a marker on an item past new changes nothing: a triaged item gets its Specify session and no alert', async () => {
+    const t = setup({ states: ['state:triaged'], comments: [mark()] });
+    original();
+
+    const result = await dispatchOnce(t.ctx);
+
+    expect(result.moves).toEqual([]);
+    expect(t.local.launches).toEqual([
+      expect.objectContaining({ role: 'spec', station: 2, branch: BRANCH }),
+    ]);
+    expect(alerts(t)).toEqual([]);
   });
 });
 

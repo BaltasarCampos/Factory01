@@ -10,7 +10,8 @@
 // on it (stations 2–6) it opens the item's one draft PR and commits `.station.json`. Nothing is
 // admitted before main has the Owner-signed Define merge, and when main's key lists or
 // `git verify-commit` cannot be read or run the pass admits nothing, moves nothing and alerts the
-// Owner.
+// Owner. An item Intake marked a duplicate waits in `new`, and the Owner gets one info alert per
+// marker comment (slice 24a-2).
 import { checkSecondCopy, type KeyCheck, type ReleaseKeys } from '../approvals/keys.js';
 import { verifyGate, type PostedComment, type Verdict } from '../approvals/verify.js';
 import { RefusedError } from '../cli/env.js';
@@ -33,6 +34,7 @@ import {
   type Tier,
 } from '../model/types.js';
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
+import { duplicateOf } from '../stations/checks/intake.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
 import { createItemBranch, ensureDraftPr, type ItemRef } from './branch.js';
@@ -311,6 +313,17 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
         createItemBranch(git, { issue: issue.number, branch: item.branch }, comments, mainRef);
       item.state = decision.to;
       found = await gather();
+    }
+    const original = item.state === 'new' ? found.duplicateOf : undefined;
+    if (original !== undefined) {
+      // One alert per marker comment: an item un-marked and marked again gets a new one.
+      const marker = comments.find((c) => duplicateOf(c.body) === original);
+      const n = String(issue.number);
+      await alertOnce({
+        urgency: 'info',
+        kind: 'duplicate',
+        text: `#${n} is marked a duplicate of #${String(original)} (comment ${marker?.id ?? 'unknown'}): close #${n}, or delete the marker if it is not a duplicate`,
+      });
     }
 
     const at = WORK_STATION[item.state];
