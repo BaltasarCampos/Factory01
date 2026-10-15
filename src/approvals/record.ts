@@ -21,6 +21,7 @@ export const FIELD_ORDER = [
   'scope',
   'waives',
   'head',
+  'deployed',
   'timestamp',
   'nonce',
 ] as const satisfies readonly (keyof ApprovalRecord)[];
@@ -46,6 +47,7 @@ const GATES: readonly string[] = [
   'waiver',
   'resume',
   'deployed',
+  'deploy-healthy',
 ] satisfies ApprovalGate[];
 const SCOPES: readonly string[] = ['line', ...STATIONS];
 
@@ -94,8 +96,16 @@ export const headBound = (waives: string): boolean =>
   waives.startsWith('test:') || isCodeGateWaiver(waives);
 
 type Presence = 'required' | 'optional';
-type GatedField = 'tier' | 'branch' | 'spec_sha' | 'scope' | 'waives' | 'head';
-const GATED: readonly GatedField[] = ['tier', 'branch', 'spec_sha', 'scope', 'waives', 'head'];
+type GatedField = 'tier' | 'branch' | 'spec_sha' | 'scope' | 'waives' | 'head' | 'deployed';
+const GATED: readonly GatedField[] = [
+  'tier',
+  'branch',
+  'spec_sha',
+  'scope',
+  'waives',
+  'head',
+  'deployed',
+];
 
 /** Gate-specific fields; any field not listed for a gate is not allowed. */
 const PRESENCE: Record<ApprovalGate, Partial<Record<GatedField, Presence>>> = {
@@ -105,6 +115,8 @@ const PRESENCE: Record<ApprovalGate, Partial<Record<GatedField, Presence>>> = {
   waiver: { tier: 'optional', branch: 'optional', waives: 'required', head: 'optional' },
   resume: { scope: 'required' },
   deployed: { head: 'required' },
+  // Names the `deployed` record of the same deploy, by its nonce (slice 23d).
+  'deploy-healthy': { head: 'required', deployed: 'required' },
 };
 
 const FORMAT: Record<Field, { test: (v: string) => boolean; rule: string }> = {
@@ -120,6 +132,7 @@ const FORMAT: Record<Field, { test: (v: string) => boolean; rule: string }> = {
     rule: 'must be a waiver target (a test: target with no control, format or edge-space character)',
   },
   head: { test: (v) => SHA.test(v), rule: 'must be a 40-hex commit' },
+  deployed: { test: (v) => NONCE.test(v), rule: 'must be 32 lowercase hex chars' },
   timestamp: { test: isTimestamp, rule: 'must be RFC 3339 UTC, YYYY-MM-DDTHH:MM:SSZ' },
   nonce: { test: (v) => NONCE.test(v), rule: 'must be 32 lowercase hex chars' },
 };
@@ -246,7 +259,7 @@ export function parse(text: string): ApprovalRecord {
   };
   const tier = get('tier');
   if (tier !== undefined) record.tier = Number(tier) as Tier;
-  for (const field of ['branch', 'spec_sha', 'waives', 'head'] as const) {
+  for (const field of ['branch', 'spec_sha', 'waives', 'head', 'deployed'] as const) {
     const value = get(field);
     if (value !== undefined) record[field] = value;
   }

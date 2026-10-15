@@ -13,9 +13,11 @@
 // inbox issue, so nothing runs before it is signed and a refused deploy leaves no record (slice
 // 23c-1b); a failure after signing, at the export, the build or the switch, says so on the inbox,
 // unsigned. After the switch, the health check, and on failure the rollback steps and the
-// Owner's choice to switch back; the health summary on `claude/factory-log`; only a healthy
-// deploy removes old releases and is appended to `deploys.log`, with the record's comment id
-// (slice 23c-2). One deploy runs at a time.
+// Owner's choice to switch back; the health summary on `claude/factory-log` (slice 23c-2); then,
+// when healthy, the Deploy health summary and the signed `deploy-healthy` record naming the
+// `deployed` one. Only a deploy whose `deploy-healthy` record is posted removes old releases and
+// is appended to `deploys.log`, with both records' comment ids (slice 23d). One deploy runs at a
+// time.
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
@@ -48,11 +50,13 @@ import { ciOnMain, shippedSince, verifyShipped } from '../deploy/shipped.js';
 import { safeGit } from '../git/diff.js';
 import { checkedMain, fetchBranch, type MainContext } from '../merge/context.js';
 import { postComment } from '../github/comments.js';
-import { buildSummary, visible, type DeployView } from '../notify/summary.js';
+import { buildSummary, visible, type DeployView, type HealthView } from '../notify/summary.js';
 import { confirmPause } from '../pause/confirm.js';
 import { postSigned, viewIssue } from './approve.js';
 
 const NOTHING = 'nothing was deployed';
+
+type Project = Parameters<typeof viewIssue>[0];
 
 /** The shipped items' `events.jsonl` at main, for Usage; telemetry, so a missing one is skipped. */
 function eventsAt(at: MainContext, items: readonly { branch: string }[]): string | undefined {
@@ -112,6 +116,46 @@ async function offerSwitchBack(
       ? `unhealthy, switched back to ${target}`
       : `unhealthy, switch back to ${target} failed: ${back.failed.join('; ')}`;
   return { status, outcome: back.text };
+}
+
+/**
+ * A healthy deploy's `deploy-healthy` record (slice 23d; Owner decisions 2026-10-15): the Deploy
+ * health summary, then the passphrase, no second question; returns the posted comment's id. A
+ * wrong or empty passphrase or a failed post keeps the release running, as an unhealthy deploy
+ * that keeps running does: no cleanup and no `deploys.log` line, so the next deploy redeploys
+ * the same commit and signs both records.
+ */
+async function signHealthy(
+  ctx: CommandContext,
+  project: Project,
+  at: MainContext,
+  health: HealthView,
+): Promise<string> {
+  try {
+    const summary = buildSummary({
+      ...{ gate: 'deploy-healthy', commit: at.main, health },
+      issue: await viewIssue(project, at.config.inbox_issue),
+    });
+    if (!summary.ok)
+      throw new RefusedError(`the summary is incomplete: ${summary.missing.join('; ')}`);
+    ctx.io.stdout.write(`${summary.text}\n`);
+    ctx.io.stdout.write(
+      'An empty passphrase skips the deploy-healthy record: the release keeps running, without cleanup or a deploys.log line\n',
+    );
+    const id = await postSigned(ctx, project, {
+      ...{ repo: at.config.repo, issue: at.config.inbox_issue, gate: 'deploy-healthy' },
+      ...{ head: at.main, deployed: health.deployed.nonce },
+      ...{ timestamp: recordTimestamp(ctx.now()), nonce: newNonce() },
+    });
+    ctx.io.stdout.write(
+      `Signed the deploy-healthy record: comment ${id} on #${String(at.config.inbox_issue)}\n`,
+    );
+    return id;
+  } catch (err) {
+    throw new RefusedError(
+      `the deploy-healthy record was not signed: ${(err as Error).message}; ${health.release} keeps running; run factory deploy again to redeploy ${at.main} and sign it`,
+    );
+  }
 }
 
 export function deploy(ctx: CommandContext): Promise<number> {
@@ -236,14 +280,19 @@ export function deploy(ctx: CommandContext): Promise<number> {
       }
       if (unhealthy !== undefined)
         throw new RefusedError(`the health check failed: ${health.answer}; ${unhealthy.outcome}`);
-      // Old releases go only once the new one is healthy: a switch back needs the previous one.
+      const healthy = await signHealthy(ctx, project, at, {
+        ...{ main: at.main, release: basename(release), answer: health.answer },
+        ...{ deployed: { id: record, nonce }, rollback: view.rollback },
+      });
+      // Old releases go only once the new one is healthy and signed: a switch back needs the
+      // previous one, and so does a redeploy after a signing failure.
       const cleanup = cleanReleases(app, units, at.config.repo, switched.previous);
       if (cleanup.removed.length > 0)
         ctx.io.stdout.write(`Removed old releases: ${cleanup.removed.join(', ')}\n`);
       for (const line of cleanup.failed) ctx.io.stderr.write(`warning: ${line}\n`);
       appendDeploy(log, {
         ...{ at: ctx.now().toISOString(), main: at.main, release: basename(release) },
-        record,
+        ...{ record, healthy },
       });
       return ExitCode.Ok;
     } finally {

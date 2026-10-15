@@ -9,6 +9,7 @@ import {
   dispatchOnce,
   type DispatchContext,
   type DispatchEvent,
+  type StationEvidence,
 } from '../../src/dispatcher/dispatch.js';
 import { selectLauncher } from '../../src/dispatcher/launcher/select.js';
 import { RefusedError } from '../../src/cli/env.js';
@@ -16,7 +17,7 @@ import { verifiedMerges } from '../../src/git/merges.js';
 import { STATES, STATIONS, type ApprovalRecord } from '../../src/model/types.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeIssue } from '../helpers/fake-gh.js';
-import { gitEnv, makeRepo, mergeBrief, type TestRepo } from '../helpers/git-repo.js';
+import { gitEnv, makeRepo, mergeBrief, mergeIntoMain, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
 // A pass that admits an item now creates and pushes its branch: more than the default 5 s.
@@ -60,6 +61,8 @@ interface ItemSeed {
   approval?: Approval;
   /** Other labels, e.g. a proposed `tier:`. */
   labels?: string[];
+  /** A verified owner:spec-approved for this `spec.md` blob, after owner:approved. */
+  specApproved?: string;
 }
 
 const labeled = (name: string, at: string) => ({
@@ -69,7 +72,12 @@ const labeled = (name: string, at: string) => ({
   created_at: at,
 });
 
-function approvalBody(repo: string, issue: number, key: TestKeys): string {
+function approvalBody(
+  repo: string,
+  issue: number,
+  key: TestKeys,
+  more: Partial<ApprovalRecord> = {},
+): string {
   const record: ApprovalRecord = {
     repo,
     issue,
@@ -78,6 +86,7 @@ function approvalBody(repo: string, issue: number, key: TestKeys): string {
     branch: `claude/${String(issue)}-add-login`,
     timestamp: BEFORE,
     nonce: randomBytes(16).toString('hex'),
+    ...more,
   };
   return renderComment(record, sign(record, key.privateKey, { stdinIsTTY: true }));
 }
@@ -98,6 +107,13 @@ function issue(repo: string, seed: ItemSeed): Partial<FakeIssue> & { number: num
     labels.push('owner:approved');
     events.push(labeled('owner:approved', LATER));
   }
+  if (seed.specApproved !== undefined) {
+    const more = { gate: 'spec-approved' as const, spec_sha: seed.specApproved };
+    const body = approvalBody(repo, seed.number, owner, more);
+    comments.push({ id: 6000 + seed.number, author: 'owner', body, createdAt: LATER });
+    labels.push('owner:spec-approved');
+    events.push(labeled('owner:spec-approved', '2026-10-01T08:10:00Z'));
+  }
   return { number: seed.number, author: seed.author ?? 'owner', labels, events, comments };
 }
 
@@ -112,6 +128,10 @@ interface Setup {
   brief?: Brief;
   /** One of main's pinned key lists cannot be read. */
   unreadable?: 'allowedSigners' | 'revokedKeys';
+  /** More of main's history, after the brief; returns comments for the inbox issue. */
+  main?: (project: TestRepo) => FakeIssue['comments'];
+  /** What `gatherEvidence` finds for every item. */
+  evidence?: StationEvidence;
 }
 
 type Brief =
@@ -149,6 +169,12 @@ function mainHistory(config: string, brief: Brief): TestRepo {
 function setup(items: ItemSeed[], options: Setup = {}) {
   const repo = options.repo ?? REPO;
   const inboxLabels = options.inboxLabels ?? [];
+  const config = `factory_release: ${PIN}\nrepo: ${repo}\ninbox_issue: ${String(INBOX)}\n`;
+  const project = mainHistory(
+    config + (options.config ?? 'agents: cloud\n'),
+    options.brief ?? 'signed',
+  );
+  const inboxComments = options.main?.(project) ?? [];
   seedState({
     repos: {
       [repo]: {
@@ -160,17 +186,13 @@ function setup(items: ItemSeed[], options: Setup = {}) {
             title: 'Owner inbox',
             labels: inboxLabels,
             events: inboxLabels.map((l) => labeled(l, BEFORE)),
+            comments: inboxComments,
           },
           ...items.map((seed) => issue(repo, seed)),
         ],
       },
     },
   });
-  const config = `factory_release: ${PIN}\nrepo: ${repo}\ninbox_issue: ${String(INBOX)}\n`;
-  const project = mainHistory(
-    config + (options.config ?? 'agents: cloud\n'),
-    options.brief ?? 'signed',
-  );
   const keys = writeKeyFiles([revoked, owner], [revoked]);
   if (options.unreadable !== undefined) keys[options.unreadable] = join(tempDir(), 'missing');
   const cloud = new FakeLauncher('cloud');
@@ -181,7 +203,8 @@ function setup(items: ItemSeed[], options: Setup = {}) {
     keysFor: () => keys,
     secondCopy: options.secondCopy?.() ?? owner.publicKey,
     auditHistory: () => Promise.resolve({ recreated: [] }),
-    gatherEvidence: () => Promise.resolve({ needsSession: true, intakeComplete: true }),
+    gatherEvidence: () =>
+      Promise.resolve(options.evidence ?? { needsSession: true, intakeComplete: true }),
     launchers: { cloud, local },
     logEvent: (n, event) => {
       logged.push([n, event]);
@@ -341,6 +364,57 @@ describe('dispatcher core: owner: labels (AC-068)', () => {
     expect(result.moves).toEqual([]);
     expect(t.cloud.launches).toEqual([]);
     expect(t.inbox()[0]?.body).toMatch(/urgency=urgent kind=tampering/);
+  });
+});
+
+describe('dispatcher core: release evidence (T160, slice 23d)', () => {
+  const SPEC = 'e'.repeat(40);
+  /** Item #7 merged by the Owner; the inbox holds what each case's deploys signed. */
+  const merged =
+    (signed: (before: string, merge: string) => ApprovalRecord[]) => (project: TestRepo) => {
+      const before = project.revParse('HEAD');
+      project.checkout('claude/7-add-login', { create: true });
+      project.commit({ 'src/login.ts': 'login\n' }, 'Add login');
+      const merge = mergeIntoMain(project, 'claude/7-add-login', '#7', { signWith: owner });
+      return signed(before, merge).map((record, i) => ({
+        ...{ id: 7000 + i, author: 'owner', createdAt: LATER },
+        body: renderComment(record, sign(record, owner.privateKey, { stdinIsTTY: true })),
+      }));
+    };
+  const deployed = (head: string): ApprovalRecord => ({
+    ...{ repo: REPO, issue: INBOX, gate: 'deployed', head, timestamp: LATER },
+    nonce: randomBytes(16).toString('hex'),
+  });
+  const healthy = (of: ApprovalRecord): ApprovalRecord => ({
+    ...of,
+    gate: 'deploy-healthy',
+    deployed: of.nonce,
+    nonce: randomBytes(16).toString('hex'),
+  });
+  const pair = (head: string) => {
+    const d = deployed(head);
+    return [d, healthy(d)];
+  };
+
+  it.each([
+    ['a deploy-healthy record naming the deployed record of the merge moves it to done', true],
+    ['a deployed record alone leaves it in releasing', false],
+    ['a healthy deploy from before the merge leaves it in releasing', false],
+  ] as const)('a merged item in releasing: %s', async (name, done) => {
+    const signed = (before: string, merge: string) =>
+      name.includes('alone') ? [deployed(merge)] : pair(name.includes('before') ? before : merge);
+    const seed = { number: 7, states: ['state:releasing'], approval: 'signed' as const };
+    const t = setup([{ ...seed, specApproved: SPEC }], {
+      main: merged(signed),
+      evidence: { ownerMerge: true, specSha: SPEC },
+    });
+
+    const result = await dispatchOnce(t.ctx);
+
+    expect(result.moves).toEqual(
+      done ? [expect.objectContaining({ issue: 7, from: 'releasing', to: 'done' })] : [],
+    );
+    expect(t.labelsOf(7)).toContain(done ? 'state:done' : 'state:releasing');
   });
 });
 

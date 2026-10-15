@@ -102,13 +102,14 @@ copies records into `events.jsonl`, which is telemetry, and a record verifies wh
 factory-approve/v1
 repo: <owner>/<name>
 issue: <number>
-gate: approved | spec-approved | waiver | resume | deployed
+gate: approved | spec-approved | waiver | resume | deployed | deploy-healthy
 tier: 1 | 2 | 3                 (approved, spec-approved; waiver when issue is a work item)
 branch: claude/<issue>-<slug>   (approved, spec-approved; waiver when item- or PR-scoped)
 spec_sha: <git blob sha>        (spec-approved only)
 scope: line | <station>         (resume only; issue = inbox issue)
 waives: <waiver target>         (waiver only; see § Waiver targets)
-head: <40 hex>                  (code-gate waivers: the PR head commit waived; deployed: the main commit deployed)
+head: <40 hex>                  (code-gate waivers: the PR head commit waived; deployed, deploy-healthy: the main commit deployed)
+deployed: <32 hex chars>        (deploy-healthy only: the nonce of the deployed record it confirms)
 timestamp: <RFC 3339 UTC>
 nonce: <32 hex chars>
 ```
@@ -130,7 +131,7 @@ timestamps.
 The slug is fixed by the `approved` record's `branch` field: the dispatcher creates exactly
 that branch and never re-derives the slug from the issue title.
 
-For `deployed` records, `repo` names the project and `issue` is the Owner inbox issue.
+For `deployed` and `deploy-healthy` records, `repo` names the project and `issue` is the Owner inbox issue. `factory deploy` signs `deployed` before anything runs and `deploy-healthy` only after its own health check passes; an item reaches `done` only when a verified `deploy-healthy` record names a verified `deployed` record with the same `head`, a commit of main's verified first-parent history at or after the item's merge (T160, slice 23d).
 
 ### Waiver targets
 
@@ -467,7 +468,7 @@ A health summary, `.factory/ops/health/<YYYYMMDDTHHMMSSZ>.md`, is written by `fa
 the switch: the version (main's commit and the release), the status (healthy, unhealthy and kept
 running, or unhealthy and switched back), the `deployed` record's comment id and nonce, and the
 checks (start check, unit, `GET /health`, the backup's last result). It is unsigned, so it is
-never release evidence on its own (slice 23c-2).
+never release evidence on its own (slice 23c-2); the `deploy-healthy` record is (slice 23d).
 A release note names each item it covers as `#N` and gives its rollback steps under
 `## Rollback`; `factory deploy` refuses a shipped item that no note on main or on
 `claude/factory-log` covers (slice 23c-1b).

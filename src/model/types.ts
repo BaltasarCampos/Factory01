@@ -131,7 +131,8 @@ export interface Event {
   usage?: { sessions: number; est_share: number };
 }
 
-export type ApprovalGate = 'approved' | 'spec-approved' | 'waiver' | 'resume' | 'deployed';
+export type ApprovalGate =
+  'approved' | 'spec-approved' | 'waiver' | 'resume' | 'deployed' | 'deploy-healthy';
 
 /** Fields of a `factory-approve/v1` record, in canonical order. */
 export interface ApprovalRecord {
@@ -144,6 +145,8 @@ export interface ApprovalRecord {
   scope?: 'line' | StationName;
   waives?: string;
   head?: string;
+  /** `deploy-healthy` only: the nonce of the `deployed` record it confirms (slice 23d). */
+  deployed?: string;
   timestamp: string;
   nonce: string;
 }

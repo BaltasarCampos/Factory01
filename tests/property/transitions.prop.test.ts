@@ -26,7 +26,6 @@ const OUTPUTS = [
   'tasksDone',
   'verifyReport',
   'findingsResolved',
-  'releaseNotes',
 ] as const;
 type Output = (typeof OUTPUTS)[number];
 const FORWARD: readonly State[] = STATES.slice(0, 10);
@@ -44,6 +43,7 @@ interface World {
   intent: { approved?: Tier; spec?: number };
   spec: number;
   ownerMerged: boolean;
+  /** The Owner signed a deployed and a deploy-healthy record covering the merge (T160). */
   deployed: boolean;
   historySigned: boolean;
   rotationPending: boolean;
@@ -116,7 +116,7 @@ const evidence = (w: World): Evidence => ({
         },
       }),
   ownerMerge: w.ownerMerged,
-  deployed: w.deployed,
+  released: w.deployed,
 });
 
 type Action =
@@ -379,7 +379,6 @@ describe('transition table against the TLA+ invariants (AC-069)', () => {
       step,
       { by: 'owner', act: 'merge' },
       step,
-      out('releaseNotes'),
       { by: 'owner', act: 'deploy' },
       step,
     ]);

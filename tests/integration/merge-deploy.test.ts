@@ -1,6 +1,7 @@
 // `factory merge` and `factory deploy` (T053). Slice 21 writes the per-branch rule cases
 // (AC-081–AC-083, AC-086, FR-016g) against src/merge/rules.ts, with the inputs `factory merge`
 // will pass in; the command's own cases come with slices 22a to 22c, and deploy's with 23a to 23c.
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { createServer } from 'node:http';
 import {
@@ -2375,7 +2376,7 @@ const deployLines = (home: string) =>
     ? readFileSync(deployLog(home), 'utf8')
         .trim()
         .split('\n')
-        .map((l) => JSON.parse(l) as { main: string; release: string })
+        .map((l) => JSON.parse(l) as { main: string; release: string; healthy?: string })
     : [];
 const NOTE_PATH = '.factory/releases/v1.md';
 const NOTE = [
@@ -2619,8 +2620,10 @@ describe(
         /Rollback steps for #7:\n {2}quoted from \.factory\/releases\/v1\.md on origin\/claude\/factory-log at [0-9a-f]{12}, not merged:\n {2}> 1\. Run factory deploy at the previous commit\.\n\n/,
       );
       expect(r.stdout.indexOf('Approval summary')).toBeLessThan(r.stdout.indexOf('Exported'));
-      const [comment, ...more] = inboxComments();
+      // A healthy deploy's second record follows (slice 23d).
+      const [comment, healthy, ...more] = inboxComments();
       expect(more).toEqual([]);
+      expect(recordOf(healthy?.body ?? '').gate).toBe('deploy-healthy');
       const signed = extractFromComment(comment?.body ?? '');
       expect(verifySignature(signed, writeKeyFiles([owner]))).toBe(true);
       expect(
@@ -3044,5 +3047,127 @@ describe(
       expect(releasesOf(d.t.home)).toEqual([]);
       expect(d.units()).toEqual({});
     });
+  },
+);
+
+/** The signed record a comment posts, as its fields. */
+const recordOf = (body: string) => parse(extractFromComment(body).text);
+/**
+ * `tool` first on PATH: it fails its second call matching `match`, printing `why`, as a wrong
+ * passphrase fails `ssh-keygen -Y sign` or a refused post fails `gh issue comment`, and runs the
+ * real tool otherwise. The test keys have no passphrase, so nothing else can fail it.
+ */
+function failsSecond(tool: string, match: string, why: string): NodeJS.ProcessEnv {
+  const real = execFileSync('sh', ['-c', `command -v ${tool}`], { encoding: 'utf8' }).trim();
+  const bin = tempDir();
+  const count = join(bin, 'count');
+  writeFileSync(
+    join(bin, tool),
+    [
+      '#!/bin/sh',
+      `case " $* " in *" ${match} "*)`,
+      `  n=$(($(cat '${count}' 2>/dev/null || echo 0) + 1)); echo $n > '${count}'`,
+      `  if [ $n = 2 ]; then echo '${why}' >&2; exit 255; fi;;`,
+      'esac',
+      `exec '${real}' "$@"`,
+      '',
+    ].join('\n'),
+  );
+  chmodSync(join(bin, tool), 0o755);
+  return { PATH: `${bin}:${systemd.PATH}` };
+}
+const EMPTY_SKIPS =
+  'An empty passphrase skips the deploy-healthy record: the release keeps running, without cleanup or a deploys.log line\n';
+
+describe(
+  'factory deploy: the signed deploy-healthy record (T069, T160, AC-060, slice 23d)',
+  { timeout: 300_000 },
+  () => {
+    it('a healthy deploy shows the Deploy health summary, then signs deploy-healthy naming its deployed record, before the cleanup and deploys.log', async () => {
+      const d = deployable(product('node build.mjs'));
+      expect((await d.deploy()).code).toBe(0);
+      const merge = mergeItem(d.t.repo);
+
+      const r = await d.deploy();
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      const [, , deployed, healthy, ...more] = inboxComments();
+      expect(more).toEqual([]);
+      expect(recordOf(deployed?.body ?? '')).toMatchObject({ gate: 'deployed', head: merge });
+      expect(recordOf(healthy?.body ?? '')).toMatchObject({
+        ...{ repo: REPO, issue: 1, gate: 'deploy-healthy', head: merge },
+        deployed: nonceOf(deployed?.body ?? ''),
+      });
+      const order = [
+        'Wrote the health summary',
+        `Approval summary for #1 (deploy-healthy) at ${merge}:`,
+        `The deployed record it confirms: comment ${String(deployed?.id)} on the inbox, nonce ${nonceOf(deployed?.body ?? '')}`,
+        'Health check, run on this laptop: GET /health answered 200 {"status":"ok"}',
+        '> 1. Run factory deploy at the previous commit.',
+        EMPTY_SKIPS,
+        `Signed the deploy-healthy record: comment ${String(healthy?.id)} on #1`,
+      ].map((line) => r.stdout.lastIndexOf(line));
+      expect(order).not.toContain(-1);
+      expect(order).toEqual([...order].sort((a, b) => a - b));
+      expect(d.t.asked).toEqual([
+        `Deploy ${d.main} to this laptop? [y/N] `,
+        `Deploy ${merge} to this laptop? [y/N] `,
+      ]);
+      expect(deployLines(d.t.home).at(-1)).toMatchObject({
+        main: merge,
+        record: String(deployed?.id),
+        healthy: String(healthy?.id),
+      });
+    });
+
+    it.each([
+      [
+        'a wrong passphrase',
+        'ssh-keygen',
+        '-Y sign',
+        'incorrect passphrase supplied to decrypt private key',
+      ],
+      ['a failed post', 'gh', 'issue comment', 'HTTP 502: Bad Gateway'],
+    ])(
+      'after %s the release keeps running without cleanup or deploys.log, and the next deploy redeploys the commit and signs both',
+      async (_, tool, match, why) => {
+        const d = deployable(product('node build.mjs'));
+
+        const r = await d.deploy(failsSecond(tool, match, why));
+
+        expect(r.code).toBe(1);
+        const release = releaseIn(d.unit) ?? '';
+        expect(r.stdout).toContain(EMPTY_SKIPS);
+        expect(r.stderr).toContain(`the deploy-healthy record was not signed: `);
+        expect(r.stderr).toContain(why);
+        expect(r.stderr).toContain(
+          `; ${release} keeps running; run factory deploy again to redeploy ${d.main} and sign it\n`,
+        );
+        expect(inboxComments().map((c) => recordOf(c.body).gate)).toEqual(['deployed']);
+        expect(deployLines(d.t.home)).toEqual([]);
+        expect(healthFiles(d.t.repo).map((f) => /^- Status: (.*)$/m.exec(f.text)?.[1])).toEqual([
+          'healthy',
+        ]);
+
+        const again = await d.deploy();
+
+        expect(again.stderr).toBe('');
+        expect(again.code).toBe(0);
+        expect(releaseIn(d.unit)).not.toBe(release);
+        expect(releasesOf(d.t.home).map((f) => basename(f))).toContain(release);
+        const [first, deployed, healthy, ...more] = inboxComments();
+        expect(more).toEqual([]);
+        for (const c of [first, deployed])
+          expect(recordOf(c?.body ?? '')).toMatchObject({ gate: 'deployed', head: d.main });
+        expect(recordOf(healthy?.body ?? '')).toMatchObject({
+          ...{ gate: 'deploy-healthy', head: d.main },
+          deployed: nonceOf(deployed?.body ?? ''),
+        });
+        expect(deployLines(d.t.home)).toMatchObject([
+          { main: d.main, record: String(deployed?.id), healthy: String(healthy?.id) },
+        ]);
+      },
+    );
   },
 );

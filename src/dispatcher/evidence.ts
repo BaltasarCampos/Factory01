@@ -4,8 +4,9 @@
 // tree or from events: `ci / red-green` counts only as a check run on the head of the item's
 // pull request, so forged `gate_result` lines move nothing (AC-012).
 //
-// Not yet gathered: release notes and the deploy record (stations 7–8) and open questions, so
-// an item stays in `releasing`, and Release, Ops and blocked items start no session.
+// Release evidence, the signed deploy records on the inbox issue, is read once per pass by the
+// dispatcher (released.ts, T160). Not yet gathered: open questions, and what Release and Ops
+// would work on, so Release, Ops and blocked items start no session.
 import { GhError, gh, repoArg, type GhOptions } from '../github/gh.js';
 import { listPrs } from '../github/prs.js';
 import type { MainMerges } from '../git/merges.js';

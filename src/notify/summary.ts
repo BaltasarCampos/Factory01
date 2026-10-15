@@ -35,6 +35,7 @@ export type SummaryGate =
   | 'merge'
   | 'merge-branch'
   | 'deploy'
+  | 'deploy-health'
   | 'resume';
 
 const R = 'required';
@@ -51,6 +52,7 @@ export const GATE_PARTS: Readonly<Record<SummaryGate, Readonly<Record<SummaryPar
   merge: { changed: R, mapping: R, results: R, usage: S, risks: R },
   'merge-branch': { changed: R, mapping: NA, results: R, usage: NA, risks: R },
   deploy: { changed: R, mapping: NA, results: R, usage: S, risks: R },
+  'deploy-health': { changed: R, mapping: NA, results: R, usage: NA, risks: R },
   resume: { changed: R, mapping: NA, results: NA, usage: NA, risks: R },
 };
 
@@ -74,7 +76,10 @@ export interface PauseFacts {
 
 export interface SummaryFacts {
   gate:
-    | Extract<ApprovalGate, 'approved' | 'spec-approved' | 'waiver' | 'resume' | 'deployed'>
+    | Extract<
+        ApprovalGate,
+        'approved' | 'spec-approved' | 'waiver' | 'resume' | 'deployed' | 'deploy-healthy'
+      >
     | 'merge';
   /** The row of the per-gate list; derived from `gate` when absent (merge and deploy set it). */
   kind?: SummaryGate | undefined;
@@ -108,6 +113,8 @@ export interface SummaryFacts {
   branchMerge?: BranchMergeView | undefined;
   /** `factory deploy`: what its checks found since the last deploy (T069, slice 23c-1b). */
   deploy?: DeployView | undefined;
+  /** The end of a healthy `factory deploy`: what its `deploy-healthy` record confirms (slice 23d). */
+  health?: HealthView | undefined;
 }
 
 /** What `factory deploy`'s checks found at main's verified head; nothing is re-run. */
@@ -127,6 +134,17 @@ export interface DeployView {
     issue: number;
     notes: readonly { path: string; source: string; steps: readonly string[] }[];
   }[];
+}
+
+/** What a healthy deploy's `deploy-healthy` record confirms (design § Deploy health). */
+export interface HealthView {
+  main: string;
+  release: string;
+  /** The `deployed` record it names: its comment on the inbox issue and its nonce. */
+  deployed: { id: string; nonce: string };
+  /** The health check's result, already shown through `visible()`. */
+  answer: string;
+  rollback: DeployView['rollback'];
 }
 
 /** What `factory merge`'s checks found for a work item at the checked head; nothing is re-run. */
@@ -204,6 +222,7 @@ export function summaryGate(f: SummaryFacts): SummaryGate {
   if (f.kind !== undefined) return f.kind;
   if (f.gate === 'resume') return 'resume';
   if (f.gate === 'deployed') return 'deploy';
+  if (f.gate === 'deploy-healthy') return 'deploy-health';
   if (f.gate === 'approved') return 'admission';
   if (f.gate === 'spec-approved') return 'spec';
   if (f.branch === undefined) return 'waiver-other';
@@ -336,6 +355,17 @@ const BRANCH_PARTS: Readonly<
 const branchPart = (f: SummaryFacts, key: keyof typeof BRANCH_PARTS): Part =>
   f.branchMerge === undefined ? noMerge : BRANCH_PARTS[key](f.branchMerge);
 
+/** Each shipped item's rollback steps, quoted with each note's path and source. */
+const rollbackLines = (rollback: DeployView['rollback']): string[] =>
+  rollback.length === 0
+    ? ['No item merged since the last deploy: no release note needed']
+    : rollback.flatMap((r) => [
+        `Rollback steps for #${String(r.issue)}:`,
+        ...r.notes.flatMap((n) =>
+          quoted(`${visible(n.path)} on ${n.source}`, n.steps.map(visible)),
+        ),
+      ]);
+
 /** A deploy: each part from its view; issue titles, branches and notes are agent-written. */
 const DEPLOY_PARTS: Readonly<Record<'changed' | 'results' | 'risks', (d: DeployView) => string[]>> =
   {
@@ -362,24 +392,31 @@ const DEPLOY_PARTS: Readonly<Record<'changed' | 'results' | 'risks', (d: DeployV
             ...d.items.map((i) => `#${String(i.issue)}: tier ${String(i.tier)}`),
           ]),
     ],
-    risks: (d) =>
-      d.rollback.length === 0
-        ? ['No item merged since the last deploy: no release note needed']
-        : d.rollback.flatMap((r) => [
-            `Rollback steps for #${String(r.issue)}:`,
-            ...r.notes.flatMap((n) =>
-              quoted(`${visible(n.path)} on ${n.source}`, n.steps.map(visible)),
-            ),
-          ]),
+    risks: (d) => rollbackLines(d.rollback),
   };
 
 const noDeploy = { missing: "the deploy checks' results were not passed in" };
 const deployPart = (f: SummaryFacts, key: keyof typeof DEPLOY_PARTS): Part =>
   f.deploy === undefined ? noDeploy : DEPLOY_PARTS[key](f.deploy);
 
+/** A healthy deploy's second record: the record it confirms, the check, the rollback steps. */
+const HEALTH_PARTS: Readonly<Record<'changed' | 'results' | 'risks', (h: HealthView) => string[]>> =
+  {
+    changed: (h) => [
+      `The deployed record it confirms: comment ${h.deployed.id} on the inbox, nonce ${h.deployed.nonce}`,
+      `Main at ${h.main}, running as release ${h.release}`,
+    ],
+    results: (h) => [`Health check, run on this laptop: ${h.answer}`],
+    risks: (h) => rollbackLines(h.rollback),
+  };
+const noHealth = { missing: "the health check's result was not passed in" };
+const healthPart = (f: SummaryFacts, key: keyof typeof HEALTH_PARTS): Part =>
+  f.health === undefined ? noHealth : HEALTH_PARTS[key](f.health);
+
 function changed(f: SummaryFacts, gate: SummaryGate): Part {
   if (gate === 'merge-branch') return branchPart(f, 'changed');
   if (gate === 'deploy') return deployPart(f, 'changed');
+  if (gate === 'deploy-health') return healthPart(f, 'changed');
   if (gate === 'merge') return f.merge === undefined ? noMerge : mergeChanged(f, f.merge);
   if (gate === 'resume') {
     const p = f.pause;
@@ -456,6 +493,7 @@ const isTestWaiver = (f: SummaryFacts) => (f.waives ?? '').startsWith('test:');
 function results(f: SummaryFacts, gate: SummaryGate): Part {
   if (gate === 'merge-branch') return branchPart(f, 'results');
   if (gate === 'deploy') return deployPart(f, 'results');
+  if (gate === 'deploy-health') return healthPart(f, 'results');
   if (isTestWaiver(f)) {
     const covered = f.covered ?? [];
     if (covered.length === 0)
@@ -513,6 +551,7 @@ function usage(f: SummaryFacts): Part {
 function risks(f: SummaryFacts, gate: SummaryGate): Part {
   if (gate === 'merge-branch') return branchPart(f, 'risks');
   if (gate === 'deploy') return deployPart(f, 'risks');
+  if (gate === 'deploy-health') return healthPart(f, 'risks');
   if (gate === 'resume') {
     const p = f.pause;
     if (p === undefined) return noPause;

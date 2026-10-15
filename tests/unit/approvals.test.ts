@@ -114,9 +114,13 @@ const VALID = {
   'line resume': { ...base, issue: 1, gate: 'resume', scope: 'line' },
   'station resume': { ...base, issue: 1, gate: 'resume', scope: 'build' },
   deployed: { ...base, issue: 1, gate: 'deployed', head: HEAD },
+  'deploy-healthy': {
+    ...{ ...base, issue: 1, gate: 'deploy-healthy', head: HEAD },
+    deployed: '0123456789abcdef0123456789abcdef',
+  },
 } satisfies Record<string, ApprovalRecord>;
 
-type OptionalField = 'tier' | 'branch' | 'spec_sha' | 'scope' | 'waives' | 'head';
+type OptionalField = 'tier' | 'branch' | 'spec_sha' | 'scope' | 'waives' | 'head' | 'deployed';
 
 function omit(record: ApprovalRecord, key: OptionalField): ApprovalRecord {
   return Object.fromEntries(Object.entries(record).filter(([k]) => k !== key)) as ApprovalRecord;
@@ -185,10 +189,13 @@ describe('approval record canonical form (AC-070)', () => {
   });
 
   describe('gate', () => {
-    it.each(['approved', 'spec-approved', 'waiver', 'resume', 'deployed'])('accepts %s', (gate) => {
-      const record = Object.values(VALID).find((r) => r.gate === gate);
-      expect(record && parse(serialise(record)).gate).toBe(gate);
-    });
+    it.each(['approved', 'spec-approved', 'waiver', 'resume', 'deployed', 'deploy-healthy'])(
+      'accepts %s',
+      (gate) => {
+        const record = Object.values(VALID).find((r) => r.gate === gate);
+        expect(record && parse(serialise(record)).gate).toBe(gate);
+      },
+    );
 
     it.each(['merged', 'Approved', 'approve', ''])('rejects gate %j', (gate) => {
       expect(rejection(edit('gate', `gate: ${gate}`))).toMatch(/gate:/);
@@ -208,6 +215,18 @@ describe('approval record canonical form (AC-070)', () => {
       ['resume without scope', omit(VALID['line resume'], 'scope'), /scope: required/],
       ['resume with tier', { ...VALID['line resume'], tier: 1 }, /tier: not allowed/],
       ['deployed without head', omit(VALID.deployed, 'head'), /head: required/],
+      [
+        'deploy-healthy without deployed',
+        omit(VALID['deploy-healthy'], 'deployed'),
+        /deployed: required/,
+      ],
+      ['deploy-healthy without head', omit(VALID['deploy-healthy'], 'head'), /head: required/],
+      ['deployed with deployed', { ...VALID.deployed, deployed: NONCE }, /deployed: not allowed/],
+      [
+        'deploy-healthy naming no nonce',
+        { ...VALID['deploy-healthy'], deployed: HEAD },
+        /deployed: must be 32 lowercase hex chars/,
+      ],
       ['waiver without waives', omit(VALID['upgrade waiver'], 'waives'), /waives: required/],
       ['approved with waives', { ...VALID.approved, waives: 'gate:size' }, /waives: not allowed/],
     ] satisfies [string, ApprovalRecord, RegExp][])('rejects %s', (_name, record, problem) => {
