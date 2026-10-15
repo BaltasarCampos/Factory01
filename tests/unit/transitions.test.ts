@@ -87,6 +87,16 @@ describe('transition table rows (data-model.md § State machine)', () => {
     stays('new', { rotationPending: false, historySigned: true, owner: owned.owner });
   });
 
+  it('new holds an item Intake marked a duplicate, though Intake is done; the hold is only in new (slice 24a-2)', () => {
+    const owned = { ...base, owner: { ...NONE, approved: approved() } };
+    expect(next('new', { ...owned, duplicateOf: 3 })).toEqual({
+      ok: false,
+      reason: 'marked a duplicate of #3; waits for the Owner',
+    });
+    moves('new', owned, 'triaged');
+    moves('triaged', { ...gated, duplicateOf: 3, specComplete: true, draftPr: true }, 'specified');
+  });
+
   it('new → triaged waits while a proposed tier: is above the confirmed tier (AC-009)', () => {
     const at = (proposedTier: Tier, confirmed: Tier = 2) => ({
       ...base,

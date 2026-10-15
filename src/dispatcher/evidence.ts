@@ -66,7 +66,10 @@ export function gatherEvidence(ctx: EvidenceContext) {
     if (item.state === 'new') {
       if (item.tier === undefined) return { ownerMerge };
       const intake = await checkIntakeIssue(config.repo, n, item.tier, options);
-      return { ownerMerge, intakeComplete: intake.complete, needsSession: !intake.complete };
+      return {
+        ...{ ownerMerge, intakeComplete: intake.complete, needsSession: !intake.complete },
+        ...(intake.duplicateOf === undefined ? {} : { duplicateOf: intake.duplicateOf }),
+      };
     }
     if (item.branch === undefined) return { ownerMerge };
     const dir = `specs/${featureOf({ issue: n, branch: item.branch })}`;
