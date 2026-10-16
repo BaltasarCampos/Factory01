@@ -22,7 +22,8 @@ This is v1.8: it records the decisions made while building slice 15. Only a sign
 - Pull request tests that factory merge or factory approve runs on your laptop run only inside a bubblewrap sandbox, never next to your keys.
 - The product that factory deploy builds and runs on your laptop, and its daily backup, run inside a bubblewrap sandbox too, with network only through pasta: merged code is still agent code, so it never sees your home folder, the factory's keys or the services running only on your laptop.
 - A successful `factory deploy` signs a second record, `deploy-healthy`, once its health check passes; it names the `deployed` record's one-time number. An item reaches `state:done` only with both, and a failed health check offers to switch back to the previous release.
-- Roles whose shell has no git (Spec, Planner, Test, Reviewer, Release, Ops and Coach) commit nothing themselves: when the session stops, the stop hook commits their output from factory code, after the output check passes. Spec and Planner keep no shell at all.
+- Spec, Planner, Test, Reviewer, Security, Release, Ops and Coach commit nothing themselves, and the Integrator commits no report of its own: when the session stops, the stop hook commits their output from factory code, after the output check passes. Spec and Planner keep no shell at all.
+- Security and the Integrator write only their own reports. The Integrator rebases only when the rebase applies cleanly; a conflict goes back to Build. Release has no `gh release`, the Coach's role-file proposals are files that factory code on your laptop opens as pull requests, and the CI, coverage and scan results at Verify come from the required check runs, never from a report.
 - v1.7 changes (red-green per criterion, waivers bound to the head and their exact target, signed first commits, branches closed after merge) are recorded in the Decisions log.
 
 ## Vision and scope
@@ -127,7 +128,7 @@ Each station is a contract: it accepts a defined input, produces a defined outpu
 | 3 | Plan | Approved spec | Task list with dependencies, test plan, file list per task | Each task under size limit, every criterion mapped to a test, test tasks before implementation | Planner agent |
 | 4 | Build | One task + repo snapshot | Branch with code, tests, docs | Tests seen failing first, then passing (factory ci red-green) | Builder agent (one task at a time) |
 | 5 | Verify | Branch | Verification report | CI green; coverage ≥ 90% of changed lines; SAST, SCA, secret and licence scans clean; independent review done and blocking findings resolved | Test, Reviewer, Security agents |
-| 6 | Integrate | Verified branch | Rebased branch, ready for your merge | CI green on the rebased branch; you merge with factory merge, which re-verifies the item's signed approvals | Integrator agent + you |
+| 6 | Integrate | Verified branch | Rebased branch, ready for your merge; a conflict sends the item back to Build | CI green on the rebased branch; you merge with factory merge, which re-verifies the item's signed approvals | Integrator agent + you |
 | 7 | Release | Main at a commit | Release notes, rollback path, deployment (behind a flag for tier 2–3) | Rollback path documented; you approve by running `factory deploy`; app healthy after deploy, confirmed by your signed `deploy-healthy` record | Release agent + you |
 | 8 | Operate and learn | Health summaries from each deploy, event log, your review comments | New work items, incident notes, lessons for the Coach | Incidents filed at Intake; lessons passed to the Coach | Ops and Coach agents + you |
 
@@ -145,10 +146,10 @@ Twelve agent roles, all run as Claude Code cloud sessions on your Claude Pro pla
 | Test | Write and run extra tests, property-based tests and formal checks | Test runners, coverage, proof and model-checking tools | Edit production code |
 | Reviewer | Independent, advisory review against spec and standards | Diff, repo read, style guide | See the builder's reasoning; approve a merge |
 | Security | Scan for vulnerabilities, secrets, licence issues; re-check fixes | SAST, dependency and secret scanners | Waive its own findings |
-| Integrator | Rebase, resolve conflicts, prepare the merge | Repo, CI | Merge |
-| Release | Write release notes and the rollback path; prepare the deploy | Release notes, `gh release` | Deploy (you run `factory deploy`) |
-| Ops | Read health summaries and the event log; file incidents; write incident notes and the weekly metrics report | Event log, health summaries, Issues | Change code; deploy; edit role files |
-| Coach | Run retrospectives, propose instruction and checklist changes | Event log, review comments, `.factory/lessons/`; role-file changes as pull requests to the factory repo | Change gates, permissions, budgets, guardrail files or the constitution; approve its own changes |
+| Integrator | Rebase onto main when the rebase applies cleanly, and prepare the merge; a conflict goes back to Build | Repo, CI | Merge; resolve conflicts; approve a pull request |
+| Release | Write release notes and the rollback path; prepare the deploy | Release notes, main's history (read only) | Deploy (you run `factory deploy`) |
+| Ops | Read health summaries and the event log; file incidents; write incident notes and the commentary in the weekly metrics report, whose numbers factory code computes | Event log, health summaries, Issues | Change code; deploy; edit role files |
+| Coach | Run retrospectives, propose instruction and checklist changes | Event log, review comments (read only), `.factory/lessons/`; role-file proposals as files, which factory code on your laptop opens as pull requests to the factory repo | Change gates, permissions, budgets, guardrail files or the constitution; approve its own changes |
 
 A **plain orchestrator script** (not an agent with judgement) routes work between them; see Control plane.
 
@@ -175,11 +176,11 @@ Routines run without permission prompts, so these layers are the real guardrails
 | Builder | Read, Write, Edit, Bash, Grep, Glob, subagents | npm, vitest, git on the item's branch | Push to main or any other branch, reading `.env`, files outside the task's list |
 | Test | Read, Grep, Glob, Write and Edit (test files only), Bash | test runners, coverage | Edits to source files |
 | Reviewer | Read, Grep, Glob, Bash, Write (`reports/` only) | `git diff`, `gh pr comment` | Edits to code, specs or tests; `gh pr merge`, `gh pr review --approve` |
-| Security | Read, Grep, Glob, Bash | semgrep, gitleaks, npm audit | Write, Edit |
-| Integrator | Read, Bash | `git rebase`, `gh pr` (except merge) | `gh pr merge` |
-| Release | Read, Write (release and rollback notes on `claude/factory-log` only), Bash | `gh release` | Deploy commands (you run `factory deploy`) |
+| Security | Read, Grep, Glob, Bash, Write (`reports/security.md` only) | semgrep, gitleaks, npm audit | Edit; Write outside `reports/security.md` |
+| Integrator | Read, Bash, Write (`reports/integrate.md` only) | `git fetch origin main`, `git rebase origin/main`, `git rebase --abort`, `git status`, `git diff --name-only`, `git push --force-with-lease` to the item branch only; `gh pr view`, `gh pr checks`, `gh pr ready`, `gh pr comment` | `gh pr merge`, `gh pr review`, `git commit`; Edit, so a conflict always goes back to Build |
+| Release | Read, Write (release and rollback notes on `claude/factory-log` only), Bash | Read-only git on `origin/main`: `git fetch`, `git log`, `git show`, `git diff` | Deploy commands (you run `factory deploy`); tags and GitHub releases |
 | Ops | Read, Grep, Glob, Bash, Write (`.factory/ops/` on `claude/factory-log` only) | `gh issue` | Code and spec edits; deploy commands |
-| Coach | Read, Grep, Glob, Write (`.factory/lessons/` on `claude/factory-log` only), Bash | `gh pr create` (role-file proposals to the factory repo) | Editing settings, hooks, role files, gate policy or the constitution in a project |
+| Coach | Read, Grep, Glob, Write (`.factory/lessons/` on `claude/factory-log` only), Bash | `gh pr view`, `gh pr list` (read only) | Editing settings, hooks, role files, gate policy or the constitution in a project; pushing to, or opening pull requests in, any repository |
 
 Every agent is also blocked from adding or removing `owner:` and `state:` labels and from removing `pause:` labels, and denied any access to the approval signing key's path. Any agent may add a `pause:` label.
 
@@ -190,7 +191,7 @@ On top of the table, every role is denied Write and Edit on the guardrail files:
 - **Before a tool call:** a path guard blocks writes outside the role's folders and the task's file list, and blocks every role from writing `events.jsonl` and `.factory/events/` directly; a command guard blocks pushes to main or to any branch other than the one named in the station prompt, merges, reads of secrets, changes to `owner:` and `state:` labels, and removal of `pause:` labels. For roles with a shell, these guards are defence in depth: the laptop checks at merge are what enforce.
 - **After an edit:** format and type-check the touched file, so errors surface at once.
 - **After every call:** append one line to the work item's event log (`events.jsonl` on the item's branch, or `.factory/events/` on `claude/factory-log` after merge); the hook fills in the timestamp.
-- **When the session tries to stop:** check that the station's output file exists and is complete; if not, the session keeps going. For a role whose shell has no git (Spec, Planner, Test, Reviewer, Release, Ops and Coach), the hook then commits the role's output itself, from factory code: only the role's writable paths from the station manifest, as regular files, built with git plumbing on the branch as fetched, never from the session's working copy, git settings or hooks; a fixed factory author per role, never you; the `Factory-Role` trailer, and `Factory-Item` for an item's work. The output check runs on that commit, and only a passing commit is pushed, fast-forward only, to the manifest's branch. A change outside those paths is never committed and raises an alert. Builder and Define commit their own work, as their shells allow.
+- **When the session tries to stop:** check that the station's output file exists and is complete; if not, the session keeps going. For a role that commits nothing itself (Spec, Planner, Test, Reviewer, Security, Release, Ops and Coach, and the Integrator for its report), the hook then commits the role's output itself, from factory code: only the role's writable paths from the station manifest, as regular files, built with git plumbing on the branch as fetched, never from the session's working copy, git settings or hooks; a fixed factory author per role, never you; the `Factory-Role` trailer, and `Factory-Item` for an item's work. The output check runs on that commit, and only a passing commit is pushed, fast-forward only, to the manifest's branch. A change outside those paths is never committed and raises an alert. Builder and Define commit their own work, as their shells allow.
 
 **Factory tools via MCP:** one small factory server, declared in the repo's `.mcp.json`, adds three tools: `advance_item` (asks the dispatcher to move the issue to the next `state:` label; the dispatcher's code checks the gate and verifies the signed record behind any `owner:` label first), `log_event`, and `request_split` (hand an oversized task back to the Planner). Everything else goes through Claude Code's tools and the `gh` CLI.
 
@@ -215,8 +216,8 @@ Every station starts with a clean context and hands work on through files in the
 | 2 Specify (`/speckit-specify`, `/speckit-clarify`) | The issue, `brief.md` | `specs/<issue>-<slug>/spec.md` |
 | 3 Plan (`/speckit-plan`, `/speckit-tasks`, `/speckit-analyze`) | `spec.md` | `plan.md`, `tasks.md`: tasks, each with its file list and tests |
 | 4 Build (`/speckit-implement`) | One task from `tasks.md`, the files it lists | Commits on the item's branch |
-| 5 Verify | The pull request diff, `spec.md` | `reports/verify.md`, posted as a PR comment |
-| 6 Integrate | Verify report, CI status | Rebased branch, ready for your merge |
+| 5 Verify | The pull request diff, `spec.md` | `reports/verify.md` (the review and its blocking findings) and `reports/security.md`, posted as PR comments; CI, coverage and scan results come from the required check runs, never from a report |
+| 6 Integrate | Verify report, CI status | Rebased branch and `reports/integrate.md`, ready for your merge; a conflict sends the item back to Build |
 | 7 Release | Merged commits, specs | Release notes and rollback path under `.factory/releases/` on `claude/factory-log` |
 | 8 Operate and learn | Health summaries, event log, your review comments | New issues; incident notes and metrics report (`.factory/ops/`), lessons (`.factory/lessons/`) and event lines (`.factory/events/`) on `claude/factory-log` |
 
@@ -600,7 +601,7 @@ Every finished item teaches the factory something: the Coach agent turns lessons
 
 1. **Capture.** Each station logs its gate result, rework loops and your review comments to the event log.
 2. **Retrospect.** Weekly (to save usage), the Coach reads the log and writes lessons per role: what failed, what you corrected, what repeated.
-3. **Propose.** Project-specific lessons go to `.factory/lessons/` on `claude/factory-log`. Changes to role instructions, checklists, skills or lint rules are pull requests to the factory repo, because role files are guardrail files in every project; they reach projects through `factory upgrade`.
+3. **Propose.** Project-specific lessons go to `.factory/lessons/` on `claude/factory-log`. Changes to role instructions, checklists, skills or lint rules are written as proposal files on claude/factory-log, which factory code on your laptop opens as pull requests to the factory repo, because role files are guardrail files in every project; they reach projects through `factory upgrade`.
 4. **Evaluate.** The changed role is replayed on a small benchmark of past items (start with 5 to 10) and compared with the current version on first-pass gate rate.
 5. **Adopt or discard.** You approve or reject; role instructions are versioned, so a regression rolls back with one revert.
 
@@ -795,6 +796,12 @@ Eleven review rounds produced the frozen v1.0; v1.1 recorded the Spec Kit alignm
 | What moves an item to done? | A signed `deploy-healthy` record that names a signed `deployed` record whose commit contains the item's merge. factory deploy signs it after its own health check passes, so a successful deploy asks for your passphrase twice; health summaries are telemetry and move nothing | Signed approvals; Merging and verification; Release |
 | What happens when the health check fails? | The new release keeps running; factory deploy shows the rollback steps and asks whether to switch back to the previous release, default no, since the new release may already have changed its data. No `deploy-healthy` record is signed, so its items stay in `state:releasing` until a later deploy that contains them passes | Release |
 | How do roles without git commit their output? | The stop hook commits it for them, from factory code: only the role's paths from the station manifest, through git plumbing, pushed fast-forward only to the manifest's branch once the output check passes on that commit. Spec and Planner keep no shell, so a prompt injection there cannot run a command, and the trailers come from factory code rather than the agent. Builder and Define commit their own work | Tools and permissions |
+| Who writes the verify report's CI, coverage and scan results? | No agent. The dispatcher reads them from the required check runs at the branch head, the jobs listed in the pinned release's `required-checks.json`, as factory merge does; the report holds only the review and its blocking findings. The SCA and licence jobs land before the first end-to-end run (Gate A) | Quality gates; Merging and verification |
+| How does Security record its findings? | In `reports/security.md`, the only file it may write, committed by the stop hook; open blocking findings there hold the item in Verify. Its own scanner runs are triage; the CI scan jobs are the evidence | Tools and permissions |
+| What does the Integrator do with a conflict? | Nothing. It rebases only when the rebase applies cleanly and pushes with a lease to the item branch; on any conflict it aborts, lists the files in `reports/integrate.md`, and the item goes back to Build. It cannot edit, commit, approve or merge | Stations in detail; Tools and permissions |
+| Does Release publish tags or GitHub releases? | No. Release notes live on `claude/factory-log`, where factory deploy reads them, and releases are yours to sign; Release reads main's history with read-only git and has no `gh release` | Tools and permissions |
+| Who computes the weekly metrics? | Factory code, CI minutes included; Ops writes the commentary around the numbers | Metrics |
+| How do the Coach's role-file proposals reach the factory repo? | As files under `.factory/lessons/proposals/` on `claude/factory-log`; factory code on your laptop opens the pull request in the factory repository, and the Coach can only read pull requests | Self-improving, self-running agents; Tools and permissions |
 
 **Still open**
 
