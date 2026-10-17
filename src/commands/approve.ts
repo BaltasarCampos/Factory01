@@ -178,6 +178,7 @@ export function viewAt(project: Project, branch: string, commit: string): Branch
       spec: show('spec.md'),
       tasks: show('tasks.md'),
       verify: show('reports/verify.md'),
+      security: show('reports/security.md'),
       events: show('events.jsonl'),
     },
   };

@@ -50,7 +50,10 @@ export async function projectDispatch(
     secondCopy: secondCopy(ctx.env, project.home),
     auditHistory: (_config, history) =>
       Promise.resolve(auditMain(ctx.cwd, 'origin/main', history, ctx.env)),
-    gatherEvidence: gatherEvidence({ projectDir: ctx.cwd, gh: { env: ctx.env } }),
+    gatherEvidence: gatherEvidence({
+      ...{ projectDir: ctx.cwd, gh: { env: ctx.env } },
+      factory: factorySource(ctx.env),
+    }),
     launchers:
       Object.keys(ctx.launchers).length > 0 ? ctx.launchers : { local, cloud: new CloudLauncher() },
     logEvent: (issue, event) => {

@@ -291,6 +291,10 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       released: isReleased(released, history, issue.number),
     });
     const decision = nextTransition(status, evidence(), pause);
+    if (decision.alert !== undefined) {
+      const { text } = decision.alert;
+      await alertOnce({ ...decision.alert, text: `#${String(issue.number)}: ${text}` });
+    }
     if (decision.ok) {
       await addLabel(repo, issue.number, `state:${decision.to}`, options);
       for (const label of issue.labels)

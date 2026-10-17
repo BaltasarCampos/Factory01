@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
@@ -69,10 +70,12 @@ interface Setup {
   tier?: Tier;
   /** Push an item branch with these files before the pass (a fixture, not the dispatcher). */
   branch?: Record<string, string>;
+  /** The release pin in main's config. */
+  pin?: string;
 }
 
 function setup(options: Setup = {}) {
-  const config = `factory_release: ${PIN}\nrepo: ${REPO}\ninbox_issue: ${String(INBOX)}\n`;
+  const config = `factory_release: ${options.pin ?? PIN}\nrepo: ${REPO}\ninbox_issue: ${String(INBOX)}\n`;
   const project = makeRepo({
     files: { '.factory/config': `${config}agents: local\n` },
     signWith: owner,
@@ -516,7 +519,12 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
   const gather = (
     t: ReturnType<typeof setup>,
     state: State,
-    over: { merged?: boolean; branch?: string | null; tier?: Tier | null } = {},
+    over: {
+      merged?: boolean;
+      branch?: string | null;
+      tier?: Tier | null;
+      factory?: { path: string; sha: string };
+    } = {},
   ) => {
     const issue = { number: ISSUE, title: 'Add login', author: 'owner', body: '', labels: [] };
     const branch = over.branch === undefined ? BRANCH : over.branch;
@@ -532,8 +540,11 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     // The merge commit, with its parents, as the signed-history walk lists it.
     const parents = t.project.git(['rev-list', '--parents', '-n', '1', main]).split(' ').slice(1);
     const commits = over.merged ? [{ commit: main, parents }] : [];
-    const config = configOnMain(t.project.path);
-    return gatherEvidence({ projectDir: t.project.path })(item, config, {
+    const onMain = configOnMain(t.project.path);
+    const pin = { ...onMain.factory_release, ...(over.factory ? { sha: over.factory.sha } : {}) };
+    const config = { ...onMain, factory_release: pin };
+    const factory = over.factory === undefined ? {} : { factory: over.factory.path };
+    return gatherEvidence({ projectDir: t.project.path, ...factory })(item, config, {
       lastVerified: undefined,
       merges,
       commits,
@@ -648,6 +659,188 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
 
     expect(e).toMatchObject({ verifyReport: false, findingsResolved: false, needsSession: true });
     expect(e.failure).toMatchObject({ station: 4 });
+  });
+});
+
+describe('Verify results from the required check runs (T168)', { timeout: 60_000 }, () => {
+  const LIST = readFileSync(
+    new URL('../../factory/profiles/typescript/ci/required-checks.json', import.meta.url),
+    'utf8',
+  );
+  /** A factory clone whose one commit, the pin, holds `list` as the release's required checks. */
+  const factoryClone = (list: string | null = LIST) => {
+    const path = 'factory/profiles/typescript/ci/required-checks.json';
+    const repo = makeRepo({
+      files: list === null ? { 'README.md': 'f\n' } : { [path]: list },
+    });
+    return { path: repo.path, sha: repo.revParse('HEAD') };
+  };
+  const CI_YML = '.github/workflows/ci.yml';
+  const SECURITY_YML = '.github/workflows/security.yml';
+  type Ran = [workflow: string, job: string, conclusion: string | null];
+  const CI_JOBS = ['build-test', 'coverage', 'ac-map', 'red-green', 'weakened', 'size'];
+  /** Every job the release requires of an item that changes no events.jsonl, green. */
+  const ITEM_JOBS: Ran[] = [
+    ...CI_JOBS.map((job): Ran => [CI_YML, job, 'success']),
+    ...['semgrep', 'gitleaks'].map((job): Ran => [SECURITY_YML, job, 'success']),
+  ];
+  const withJob = (job: string, conclusion: string | null): Ran[] =>
+    ITEM_JOBS.map(([w, j, c]) => [w, j, j === job ? conclusion : c]);
+  let nextRun = 700;
+  /** GitHub Actions at `sha`: one pull_request run per workflow file, with the jobs that ran. */
+  const actionsAt = (sha: string, ran: Ran[]) => {
+    editState((repo) => {
+      const runs = [...new Set(ran.map(([w]) => w))].map((path) => ({
+        ...{ id: nextRun++, path, head_sha: sha, head_branch: BRANCH, event: 'pull_request' },
+        ...{ status: 'completed', conclusion: 'success' },
+      }));
+      repo.api[`repos/${REPO}/actions/runs?head_sha=${sha}&event=pull_request&per_page=100`] = {
+        total_count: runs.length,
+        workflow_runs: runs,
+      };
+      for (const run of runs) {
+        const jobs = ran
+          .filter(([w]) => w === run.path)
+          .map(([, name, conclusion], i) => ({
+            ...{ id: run.id * 100 + i, name, run_attempt: 1, conclusion },
+            status: conclusion === null ? 'in_progress' : 'completed',
+          }));
+        repo.api[`repos/${REPO}/actions/runs/${String(run.id)}/jobs?filter=all&per_page=100`] = {
+          total_count: jobs.length,
+          jobs,
+        };
+      }
+    });
+  };
+  const openPr = () => {
+    editState((repo) => {
+      repo.prs.push({
+        ...{ number: 9, title: '#2', body: '', author: 'owner', headRefName: BRANCH },
+        ...{ baseRefName: 'main', headRefOid: '', isDraft: true, state: 'OPEN' },
+        ...{ comments: [], createdAt: BEFORE },
+      });
+    });
+  };
+  const tipOf = (t: ReturnType<typeof setup>) => t.project.git(['rev-parse', `origin/${BRANCH}`]);
+  const SECURITY = '## Scans\n\n- semgrep: none\n\n## Findings\n\n- none\n';
+  /** Evidence at Verify, read the way the dispatcher reads it, with `factory` as the release. */
+  const verifying = (branch: Record<string, string>, factory = factoryClone()) => {
+    const t = setup({ branch: { ...FEATURE_JSON, ...branch } });
+    openPr();
+    return { t, factory, tip: tipOf(t) };
+  };
+  const gatherAt = (
+    t: ReturnType<typeof setup>,
+    state: 'verifying' | 'building',
+    factory?: { path: string; sha: string },
+  ) => {
+    const issue = { number: ISSUE, title: 'Add login', author: 'owner', body: '', labels: [] };
+    const onMain = configOnMain(t.project.path);
+    const pin = { ...onMain.factory_release, ...(factory ? { sha: factory.sha } : {}) };
+    const ctx = { projectDir: t.project.path, ...(factory ? { factory: factory.path } : {}) };
+    return gatherEvidence(ctx)(
+      { issue, state, branch: BRANCH, tier: 2 },
+      { ...onMain, factory_release: pin },
+      { lastVerified: undefined, merges: [], commits: [] },
+    );
+  };
+
+  it('AC-013: at Verify, reads the pinned release’s item jobs at the head of the item’s PR, from workflow runs', async () => {
+    const { t, factory, tip } = verifying({ 'src/login.ts': 'export {};\n' });
+    actionsAt(tip, withJob('coverage', 'failure'));
+
+    const e = await gatherAt(t, 'verifying', factory);
+
+    const state = (job: string) => (job === 'coverage' ? 'failure' : 'success');
+    expect(e.requiredChecks).toEqual({
+      head: tip,
+      jobs: ITEM_JOBS.map(([, job]) => ({ job, state: state(job) })),
+    });
+  });
+
+  it('AC-013: a PR changing events.jsonl also needs append-only, and a job that never ran is missing', async () => {
+    const { t, factory, tip } = verifying({ [`${FEATURE}/events.jsonl`]: '{}\n' });
+    actionsAt(tip, withJob('gitleaks', null));
+
+    const jobs = (await gatherAt(t, 'verifying', factory)).requiredChecks?.jobs ?? [];
+
+    expect(jobs).toContainEqual({ job: 'gitleaks', state: 'pending' });
+    expect(jobs).toContainEqual({ job: 'append-only', state: 'missing' });
+  });
+
+  it('AC-013: reads no checks before Verify, or without a PR on the head', async () => {
+    const { t, factory, tip } = verifying({});
+    actionsAt(tip, ITEM_JOBS);
+    expect((await gatherAt(t, 'building', factory)).requiredChecks).toBeUndefined();
+
+    const noPr = setup({ branch: FEATURE_JSON });
+    expect((await gatherAt(noPr, 'verifying', factory)).requiredChecks).toBeUndefined();
+  });
+
+  it('AC-013: a pin without required-checks.json, or no factory clone, holds the item with the reason', async () => {
+    const { t, factory, tip } = verifying({}, factoryClone(null));
+    actionsAt(tip, ITEM_JOBS);
+
+    expect((await gatherAt(t, 'verifying', factory)).requiredChecks).toEqual({
+      head: tip,
+      jobs: [],
+      unreadable:
+        'the release pinned on main has no required-checks.json; the item waits in Verify',
+    });
+    expect((await gatherAt(t, 'verifying')).requiredChecks?.unreadable).toMatch(/no factory clone/);
+  });
+
+  it('AC-013: reads reports/security.md: complete with no finding open, or not', async () => {
+    const report = `${FEATURE}/reports/security.md`;
+    const clean = verifying({ [report]: SECURITY });
+    expect((await gatherAt(clean.t, 'verifying')).securityReport).toBe(true);
+    const open = SECURITY.replace(
+      '- none',
+      '- [ ] blocking: eval at src/a.ts:1: input reaches eval',
+    );
+    const failing = verifying({ [report]: open });
+    expect((await gatherAt(failing.t, 'verifying')).securityReport).toBe(false);
+    const none = verifying({});
+    expect(await gatherAt(none.t, 'verifying')).not.toHaveProperty('securityReport');
+  });
+
+  it('AC-013: a red required job keeps the item in Verify, with one info alert per red head', async () => {
+    const factory = factoryClone();
+    const t = setup({
+      pin: `v1.0.0@${factory.sha}`,
+      states: ['state:verifying'],
+      branch: {
+        ...FEATURE_JSON,
+        [`${FEATURE}/reports/verify.md`]: '| Check | Result |\n|---|---|\n| Review | pass |\n',
+        [`${FEATURE}/reports/security.md`]: SECURITY,
+      },
+    });
+    t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path, factory: factory.path });
+    openPr();
+    const red = (tip: string) =>
+      `#2: required checks red at ${tip.slice(0, 12)}: semgrep (failure)`;
+    const alerts = () =>
+      t.inbox().flatMap((c) => {
+        const a = parseAlert({ ...c, id: String(c.id) });
+        return a?.kind === 'checks-red' ? [`${a.urgency} ${a.text}`] : [];
+      });
+    const first = tipOf(t);
+    actionsAt(first, withJob('semgrep', 'failure'));
+
+    expect((await dispatchOnce(t.ctx)).moves).toEqual([]);
+    expect((await dispatchOnce(t.ctx)).moves).toEqual([]);
+    expect(alerts()).toEqual([`info ${red(first)}`]);
+
+    t.project.checkout(BRANCH);
+    t.project.commit({ 'src/login.ts': 'export {};\n' }, 'fix');
+    t.project.push(BRANCH);
+    t.project.checkout('main');
+    const second = tipOf(t);
+    actionsAt(second, withJob('semgrep', 'failure'));
+    await dispatchOnce(t.ctx);
+
+    expect(alerts()).toEqual([`info ${red(first)}`, `info ${red(second)}`]);
+    expect(t.labels()).toContain('state:verifying');
   });
 });
 

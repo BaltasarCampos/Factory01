@@ -4,27 +4,36 @@
 // tree or from events: `ci / red-green` counts only as a check run on the head of the item's
 // pull request, so forged `gate_result` lines move nothing (AC-012).
 //
+// At Verify the required jobs come from the pinned release's `required-checks.json`, read from the
+// factory clone as `factory merge` reads it, each from GitHub Actions workflow runs at the head of
+// the item's pull request (T168); no report decides CI, coverage or scans.
+//
 // Release evidence, the signed deploy records on the inbox issue, is read once per pass by the
 // dispatcher (released.ts, T160). Not yet gathered: open questions, and what Release and Ops
 // would work on, so Release, Ops and blocked items start no session.
+import { EnvironmentError, RefusedError } from '../cli/env.js';
 import { GhError, gh, repoArg, type GhOptions } from '../github/gh.js';
 import { listPrs } from '../github/prs.js';
+import { ciAt, requiredChecksAt, requiredJobs } from '../merge/ci.js';
 import type { MainMerges } from '../git/merges.js';
 import type { ProjectConfig, State } from '../model/types.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
 import { checkPlan } from '../stations/checks/plan.js';
+import { checkSecurityReport } from '../stations/checks/security.js';
 import { checkSpec } from '../stations/checks/spec.js';
 import { checkVerifyReport } from '../stations/checks/verify.js';
 import { conflictFailure } from '../stations/edges.js';
 import { featureOf, fetchBranch, git, type BranchContext } from './branch.js';
 import type { Candidate, StationEvidence } from './dispatch.js';
 import { pendingManifest } from './manifest.js';
-import { STATION_OF } from './transitions.js';
+import { STATION_OF, type Evidence } from './transitions.js';
 
 export interface EvidenceContext {
   projectDir: string;
   mainRef?: string;
   gh?: GhOptions;
+  /** The factory clone holding the pinned release, for its `required-checks.json`. */
+  factory?: string;
 }
 
 /**
@@ -51,6 +60,40 @@ async function redGreen(repo: string, sha: string, options: GhOptions) {
       (r.app as { slug?: unknown } | null | undefined)?.slug === 'github-actions',
   );
   return run === undefined ? undefined : { head: sha, green: run.conclusion === 'success' };
+}
+
+/**
+ * The required jobs at `tip`, the head of the item's pull request: the pinned release's list for
+ * the `item` kind and the files the pull request changes since its merge base with main. Anything
+ * unreadable holds the item in Verify, with the reason.
+ */
+async function requiredChecks(
+  ctx: EvidenceContext,
+  at: BranchContext,
+  config: ProjectConfig,
+  tip: string,
+): Promise<NonNullable<Evidence['requiredChecks']>> {
+  const waits = 'the item waits in Verify';
+  try {
+    if (ctx.factory === undefined)
+      throw new RefusedError(`no factory clone to read required-checks.json from; ${waits}`);
+    const list = requiredChecksAt(ctx.factory, config.factory_release.sha, config.profile, waits);
+    const range = `${ctx.mainRef ?? 'origin/main'}...${tip}`;
+    const names = git(at, ['diff', '--name-only', '-z', '--no-renames', '--no-ext-diff', range]);
+    const jobs = requiredJobs(
+      list,
+      'item',
+      names.split('\0').filter((p) => p !== ''),
+    );
+    if (jobs.length === 0)
+      throw new RefusedError(`the release pinned on main requires no job for items; ${waits}`);
+    const results = await ciAt(config.repo, tip, jobs, ctx.gh ?? {});
+    return { head: tip, jobs: results.map(({ job, state }) => ({ job, state })) };
+  } catch (err) {
+    if (err instanceof RefusedError || err instanceof GhError || err instanceof EnvironmentError)
+      return { head: tip, jobs: [], unreadable: err.message };
+    throw err;
+  }
 }
 
 export function gatherEvidence(ctx: EvidenceContext) {
@@ -88,6 +131,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const plan = read('plan.md');
     const tasks = read('tasks.md');
     const verify = read('reports/verify.md');
+    const security = read('reports/security.md');
     const integrate = read('reports/integrate.md');
     const specComplete = spec !== undefined && checkSpec(spec).complete;
     const sizeLimit = config.size_limit_lines;
@@ -114,6 +158,10 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const pending =
       tip !== undefined && pendingManifest(at, tip)?.station === STATION_OF[item.state];
     const rg = checked ? await redGreen(config.repo, tip, options) : undefined;
+    const ci =
+      checked && item.state === 'verifying'
+        ? await requiredChecks(ctx, at, config, tip)
+        : undefined;
     return {
       ownerMerge,
       specComplete,
@@ -125,6 +173,8 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(rg === undefined ? {} : { redGreen: rg }),
       ...(report === undefined ? {} : { verifyReport: report.checksPass }),
       ...(report === undefined ? {} : { findingsResolved: report.findingsResolved }),
+      ...(ci === undefined ? {} : { requiredChecks: ci }),
+      ...(security === undefined ? {} : { securityReport: checkSecurityReport(security).complete }),
       ...(failure === undefined ? {} : { failure }),
       needsSession: (work[item.state] ?? false) && !pending,
     };

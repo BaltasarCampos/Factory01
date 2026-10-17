@@ -24,8 +24,10 @@ const OUTPUTS = [
   'draftPr',
   'planComplete',
   'tasksDone',
+  'checksGreen',
   'verifyReport',
   'findingsResolved',
+  'securityReport',
 ] as const;
 type Output = (typeof OUTPUTS)[number];
 const FORWARD: readonly State[] = STATES.slice(0, 10);
@@ -95,6 +97,17 @@ function verdict(w: World, gate: OwnerGate): Verdict {
 const status = (w: World): ItemStatus =>
   w.blockedFrom === undefined ? { state: w.state } : { state: w.state, blockedFrom: w.blockedFrom };
 
+/** The required jobs at the head, green or red, and a clean security report or none (T168). */
+const outputs = (w: World) => {
+  const { checksGreen, securityReport, ...rest } = w.outputs;
+  const state = checksGreen ? 'success' : 'failure';
+  return {
+    ...rest,
+    requiredChecks: { head: HEAD, jobs: [{ job: 'build-test', state }] },
+    ...(securityReport ? { securityReport } : {}),
+  };
+};
+
 const evidence = (w: World): Evidence => ({
   rotationPending: w.rotationPending,
   historySigned: w.historySigned,
@@ -105,7 +118,7 @@ const evidence = (w: World): Evidence => ({
   },
   questionOpen: w.questionOpen,
   ...(w.failure === undefined ? {} : { failure: { station: w.failure, reason: 'report' } }),
-  ...w.outputs,
+  ...outputs(w),
   branchHead: HEAD,
   ...(w.redGreen === 'none'
     ? {}
@@ -374,8 +387,10 @@ describe('transition table against the TLA+ invariants (AC-069)', () => {
       out('tasksDone'),
       { by: 'agent', act: 'red-green', value: 'green' },
       step,
+      out('checksGreen'),
       out('verifyReport'),
       out('findingsResolved'),
+      out('securityReport'),
       step,
       { by: 'owner', act: 'merge' },
       step,

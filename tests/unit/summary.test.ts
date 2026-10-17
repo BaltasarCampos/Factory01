@@ -46,7 +46,8 @@ const TASKS = `# Tasks: Add login
 - [ ] T004 [US1] Sign-in handler · Files: src/auth/login.ts
 `;
 
-const VERIFY = `| Check | Result |\n|---|---|\n${['CI', 'Coverage', 'SAST', 'SCA', 'Secrets', 'Licences', 'Review'].map((c) => `| ${c} | pass |`).join('\n')}\n`;
+const VERIFY = '| Check | Result |\n|---|---|\n| Review | pass |\n';
+const SECURITY = '## Scans\n\n- semgrep: none\n- gitleaks: none\n\n## Findings\n\n- none\n';
 
 const usage = (sessions: number, share: number) =>
   JSON.stringify({ kind: 'usage', item: 42, usage: { sessions, est_share: share } });
@@ -359,6 +360,17 @@ describe('item trace (AC-017)', () => {
     expect(t.links.find((l) => l.step === 'release')?.refs).toEqual(['v1.2.0']);
   });
 
+  it('AC-017: the review step names Security’s report too, and never misses it (T168)', () => {
+    const review = (files: TraceInput['files']) =>
+      trace({ ...ITEM_TRACE, files }).links.find((l) => l.step === 'review')?.refs;
+    expect(review({ ...ITEM_TRACE.files, security: SECURITY })).toEqual([
+      'specs/42-add-login/reports/verify.md',
+      'specs/42-add-login/reports/security.md',
+    ]);
+    expect(review(ITEM_TRACE.files)).toEqual(['specs/42-add-login/reports/verify.md']);
+    expect(trace(ITEM_TRACE).gaps).toEqual([]);
+  });
+
   it('AC-017: a deployed change is followed back from its release, a commit or a test', () => {
     const t = trace(ITEM_TRACE);
     const back = (ref: string) => traceBack(t, ref).map((l) => l.step);
@@ -577,13 +589,40 @@ describe('merge summary of a work item (T068, AC-094)', () => {
   });
 
   it('quotes a failing verify report, and lists its open findings under Known risks', () => {
-    const report = `${VERIFY.replace('| SCA | pass |', '| SCA | fail |')}\n- [ ] blocking: SQL built by concatenation\n`;
+    const report = `${VERIFY.replace('| Review | pass |', '| Review | fail |')}\n- [ ] blocking: SQL built by concatenation\n`;
     const t = text(merge({}, { verify: report }));
 
-    expect(part(t, PART_TITLES.results)).toContain('> reports/verify.md: SCA: fail');
+    expect(part(t, PART_TITLES.results)).toContain('> reports/verify.md: Review: fail');
     const risks = part(t, PART_TITLES.risks);
     expect(risks).toContain('Open findings:');
     expect(risks).toContain('> SQL built by concatenation');
+  });
+
+  it('quotes Security’s scans and findings next to the review, and its open findings as risks (T168)', () => {
+    const open = SECURITY.replace(
+      '- none',
+      '- [ ] blocking: eval at src/a.ts:1: input\u202ereaches eval',
+    );
+    const t = text(merge({}, { security: open }));
+
+    const results = part(t, PART_TITLES.results);
+    const at = results.indexOf(
+      'quoted from specs/42-add-login/reports/security.md at 5e6f7a8b9c0d:',
+    );
+    expect(results.slice(at + 1, at + 4)).toEqual([
+      '> - semgrep: none',
+      '> - gitleaks: none',
+      '> - [ ] blocking: eval at src/a.ts:1: input\\u{202e}reaches eval',
+    ]);
+    const risks = part(t, PART_TITLES.risks);
+    expect(risks).toContain('quoted from specs/42-add-login/reports/security.md at 5e6f7a8b9c0d:');
+    expect(risks).toContain('> eval at src/a.ts:1: input\\u{202e}reaches eval');
+    expect(part(text(merge()), PART_TITLES.results)).toContain(
+      'reports/security.md: none on the branch',
+    );
+    expect(part(text(merge()), PART_TITLES.risks)).toContain(
+      'Open findings: none in reports/verify.md or reports/security.md',
+    );
   });
 
   it('refuses when a required part is missing: no verify report (AC-094)', () => {

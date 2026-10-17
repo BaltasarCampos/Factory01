@@ -12,6 +12,7 @@ import { STATIONS, type Station } from '../model/types.js';
 import { defineStopCheck } from '../stations/checks/define.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
 import { planStopCheck } from '../stations/checks/plan.js';
+import { securityStopCheck } from '../stations/checks/security.js';
 import { specStopCheck } from '../stations/checks/spec.js';
 import { verifyStopCheck } from '../stations/checks/verify.js';
 import {
@@ -47,13 +48,17 @@ async function intakeStopCheck(session: Session, ctx: HookContext): Promise<Chec
   return checkIntakeIssue(config.repo, session.item, 1);
 }
 
-/** Output checkers by station; a station without one fails closed. */
+/**
+ * Output checkers by station; a station without one fails closed. Verify has two outputs, so the
+ * session's role picks Security's report or the review (T168).
+ */
 export const CHECKERS: Partial<Record<Station, StationChecker>> = {
   0: (_session, ctx) => defineStopCheck(ctx.cwd),
   1: intakeStopCheck,
   2: (_session, ctx) => specStopCheck(ctx.cwd),
   3: (_session, ctx) => planStopCheck(ctx.cwd),
-  5: (_session, ctx) => verifyStopCheck(ctx.cwd),
+  5: (session, ctx) =>
+    session.role === 'security' ? securityStopCheck(ctx.cwd) : verifyStopCheck(ctx.cwd),
 };
 
 export async function runStop(

@@ -1,27 +1,19 @@
 // Verify output check (AC-013; data-model.md § State machine, verifying → integrating).
-// `specs/<feature>/reports/verify.md` has one table row per check, `| <Check> | <result> | … |`,
-// for CI, Coverage, SAST, SCA, Secrets, Licences and Review; only `pass` passes. Blocking review
-// findings are task items, `- [ ] blocking: …` until resolved and `- [x] …` after; they may also
-// sit under a `## Blocking findings` heading. Any failing line keeps the item in `verifying`.
+// `specs/<feature>/reports/verify.md` holds the review: one table row `| Review | <result> | … |`,
+// where only `pass` passes. CI, coverage and scan results come from the required check runs and
+// Security's findings from `reports/security.md` (T168), so any other row is ignored. Blocking
+// review findings are task items, `- [ ] blocking: …` until resolved and `- [x] …` after; they may
+// also sit under a `## Blocking findings` heading. Any failing line keeps the item in `verifying`.
 import type { CheckResult } from '../../hooks/stop.js';
 import { featureFiles } from './feature.js';
 
-export const VERIFY_CHECKS = [
-  'CI',
-  'Coverage',
-  'SAST',
-  'SCA',
-  'Secrets',
-  'Licences',
-  'Review',
-] as const;
+export const VERIFY_CHECKS = ['Review'] as const;
 
 const REPORT = 'reports/verify.md';
-const ALIASES: Record<string, string> = { licenses: 'licences' };
 
 export interface VerifyResult extends CheckResult {
   missing: string[];
-  /** Every check is listed once and passes. */
+  /** The review is listed once and passes. */
   checksPass: boolean;
   /** No blocking finding is open. */
   findingsResolved: boolean;
@@ -37,8 +29,7 @@ export function checkVerifyReport(text: string): VerifyResult {
     if (/^#+\s/.test(line)) blockingSection = /^#+\s+Blocking findings\b/i.test(line);
     const row = /^\|\s*([^|]+?)\s*\|\s*([^|]*?)\s*\|/.exec(line);
     if (row) {
-      const name = (row[1] ?? '').toLowerCase();
-      const key = ALIASES[name] ?? name;
+      const key = (row[1] ?? '').toLowerCase();
       results.set(key, [...(results.get(key) ?? []), (row[2] ?? '').toLowerCase()]);
     }
     const item = /^\s*- \[ \]\s+(.*)$/.exec(line)?.[1];

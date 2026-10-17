@@ -11,6 +11,7 @@ import type { ApprovalGate, Tier } from '../model/types.js';
 import { parseTasks } from '../stations/checks/plan.js';
 import { namesId } from '../ci/ac-map.js';
 import { checkSpec, meaningful, section } from '../stations/checks/spec.js';
+import { checkSecurityReport } from '../stations/checks/security.js';
 import { checkVerifyReport } from '../stations/checks/verify.js';
 
 export type SummaryPart = 'changed' | 'mapping' | 'results' | 'usage' | 'risks';
@@ -97,6 +98,7 @@ export interface SummaryFacts {
         spec?: string | undefined;
         tasks?: string | undefined;
         verify?: string | undefined;
+        security?: string | undefined;
         events?: string | undefined;
       }
     | undefined;
@@ -251,13 +253,32 @@ const checkName = (f: SummaryFacts) => (f.waives ?? '').slice('gate:'.length);
 
 const noMerge = { missing: "the merge checks' results were not passed in" };
 
-/** Open findings from the verify report, and the waivers in force at the checked head. */
+/** Security's report as the merge summary quotes it: its scans and findings, and its gaps. */
+function securityLines(f: SummaryFacts): string[] {
+  const report = f.files?.security;
+  if (report === undefined) return ['reports/security.md: none on the branch'];
+  const lines = report.split('\n');
+  const shown = ['Scans', 'Findings'].flatMap((name) =>
+    (section(lines, name) ?? []).filter(meaningful),
+  );
+  const r = checkSecurityReport(report);
+  const gaps = r.missing.slice(0, r.missing.length - r.open.length);
+  return quoted(source(f, 'reports/security.md'), [...shown, ...gaps].map(visible));
+}
+
+/** Open findings from both Verify reports, and the waivers in force at the checked head. */
 function mergeRisks(f: SummaryFacts): string[] {
-  const open = f.files?.verify === undefined ? [] : checkVerifyReport(f.files.verify).open;
+  const review = f.files?.verify === undefined ? [] : checkVerifyReport(f.files.verify).open;
+  const security =
+    f.files?.security === undefined ? [] : checkSecurityReport(f.files.security).open;
   return [
-    ...(open.length === 0
-      ? ['Open findings: none in reports/verify.md']
-      : ['Open findings:', ...quoted(source(f, 'reports/verify.md'), open.map(visible))]),
+    ...(review.length + security.length === 0
+      ? ['Open findings: none in reports/verify.md or reports/security.md']
+      : [
+          'Open findings:',
+          ...quoted(source(f, 'reports/verify.md'), review.map(visible)),
+          ...quoted(source(f, 'reports/security.md'), security.map(visible)),
+        ]),
     `Waivers in force: ${(f.merge?.waivers ?? []).map(visible).join(', ') || 'none'}`,
   ];
 }
@@ -508,10 +529,14 @@ function results(f: SummaryFacts, gate: SummaryGate): Part {
   const report = f.files?.verify;
   if (report === undefined) return { missing: `no reports/verify.md on ${f.branch ?? ''}` };
   const r = checkVerifyReport(report);
-  const lines = r.complete ? ['reports/verify.md: all checks pass'] : r.missing;
+  const lines = r.complete ? ['reports/verify.md: the review passes'] : r.missing;
   if (gate !== 'merge') return quoted(source(f, 'reports/verify.md'), lines);
   if (f.merge === undefined) return noMerge;
-  return [...mergeResults(f.merge), ...quoted(source(f, 'reports/verify.md'), lines.map(visible))];
+  return [
+    ...mergeResults(f.merge),
+    ...quoted(source(f, 'reports/verify.md'), lines.map(visible)),
+    ...securityLines(f),
+  ];
 }
 
 function usage(f: SummaryFacts): Part {
