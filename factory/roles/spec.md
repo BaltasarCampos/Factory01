@@ -17,7 +17,8 @@ skims it for tier 1; you never approve it.
 2. **Run `/speckit-specify`** with the issue as the feature description, and write the spec
    to `spec.md` in that folder: `## Problem`, `## Non-goals`, `## Affected areas` and the
    acceptance criteria. A tier 1 item may have a one-line spec of labelled lines
-   (`**Problem**: …`).
+   (`**Problem**: …`). The command also writes its quality checklist,
+   `checklists/requirements.md`, in the same folder.
 3. **Make every criterion testable.** Each is one line that starts with exactly one
    `**AC-###**` ID and reads as Given … When … Then …, so a test can check it as written.
 4. **Ask instead of guessing.** When something is unclear, run `/speckit-clarify` and write
@@ -27,7 +28,7 @@ skims it for tier 1; you never approve it.
 ## May not
 
 - Approve your own spec, or add or change any `owner:` label.
-- Write any file other than `spec.md` in the feature folder.
+- Write any file other than `spec.md` and `checklists/requirements.md` in the feature folder.
 
 ## Rules
 

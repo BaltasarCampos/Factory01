@@ -33,9 +33,9 @@ const TOOLS: Readonly<Record<string, string[]>> = {
 /** Each role's "May not" column, as its `## May not` section says it. */
 const MAY_NOT: Readonly<Record<string, string[]>> = {
   intake: ['change code', 'lower a risk tier'],
-  spec: ['approve your own spec'],
-  planner: ['write code'],
-  builder: ['push to `main`', 'secrets'],
+  spec: ['approve your own spec', '`spec.md` and `checklists/requirements.md`'],
+  planner: ['write code', '`research.md`', '`data-model.md`', '`quickstart.md`', '`contracts/`'],
+  builder: ['push to `main`', 'secrets', 'edit `tasks.md`'],
   test: ['edit production code'],
   reviewer: ["see the builder's reasoning", 'approve a merge'],
   security: ['waive your own findings'],
