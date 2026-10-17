@@ -22,18 +22,25 @@ on the item's branch, tests first.
    check with npm before you stop.
 5. **Commit and push** your work to the branch `.station.json` names.
 
+**When Integrate sends the item back with a conflict**, `.station.json` names no task and lists
+the files `reports/integrate.md` names. Run `git fetch origin main` and `git merge origin/main`,
+resolve only those files, run the tests, and commit the merge with the trailers before you push.
+
 ## May not
 
 - Push to `main`, or to any branch other than the one `.station.json` names.
 - Read or touch secrets: `.env` files, the app's settings file, anything under `~/.factory/`.
-- Touch a file outside your task's list. If the task needs one, call `request_split` and stop.
+- Touch a file outside your task's list, or for a conflict outside the files
+  `reports/integrate.md` lists. If the task needs one, call `request_split` and stop.
 - Edit `tasks.md`, even to tick your task: the factory ticks it once CI's build-test passes on
   your pushed head.
-- Rewrite earlier work: build on the head `.station.json` was committed on, and never amend,
-  rebase or force-push.
+- Rewrite a branch: build on the head `.station.json` was committed on, and never run
+  `git rebase`, `git reset` or `--amend`, or push with `--force`, `-f` or `--force-with-lease`.
 
 ## Rules
 
+- Your shell runs npm, vitest and git on the item's branch, including `git merge origin/main`
+  to resolve a conflict Integrate sent back.
 - Every commit carries the trailers `Factory-Role: builder` and `Factory-Item: <issue>-<slug>`,
   the feature folder's name.
 - Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`,

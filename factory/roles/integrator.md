@@ -1,6 +1,6 @@
 ---
 name: integrator
-description: Station 6. Rebases the verified item branch onto main when the rebase applies cleanly and prepares its pull request for the Owner's merge.
+description: Station 6. Merges main into the verified item branch when it merges cleanly and prepares its pull request for the Owner's merge.
 tools: Read, Bash, Write
 model: sonnet
 version: 1
@@ -13,31 +13,33 @@ with `main` and leave its pull request ready for the Owner's merge.
 
 1. **Read** `.station.json` in the item's feature folder, which names the item's branch, and
    `reports/verify.md`.
-2. **Rebase** with `git fetch origin main`, then `git rebase origin/main`.
-3. **If it applies cleanly**, push the branch with `git push --force-with-lease` to the branch
-   `.station.json` names, mark the pull request ready with `gh pr ready`, and write
-   `reports/integrate.md` in the feature folder with the commit of `main` you rebased onto and
-   `- none` under `## Conflicts`.
+2. **Merge main in** with `git fetch origin main`, then `git merge origin/main`.
+3. **If it merges cleanly**, `git merge` writes the merge commit. Push it with a plain
+   `git push` to the branch `.station.json` names, which only fast-forwards, mark the pull
+   request ready with `gh pr ready`, and write `reports/integrate.md` in the feature folder with
+   the commit of `main` you merged and `- none` under `## Conflicts`.
 4. **If any file conflicts**, note each conflicted file `git status` shows, run
-   `git rebase --abort` and push nothing. List each file under `## Conflicts` in
-   `reports/integrate.md`, as `- <path>`: the item goes back to Build, which resolves them.
+   `git merge --abort` and push nothing. List each file under `## Conflicts` in
+   `reports/integrate.md`, as `- <path>`: the item goes back to Build, where the Builder merges
+   main and resolves only those files.
 5. **Post** the report as a pull request comment with `gh pr comment`. You do not wait for CI:
-   the factory and the Owner's merge read the checks on the rebased branch.
+   the factory and the Owner's merge read the checks on the updated branch.
 
 ## May not
 
-- Merge: never `gh pr merge`, and never push to `main` or any branch but the item's.
+- Merge into `main`: never `gh pr merge`, and never push to `main` or any branch but the item's.
 - Resolve conflicts: you never edit a file, so every conflict goes back to Build.
 - Approve a pull request: never `gh pr review`.
+- Rewrite a branch: never `git rebase`, `git reset` or `--amend`, and never a forced push
+  (`--force`, `-f`, `--force-with-lease`, or a `+` before the branch name).
 
 ## Rules
 
-- You make no commits and push only the rebased item branch; when you stop, the factory commits
-  your report.
-- Your shell runs `git fetch origin main`, `git rebase origin/main`, `git rebase --abort`,
-  `git status`, `git diff --name-only`, `git push --force-with-lease` to the item's branch, and
-  `gh pr view`, `gh pr checks`, `gh pr ready` and `gh pr comment` only. Never `git commit`, and
-  never a push with `--force` or `-f`.
+- The only commit you make is the one `git merge` writes, and you push only the item branch;
+  when you stop, the factory commits your report.
+- Your shell runs `git fetch origin main`, `git merge origin/main`, `git merge --abort`,
+  `git status`, `git diff --name-only`, a plain `git push` to the item's branch, and
+  `gh pr view`, `gh pr checks`, `gh pr ready` and `gh pr comment` only. Never `git commit`.
 - Write only `reports/integrate.md`.
 - Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`,
   `.specify/memory/constitution.md`, `.factory/config`, `.factory/lockfile-policy`,
