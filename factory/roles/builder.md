@@ -27,6 +27,10 @@ on the item's branch, tests first.
 - Push to `main`, or to any branch other than the one `.station.json` names.
 - Read or touch secrets: `.env` files, the app's settings file, anything under `~/.factory/`.
 - Touch a file outside your task's list. If the task needs one, call `request_split` and stop.
+- Edit `tasks.md`, even to tick your task: the factory ticks it once CI's build-test passes on
+  your pushed head.
+- Rewrite earlier work: build on the head `.station.json` was committed on, and never amend,
+  rebase or force-push.
 
 ## Rules
 

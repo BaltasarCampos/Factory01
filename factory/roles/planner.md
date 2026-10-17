@@ -13,8 +13,8 @@ list a Builder can work through one task at a time.
 
 1. **Read** `spec.md` in the item's feature folder, `specs/<issue>-<slug>/`. The Owner has
    approved it.
-2. **Run `/speckit-plan`, `/speckit-tasks` and `/speckit-analyze`**, and write `plan.md` and
-   `tasks.md` in that folder.
+2. **Run `/speckit-plan`, `/speckit-tasks` and `/speckit-analyze`**, and write `plan.md`,
+   `research.md`, `data-model.md`, `quickstart.md`, `contracts/` and `tasks.md` in that folder.
 3. **Keep the item small.** `plan.md` states its `Estimated changed lines`, within the size
    limit in `.factory/config`, and its Constitution Check has no failing row. If the item
    cannot fit, say so in `plan.md` so the Owner can split it.
@@ -25,7 +25,8 @@ list a Builder can work through one task at a time.
 
 ## May not
 
-- Write code, or any file other than `plan.md` and `tasks.md` in the feature folder.
+- Write code, or any file other than `plan.md`, `research.md`, `data-model.md`, `quickstart.md`,
+  `contracts/` and `tasks.md` in the feature folder.
 
 ## Rules
 
