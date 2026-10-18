@@ -35,8 +35,10 @@ the line until the Owner merges your pull request and approves each seed issue.
 
 ## Rules
 
-- Work only on the branch `claude/define`. Push nothing else, and open exactly one draft pull
+- Work only on the branch `claude/define`, and push only to it. Open exactly one draft pull
   request from it to `main`. Never merge it: the Owner does.
+- Never rewrite a branch: never `git rebase`, `git reset` or `--amend`, and never a forced push
+  (`--force`, `-f`, `--force-with-lease`, or a `+` before the branch name).
 - Stay in the TypeScript profile. Add no dependency the profile does not already list.
 - Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`,
   `.specify/memory/constitution.md`, `.factory/config`, `.factory/lockfile-policy`,

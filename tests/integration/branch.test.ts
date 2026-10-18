@@ -660,6 +660,50 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     expect(e).toMatchObject({ verifyReport: false, findingsResolved: false, needsSession: true });
     expect(e.failure).toMatchObject({ station: 4 });
   });
+
+  /** Push a commit on the item branch, as a session would. */
+  const later = (t: ReturnType<typeof setup>, files: Record<string, string>) => {
+    t.project.checkout(BRANCH);
+    t.project.commit(files, 'later');
+    t.project.push(BRANCH);
+    t.project.checkout('main');
+  };
+
+  it('T178: a stale conflict report sends nothing back, and the Integrator runs again', async () => {
+    const integrate = '## Conflicts\n\n- src/login.ts\n';
+    const t = setup({
+      branch: { ...FEATURE_JSON, [`${FEATURE}/reports/integrate.md`]: integrate },
+    });
+    later(t, { [`${FEATURE}/.station.json`]: '{"station": 6}\n' });
+    expect((await gather(t, 'integrating')).failure).toMatchObject({ station: 4 });
+
+    later(t, { 'src/login.ts': 'resolved\n' });
+    const e = await gather(t, 'integrating');
+
+    expect(e.failure).toBeUndefined();
+    expect(e.needsSession).toBe(true);
+  });
+
+  it('T178: stale Verify reports read as missing, so Verify runs again', async () => {
+    const t = setup({
+      branch: {
+        ...FEATURE_JSON,
+        [`${FEATURE}/reports/verify.md`]: '| Check | Result |\n|---|---|\n| Review | pass |\n',
+        [`${FEATURE}/reports/security.md`]:
+          '## Scans\n\n- semgrep: none\n\n## Findings\n\n- none\n',
+      },
+    });
+    expect(await gather(t, 'verifying')).toMatchObject({
+      ...{ verifyReport: true, securityReport: true, needsSession: false },
+    });
+
+    later(t, { 'src/login.ts': 'changed after the review\n' });
+    const e = await gather(t, 'verifying');
+
+    expect(e.verifyReport).toBeUndefined();
+    expect(e.securityReport).toBeUndefined();
+    expect(e.needsSession).toBe(true);
+  });
 });
 
 describe('Verify results from the required check runs (T168)', { timeout: 60_000 }, () => {

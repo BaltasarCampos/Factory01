@@ -3,9 +3,9 @@
 // - Split (AC-057): a Builder's `request_split` sends the item back to Plan, which files the work
 //   as new work items marked `<!-- split-of #<item> -->` instead of opening a second PR.
 //   The marker is trace information only: each new item still needs its own `owner:approved`.
-// - Conflicts (AC-058): Integrate lists rebase conflicts it cannot resolve without changing
-//   behaviour under `## Conflicts` in its report; before the Owner's merge, any entry sends the
-//   item back to Build (after it, the transition table moves it on with an alert).
+// - Conflicts (AC-058): Integrate aborts a merge of main that conflicts and lists each conflicted
+//   file under `## Conflicts` in its report; before the Owner's merge, any entry sends the item
+//   back to Build (after it, the transition table moves it on with an alert).
 // - Tests (AC-061): a diff that skips, focuses, retries or deletes a test, removes test blocks
 //   or assertions, or changes a setup file or test helper needs a signed waiver naming that test
 //   (`test:<path>#<title>`) or its file (`test:<path>`). A flaky test is fixed, or quarantined:
@@ -67,7 +67,7 @@ export function conflictFailure(report: string): Failure | undefined {
   if (conflicts.length === 0) return undefined;
   return {
     station: 4,
-    reason: `rebase conflicts need a behaviour change: ${conflicts.join('; ')}`,
+    reason: `conflicts with main: ${conflicts.join('; ')}`,
   };
 }
 

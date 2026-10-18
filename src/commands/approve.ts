@@ -32,7 +32,7 @@ import { ownerKeyPath, sign } from '../approvals/sign.js';
 import { specBlobSha, verifyGate, verifySignature } from '../approvals/verify.js';
 import type { CommandContext } from '../cli/commands.js';
 import { covers, weakened, type WeakFinding } from '../ci/weakened.js';
-import { resignView } from '../git/diff.js';
+import { inHistory, resignView } from '../git/diff.js';
 import { ledgerPath } from '../git/history.js';
 import { briefMerged, verifiedMerges } from '../git/merges.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
@@ -44,6 +44,7 @@ import { timeline } from '../github/timeline.js';
 import { itemBranch, slugify } from '../model/naming.js';
 import type { ApprovalGate, ApprovalRecord, Tier } from '../model/types.js';
 import { configOnMain } from '../model/config.js';
+import { alert } from '../notify/inbox.js';
 import { buildSummary, visible, type SummaryFacts } from '../notify/summary.js';
 import { projectHere } from './pause.js';
 
@@ -267,8 +268,14 @@ async function resignFrom(
     }
     const waived = record.head ?? '';
     if (waived === head) return undefined;
-    fetchBranch(project, waived); // the waived head may be gone after a force-push
+    fetchBranch(project, waived);
     const env = project.env ?? process.env;
+    if (!inHistory(project.cwd, waived, head, env)) {
+      // Branches only gain commits: a waived head outside the head's history is a rewrite (T178).
+      const text = `#${String(issue)}: the head ${waived.slice(0, 12)} that ${waives} was waived at is not in the history of the PR head ${head.slice(0, 12)}: the branch was rewritten`;
+      await alert(project, { urgency: 'urgent', kind: 'tampering', text });
+      throw new RefusedError(`${text}; nothing was signed, and the Owner inbox has an alert`);
+    }
     return { head: waived, ...resignView(project.cwd, main, waived, head, env) };
   }
   return undefined;

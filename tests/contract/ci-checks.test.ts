@@ -134,6 +134,11 @@ describe('Security report check (T168)', () => {
     ]);
     const empty = SECURITY.replace(/(## Scans\n\n)(- .*\n)+/, '$1');
     expect(checkSecurityReport(empty).complete).toBe(false);
+    // T178: only a list item is a scan; prose under the heading lists none.
+    const prose = SECURITY.replace(/(## Scans\n\n)(- .*\n)+/, '$1None run.\n* \n');
+    expect(checkSecurityReport(prose).missing).toEqual([
+      'reports/security.md: no scans listed under ## Scans',
+    ]);
     const noFindings = SECURITY.replace('## Findings', '## Notes');
     expect(checkSecurityReport(noFindings).missing).toEqual([
       'reports/security.md: no ## Findings section',

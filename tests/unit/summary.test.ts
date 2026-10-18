@@ -419,7 +419,7 @@ describe('item trace (AC-017)', () => {
         message: `feat: z${trailers('builder', `${FEATURE}/T004`)}`,
         parents: 1,
       },
-      { sha: '07'.repeat(20), message: "Merge branch 'main'\n", parents: 2 },
+      { sha: '07'.repeat(20), message: "Merge branch 'main'\n", parents: 2, cleanMerge: true },
       {
         sha: '18'.repeat(20),
         message: 'feat: w\n\nFactory-Role: builder\n\nFactory-Item: 42-add-login\n',
@@ -453,6 +453,30 @@ describe('item trace (AC-017)', () => {
     expect(untrailered(commits, FEATURE)).toEqual([
       `c3c3c3c3c3c3 Dispatcher: c3: Factory-Role: dispatcher on a commit that changes src/login.ts`,
       `d4d4d4d4d4d4 Dispatcher: d4: Factory-Role: dispatcher on a commit whose changed files are unknown`,
+    ]);
+  });
+
+  it('AC-017 (T178): a merge needs the trailers unless it is a clean merge of main', () => {
+    const merge = (sha: string, over: { cleanMerge?: boolean; message?: string } = {}) => ({
+      ...{
+        sha: sha.repeat(20),
+        message: over.message ?? "Merge remote-tracking branch 'origin/main'\n",
+      },
+      ...{ parents: 2 },
+      ...(over.cleanMerge === undefined ? {} : { cleanMerge: over.cleanMerge }),
+    });
+    const commits = [
+      merge('a1', { cleanMerge: true }),
+      merge('b2', { cleanMerge: false }),
+      merge('c3'),
+      merge('d4', { message: `Merge origin/main, conflicts resolved${trailers()}` }),
+    ];
+
+    expect(untrailered(commits, FEATURE)).toEqual([
+      "b2b2b2b2b2b2 Merge remote-tracking branch 'origin/main': no Factory-Role: trailer",
+      "b2b2b2b2b2b2 Merge remote-tracking branch 'origin/main': no Factory-Item: trailer",
+      "c3c3c3c3c3c3 Merge remote-tracking branch 'origin/main': no Factory-Role: trailer",
+      "c3c3c3c3c3c3 Merge remote-tracking branch 'origin/main': no Factory-Item: trailer",
     ]);
   });
 });

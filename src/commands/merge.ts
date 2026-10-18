@@ -314,7 +314,7 @@ export async function merge(ctx: CommandContext): Promise<number> {
     // An item lands as exactly its checked tree, so it must already contain main.
     if (result.rule === 'item' && base !== c.main)
       throw new RefusedError(
-        `main moved since #${arg} was integrated; it needs a rebase before it can merge; ${NOTHING}`,
+        `main moved since #${arg} was integrated; Integrate must merge main again before it can merge; ${NOTHING}`,
       );
     const item = result.issue === undefined ? undefined : await itemChecks(ctx, c, result.issue);
     ctx.io.stdout.write(`#${arg} passes the rule ${result.rule}\n`);

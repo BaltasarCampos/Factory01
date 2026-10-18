@@ -25,8 +25,13 @@ export type TraceStep = (typeof TRACE_STEPS)[number];
 export interface TraceCommit {
   sha: string;
   message: string;
-  /** Number of parents; merge commits are the Owner's, not an agent's. */
+  /** Number of parents. */
   parents: number;
+  /**
+   * A merge of main that git makes on its own, as `cleanMainMerge` recomputes it (T178): the only
+   * commit that needs no trailers, since it adds nothing. Every other merge needs them.
+   */
+  cleanMerge?: boolean;
   /** Files the commit changes; needed to accept a dispatcher commit. */
   paths?: readonly string[];
 }
@@ -87,7 +92,7 @@ const names = (value: string, feature: string) =>
   value === feature || value.startsWith(`${feature}/`);
 
 function commitProblems(commit: TraceCommit, feature: string): string[] {
-  if (commit.parents > 1) return [];
+  if (commit.parents > 1 && commit.cleanMerge === true) return [];
   const t = trailers(commit.message);
   const problems: string[] = [];
   const roles = t.get('Factory-Role') ?? [];
@@ -110,7 +115,7 @@ function commitProblems(commit: TraceCommit, feature: string): string[] {
   return problems.map((p) => `${commit.sha.slice(0, 12)} ${subject}: ${p}`);
 }
 
-/** Agent commits (not merges) lacking a well-formed `Factory-Role:` or `Factory-Item:` trailer. */
+/** Commits, other than clean merges of main, lacking a well-formed `Factory-Role:` or `Factory-Item:` trailer. */
 export function untrailered(commits: readonly TraceCommit[], feature: string): string[] {
   return commits.flatMap((c) => commitProblems(c, feature));
 }
