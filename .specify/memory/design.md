@@ -4,11 +4,22 @@ Sep 29, 2026 · @Ballesteros
 
 ## Status and how to review
 
-This is v1.8: it records the decisions made while building slice 15. Only a signed approval admits work, nothing is admitted before the brief is merged, approval summaries are built per gate by the CLI, and telemetry never blocks or allows anything. The station design is unchanged.
+This is v1.8, kept in step with the build through slice 24b-2 (18 October 2026). It is frozen until Gate A, the first end-to-end run: it changes only when a slice cannot be built as written, and any other question goes to Still open at the end.
 
 - **Direction (confirmed):** "software factory" means an agent-driven assembly line that turns a product request into tested, deployed software, with humans owning intent and the release gates.&#32;
 - **How we iterate:** comment on any section, or answer the open questions at the end. Each round bumps the version and records what changed.
 - **Out of this version:** detailed APIs, data schemas, sizing and cost figures.
+
+**The design in eight parts**
+
+1. **The line:** Define runs once per project, then eight stations take each item from Intake to Operate, one cloud session at a time, each a role with its own instructions, tools and paths. A plain dispatcher moves items by label; agents never choose the route. Stations hand work on through files in the item's feature folder, and tier 1 items take the shorter Lean lane.
+2. **Trust comes only from your key:** every gate you own is a record you sign, every first-parent commit on `main` is yours, and `factory merge` and `factory deploy` re-check everything on your laptop. The dispatcher's decisions are advisory, and telemetry never decides anything.
+3. **Agents produce work, never evidence:** a gate passes on your signed records, on CI jobs from the pinned release at the branch head, on factory code checking committed files, or on your laptop's own checks, never on what an agent says about its work.
+4. **Containment:** each role has its own tools, paths and shell commands, and no agent may change a protected file. The guards are a second line of defence; the laptop's merge check is what enforces. Agent code that runs on your laptop runs only in a bubblewrap sandbox, and content is data, never instructions.
+5. **Git model:** one item, one branch, one pull request, one merge. The feature folder comes from the signed branch name; main is merged into the item branch, never rebased onto, and no role rewrites a branch; the branch is closed after its merge.
+6. **The factory is a signed release:** projects pin `<tag>@<sha>`; the release ships the protected files' manifest, `required-checks.json` and the `factory ci` checks; `factory new`, `adopt` and `upgrade` install it, and revocations only accumulate.
+7. **Spec Kit and the constitution:** the release ships its own Spec Kit commands and all of `.specify/`. Each project's constitution has two parts: the factory's block, the same in every project and checked against the release, and the project's principles, which Define writes and only you change.
+8. **Learning loop:** the Coach writes lessons weekly; its role-file proposals become pull requests to the factory repo only through factory code on your laptop, and a change is kept only if it does no worse on the private replay benchmark.
 
 **What changed in v1.8**
 
@@ -95,8 +106,9 @@ Everything generic lives in the factory repo; a project holds only its code and 
 | Questions | Always asks: up to 5 clarifying questions in one batch; it never fills gaps with its own assumptions |
 | Output: brief | `.factory/brief.md`: problem, users, core use cases, non-goals, success measures, risk areas |
 | Output: starter | A walking skeleton from the stack profile: runs, has one test, passes CI and deploys on the laptop |
+| Output: principles | The project part of `.specify/memory/constitution.md`: the project's principles, P1, P2 and on, under the factory's fixed block, written through the release's `speckit-constitution` |
 | Output: backlog | 5–10 first work items as GitHub issues, each tagged with a risk tier |
-| Gate | You approve the brief by merging the claude/define pull request with factory merge; each seed issue then needs its own owner:approved; no item of any kind is admitted until that merge is on main |
+| Gate | You approve the brief and the project's principles by merging the claude/define pull request with factory merge; each seed issue then needs its own owner:approved; no item of any kind is admitted until that merge is on main |
 
 **Stack profiles:** the factory ships a TypeScript profile first (tools listed under Tech stack). A profile is a folder of templates and tool settings, so other languages can be added later without changing the stations.
 
@@ -172,12 +184,12 @@ Routines run without permission prompts, so these layers are the real guardrails
 | Role | Tools | Shell limited to | Always blocked |
 | --- | --- | --- | --- |
 | Intake | Read, Grep, Glob, Bash | `gh issue` (comments, `tier:` proposal) | Write, Edit; `owner:` and `state:` labels |
-| Define | Read, Write, Edit, Bash, Grep, Glob | npm, git, `gh issue` | Push to main |
+| Define | Read, Write, Edit, Bash, Grep, Glob | npm, git, `gh issue` | Push to main or any branch but `claude/define`; rewriting a branch (`git rebase`, `git reset`, `--amend`, forced pushes) |
 | Spec | Read, Grep, Glob, Write (`spec.md` and `checklists/requirements.md` in its feature folder only) | `gh issue` | Edits outside its `spec.md` and `checklists/requirements.md` |
 | Planner | Read, Grep, Glob, Write (`plan.md`, `research.md`, `data-model.md`, `quickstart.md`, `contracts/` and `tasks.md` in its feature folder only) | none | Source code edits |
 | Builder | Read, Write, Edit, Bash, Grep, Glob, subagents | npm, vitest, git on the item's branch, including `git merge origin/main` to resolve a conflict Integrate sent back | Push to main or any other branch, rewriting a branch (`git rebase`, `git reset`, `--amend`, forced pushes), reading `.env`, files outside the task's list (for a conflict, the files `reports/integrate.md` lists) |
 | Test | Read, Grep, Glob, Write and Edit (test files only), Bash | test runners, coverage | Edits to source files |
-| Reviewer | Read, Grep, Glob, Bash, Write (`reports/` only) | `git diff`, `gh pr comment` | Edits to code, specs or tests; `gh pr merge`, `gh pr review --approve` |
+| Reviewer | Read, Grep, Glob, Bash, Write (`reports/verify.md` only) | `git diff`, `gh pr comment` | Edits to code, specs or tests; writing any other report; `gh pr merge`, `gh pr review --approve` |
 | Security | Read, Grep, Glob, Bash, Write (`reports/security.md` only) | semgrep, gitleaks, npm audit | Edit; Write outside `reports/security.md` |
 | Integrator | Read, Bash, Write (`reports/integrate.md` only) | `git fetch origin main`, `git merge origin/main`, `git merge --abort`, `git status`, `git diff --name-only`, and a plain `git push` (fast-forward) to the item branch only; `gh pr view`, `gh pr checks`, `gh pr ready`, `gh pr comment` | `gh pr merge`, `gh pr review`, `git commit` (`git merge` makes its own commit), any forced push or rewrite (`git rebase`, `git reset`, `--amend`); Edit, so a conflict always goes back to Build |
 | Release | Read, Write (release and rollback notes on `claude/factory-log` only), Bash | Read-only git on `origin/main`: `git fetch`, `git log`, `git show`, `git diff` | Deploy commands (you run `factory deploy`); tags and GitHub releases |
@@ -190,7 +202,7 @@ On top of the table, every role is denied Write and Edit on the guardrail files:
 
 **Hooks**
 
-- **Before a tool call:** a path guard blocks writes outside the role's folders and the task's file list, and blocks every role from writing `events.jsonl` and `.factory/events/` directly; a command guard blocks pushes to main or to any branch other than the one named in the station prompt, merges, reads of secrets, changes to `owner:` and `state:` labels, and removal of `pause:` labels. For roles with a shell, these guards are defence in depth: the laptop checks at merge are what enforce.
+- **Before a tool call:** a path guard blocks writes outside the role's folders and the task's file list, and blocks every role from writing `events.jsonl` and `.factory/events/` directly; a command guard blocks pushes to main or to any branch other than the one named in the station prompt, merges into main, rewriting a branch, reads of secrets, changes to `owner:` and `state:` labels, and removal of `pause:` labels. For roles with a shell, these guards are defence in depth: the laptop checks at merge are what enforce.
 - **After an edit:** format and type-check the touched file, so errors surface at once.
 - **After every call:** append one line to the work item's event log (`events.jsonl` on the item's branch, or `.factory/events/` on `claude/factory-log` after merge); the hook fills in the timestamp.
 - **When the session tries to stop:** check that the station's output file exists and is complete; if not, the session keeps going. For a role that commits nothing itself (Spec, Planner, Test, Reviewer, Security, Release, Ops and Coach, and the Integrator for its report), the hook then commits the role's output itself, from factory code: only the role's writable paths from the station manifest, as regular files, built with git plumbing on the branch as fetched, never from the session's working copy, git settings or hooks; a fixed factory author per role, never you; the `Factory-Role` trailer, and `Factory-Item` for an item's work. The output check runs on that commit, and only a passing commit is pushed, fast-forward only, to the manifest's branch. A change outside those paths is never committed and raises an alert. Builder and Define commit their own work, as their shells allow. The Builder's task is ticked in `tasks.md` by the dispatcher, once CI's `build-test` passes on the Builder's pushed head; a red one gives the Builder the same task again, so a task is marked done by CI, never by the Builder.
@@ -225,10 +237,6 @@ Every station starts with a clean context and hands work on through files in the
 
 Stations 2–6 write inside the feature folder `specs/<issue>-<slug>/` on the item's branch `claude/<issue>-<slug>`; stations 7–8 write only to `claude/factory-log`.
 
-Stations 2–6 write inside the feature folder `specs/<issue>-<slug>/` on the item's branch `claude/<issue>-<slug>`; stations 7–8 write only to `claude/factory-log`.
-
-All paths after Station 0 are inside the feature folder `specs/<feature>/`.
-
 **To decide later, from shadow-mode data:** token budgets per role, the size of `CLAUDE.md`, and whether any role needs a larger context window.
 
 ## Control plane
@@ -239,7 +247,7 @@ A small orchestrator script drives each work item through the stations; all stat
 
 - **Orchestrator:** the `factory` CLI. It picks the next ready issue by label and starts that item's current station as a Claude Code cloud session (`claude --cloud`) with the station's prompt; when the gate passes it moves the label on. The same logic runs in a daily cloud routine, so the line moves without the laptop.
 - **Work item store:** GitHub Issues plus a Project board; one issue per work item; `owner:`, `state:` and `tier:` labels (see Branches, labels and records).
-- **Artifact store:** the repository itself, in Spec Kit's layout: one feature folder per item, `specs/<issue>-<slug>/`, on the item's branch, holding `spec.md`, `plan.md`, `tasks.md` and `reports/` (verify and review reports, also posted as pull request comments).
+- **Artifact store:** the repository itself, in Spec Kit's layout: one feature folder per item, `specs/<issue>-<slug>/`, on the item's branch, holding `spec.md`, `plan.md`, `tasks.md` and `reports/` (the review, Security's report and Integrate's report; the review and Integrate's report are also posted as pull request comments).
 - **Event log:** append-only `events.jsonl` in the item's feature folder until merge, then lines under `.factory/events/` on `claude/factory-log`; Intake's entries start as issue comments. Untrusted telemetry: it feeds metrics and the Coach, never a retry count, merge or gate decision.
 - **Sandbox:** each cloud session's own isolated VM; GitHub credentials stay outside it, and network access uses the Trusted allowlist (package registries and common development hosts).
 - **Model access:** your Claude Pro plan; Sonnet as the main model with an Opus advisor (see Capacity); the plan's usage limits are the spending cap.
@@ -260,12 +268,12 @@ Every work item lives on one branch of its own from your approval to your merge,
 | Branch | Holds | Who writes | Reaches `main` |
 | --- | --- | --- | --- |
 | `claude/<issue>-<slug>`, one per work item | The feature folder `specs/<issue>-<slug>/` (`spec.md`, `plan.md`, `tasks.md`, `reports/`, `events.jsonl`) and the item's code and tests | Stations 2–6, each checking out the branch named in its prompt | When you merge the item's pull request with `factory merge` |
-| `claude/define`, one per project, created by `factory new` / `factory adopt` | `.factory/brief.md`, the walking skeleton, `.factory/define/` | Define | When you merge Define's pull request with `factory merge`; that merge is the brief approval |
+| `claude/define`, one per project, created by `factory new` / `factory adopt` | `.factory/brief.md`, the project part of `.specify/memory/constitution.md`, the walking skeleton, `.factory/define/` | Define | When you merge Define's pull request with `factory merge`; that merge is the brief approval |
 | `claude/factory-log`, one per project, long-lived | Post-merge event lines (`.factory/events/`), release notes (`.factory/releases/`), `.factory/ops/`, `.factory/lessons/` | Release, Ops and Coach; additions only | When you merge it with `factory merge`, weekly, alongside the Coach review |
 | `factory/upgrade-<tag>`, created by `factory upgrade` on your laptop | The guardrail files of release `<tag>` and the new `factory_release` line | Only the factory tool; no agent may push to it | When you merge it with `factory merge` |
 | `main` | Everything merged | Only you: signed merge commits and signed config commits | — |
 
-- **Created by the dispatcher, not an agent:** when you approve an item (`owner:approved`), the dispatcher creates its branch and points Spec Kit at that feature, so `/speckit-specify` writes into that branch instead of creating its own. Phase 0 confirms how the installed Spec Kit (1.0.13) is told which feature and branch to use.
+- **Created by the dispatcher, not an agent:** when you approve an item (`owner:approved`), the dispatcher creates its branch, and each station prompt names the feature folder `specs/<issue>-<slug>/`, taken from that signed branch name; the release's own Spec Kit commands write there and never create a branch of their own (see Tech stack).
 - **One item, one branch, one pull request:** a draft pull request opens at Specify; spec approval, CI, the verify and review reports and your merge all happen on it. Your merge brings the code and its whole trail into `main` together. The item stays under the size limit; bigger work is split by the Planner into more work items, never into several pull requests for one item.
 - **Before the branch exists:** Intake logs to the issue's comments; when the dispatcher creates the branch it copies those entries as the first lines of `events.jsonl`.
 - **After the merge:** stations 7–8 write only to `claude/factory-log`. `factory merge` checks that branch's diff on your laptop (additions only, allowed paths only, regular text files only); a CI job reports the same early.
@@ -372,11 +380,11 @@ The dispatcher's own gate decisions are therefore advisory, and it counts retrie
 
 | Head branch | Extra checks by `factory merge` | Effect |
 | --- | --- | --- |
-| `claude/define` | Define output check: the brief has all required sections; the starter runs, has one test and passes CI; 5–10 seed issues, each with a proposed tier; no protected path touched | Brief approved. Until this merge is on main the dispatcher admits no item at all; afterwards each seed issue still needs `owner:approved` (its own signed approval). When you revise the vision, the previous Define pull request must be merged or closed first. |
-| `factory/upgrade-<tag>` | The tag's signature verifies with the currently pinned key list; the tag still points to the commit you approved; the whole protected set at the pull request's head equals the release manifest at that commit, every file present with a matching hash and no extra protected file; a signed `owner:waiver` for `guardrail-change@<tag>@<sha>` | Release `<tag>@<sha>` pinned; if the newest key changed, the line stops in "key rotation pending" until the routine's environment variable is updated |
+| `claude/define` | Define output check: the brief has all required sections; the starter runs, has one test and passes CI; 5–10 seed issues, each with a proposed tier; the constitution's project part written, its factory block unchanged from the release; no other protected path touched | Brief and the project's principles approved. Until this merge is on main the dispatcher admits no item at all; afterwards each seed issue still needs `owner:approved` (its own signed approval). When you revise the vision, the previous Define pull request must be merged or closed first. |
+| `factory/upgrade-<tag>` | The tag's signature verifies with the currently pinned key list; the tag still points to the commit you approved; the whole protected set at the pull request's head equals the release manifest at that commit, every file present with a matching hash and no extra protected file, except the constitution, whose factory block must match the release and whose project part must match main's copy; a signed `owner:waiver` for `guardrail-change@<tag>@<sha>` | Release `<tag>@<sha>` pinned; if the newest key changed, the line stops in "key rotation pending" until the routine's environment variable is updated |
 | `claude/factory-log` | Every changed line is an addition at the end of an existing file or in a new file; every path is under `.factory/events/`, `.factory/ops/`, `.factory/lessons/` or `.factory/releases/`; only regular text files (no binary, symlink, executable bit, submodule, or `.git*` file); no protected path, and no waiver overrides this | Weekly log merge |
 
-**CI as an early warning:** workflows call `factory ci test`, `coverage`, `lint`, `scan`, `ac-map`, `red-green`, `append-only` and `guardrail-change` directly, never `npm test` or the project's own configs (those stay for local development). The Vitest, ESLint, Semgrep and gitleaks configs, the licence allowlist and every threshold ship in the pinned factory release. CI checks out the factory repo at the pinned commit and builds it with its own build script; dependencies install with scripts off; the project's `devDependencies` never supply the checker.
+**CI as an early warning:** workflows call `factory ci test`, `coverage`, `size`, `lint`, `scan`, `licences`, `ac-map`, `red-green`, `weakened`, `append-only` and `guardrail-change` directly, never `npm test` or the project's own configs (those stay for local development). The Vitest, ESLint, Semgrep and gitleaks configs, the licence allowlist and every threshold ship in the pinned factory release. CI checks out the factory repo at the pinned commit and builds it with its own build script; dependencies install with scripts off; the project's `devDependencies` never supply the checker.
 
 **Tests seen failing first, made checkable:** `factory ci red-green` and `factory ci ac-map` share one rule, and nothing an agent declares can switch it off. They run only on item pull requests; `claude/define`, `claude/factory-log` and upgrade pull requests have no spec and follow their own rules (see the table above).
 
@@ -466,7 +474,7 @@ Intake assigns the tier; you may raise it at any gate; agents never lower it.
 - [ ] Build and full test suite pass
 - [ ] Every acceptance criterion maps to at least one passing test, and new tests were seen failing before the change made them pass
 - [ ] Coverage on changed lines at least 90%
-- [ ] Lint, type check, SAST, secret scan and licence scan clean
+- [ ] Lint, type check, SAST, dependency (SCA), secret and licence scans clean
 - [ ] Independent review report attached and blocking findings resolved (the Reviewer's verdict is advisory; CI and you decide)
 - [ ] Diff under size limit, or split
 
@@ -567,9 +575,9 @@ The factory is most exposed where three things meet: agents that can read privat
 ### Guardrail protection
 
 - **Protected files:** `.claude/`, `.mcp.json`, the hooks folder, `.github/workflows/`, `.factory/config`, all of `.specify/` (the constitution and Spec Kit's templates, presets, extensions, scripts and settings, since each changes what the Spec Kit commands do), the lockfile policy, and every `.gitattributes`, `.gitmodules`, `CLAUDE.md` and `CLAUDE.local.md` anywhere in the repo (every session loads `CLAUDE.md` as instructions). Every role is denied Write and Edit on them; the one exception is Define, which writes the project part of the constitution at Station 0. `.factory/config` is protected but not hashed against the release (see Merging and verification on your laptop), and so is the constitution's project part: its factory block is checked against the release, and its project part against main's copy.
-- **Only the factory tool changes them:** `factory new` and `factory adopt` install them from the pinned factory release when a project starts, and `factory upgrade` updates them through a `factory/upgrade-<tag>` pull request you merge. No agent installs or edits them; an agent may only propose a change (for example a constitution amendment) as a pull request to the factory repo, which reaches projects in a later release.
+- **Only the factory tool changes them:** `factory new` and `factory adopt` install them from the pinned factory release when a project starts, and `factory upgrade` updates them through a `factory/upgrade-<tag>` pull request you merge. No agent installs or edits them; an agent may only propose a change, as an issue or a lesson. A change to the factory's own files reaches the factory repo as a pull request that factory code on your laptop opens, and projects in a later release; the constitution's project part changes only through you.
 - **Merge check:** `factory merge` refuses any pull request that touches a protected file, computed on your laptop, except an upgrade pull request that matches its release manifest. The `guardrail-change` CI job reports the same problem early, but cannot be trusted on its own, because a pull request can change the workflow that runs it.
-- **Integrity at start-up:** a session-start hook compares the guardrail files with the manifest of the pinned release, fetched by commit hash, and compares `.factory/config` with `main`'s copy; any mismatch stops the session and alerts you.
+- **Integrity at start-up:** a session-start hook compares the guardrail files with the manifest of the pinned release, fetched by commit hash, checks the constitution's factory block against the release and its project part against main's copy, and compares `.factory/config` with `main`'s copy; any mismatch stops the session and alerts you.
 
 ### Scanning and supply chain
 
@@ -811,10 +819,11 @@ Eleven review rounds produced the frozen v1.0; v1.1 recorded the Spec Kit alignm
 | Where does an item's feature folder come from? | From its signed branch name, as factory merge already reads it. `.specify/feature.json` is not committed, so items merged one after another never conflict on it when main is merged in | Branches, labels and records |
 | How does a project's constitution change after Define? | Only through you: the factory block with a factory upgrade; the project part with a laptop command that shows the diff and makes a commit you sign, as `factory config set` does, or with a Define re-run you merge. Agents may only propose a change, as an issue or a lesson | Tech stack; Guardrail protection |
 | How are principles cited across upgrades? | By permanent IDs: the factory block keeps I to IX, never renumbers and never reuses a retired number; the project's principles are P1, P2 and on, so a plan's citation stays unambiguous after an upgrade | Tech stack |
+| Which reports may each Verify and Integrate role write? | Only its own: the Reviewer `reports/verify.md`, Security `reports/security.md`, the Integrator `reports/integrate.md`. Each report decides a gate, so no role may write another's, and the stop hook commits only the role's own path (aligned 2026-10-18) | Tools and permissions |
 
 **Still open**
 
-- [ ] Phase 0: confirm how the installed Spec Kit (1.0.13) is told which feature folder and branch to use, so it writes into the dispatcher's `claude/<issue>-<slug>` branch instead of creating its own.
+- [x] Settled 2026-10-16: the release ships its own Spec Kit commands, which take the feature folder from the station prompt, and the folder comes from the item's signed branch name, so no Spec Kit setting decides where work lands (see Tech stack). The T124 probe confirms the commands work that way in a session.
 - [ ] Phase 0: confirm that `ssh-keygen -Y verify` and `git verify-commit` (with `gpg.ssh.allowedSignersFile` and `gpg.ssh.revocationFile`) work in the cloud environment, and that a forged label, an edited record, a replayed record and an unsigned commit on `main` are each rejected by both the dispatcher and `factory merge`.
 
 ## Sources
