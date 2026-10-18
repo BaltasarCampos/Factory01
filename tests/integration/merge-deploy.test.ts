@@ -1134,7 +1134,7 @@ function itemThread() {
 
 /**
  * An item whose branch skips a test that passed on main, with a waiver for it signed at the first
- * head; the branch then moves on (Integrate's rebase), so the waiver is stale at the checked head.
+ * head; the branch then moves on (Integrate merges main), so the waiver is stale at the checked head.
  */
 function staleWaiver(
   waives: string,
@@ -1160,7 +1160,7 @@ function staleWaiver(
     ],
   });
   t.repo.checkout(ITEM_BRANCH);
-  const moved = t.repo.commit(movedFiles, 'rebased');
+  const moved = t.repo.commit(movedFiles, 'moved on');
   t.repo.push(ITEM_BRANCH);
   t.repo.checkout('main');
   actionsAt(moved);
@@ -1674,7 +1674,7 @@ describe(
 
       expect(r.code).toBe(1);
       expect(r.stderr).toContain(
-        `main moved since #${String(ITEM_PR)} was integrated; it needs a rebase before it can merge; nothing was merged`,
+        `main moved since #${String(ITEM_PR)} was integrated; Integrate must merge main again before it can merge; nothing was merged`,
       );
       expect(r.stdout).not.toContain('weakened:');
       expect(t.mainOnOrigin()).toBe(moved);

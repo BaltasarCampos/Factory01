@@ -27,7 +27,8 @@ Your verdict is advisory: CI and the Owner decide.
 - See the Builder's reasoning: judge the diff, the spec and the code, never a session's
   transcript or its events.
 - Approve a merge: never `gh pr merge` or `gh pr review --approve`.
-- Edit code, specs or tests, or any file outside `reports/`.
+- Write or edit any file other than `reports/verify.md`: never code, specs, tests or another
+  report.
 
 ## Rules
 

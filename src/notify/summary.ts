@@ -108,7 +108,7 @@ export interface SummaryFacts {
   /** A `test:` waiver: the weakened findings at `commit` it covers, from the laptop's own run. */
   covered?: readonly { target: string; what: string }[] | undefined;
   /** Re-signing a head-bound waiver: the earlier waiver's head and what changed since (T151). */
-  resign?: { head: string; kind: 'diff' | 'interdiff' | 'gone'; text: string } | undefined;
+  resign?: { head: string; kind: 'diff' | 'interdiff'; text: string } | undefined;
   /** `factory merge` of a work item: what its checks found at `commit` (T068). */
   merge?: MergeView | undefined;
   /** `factory merge` of a Define, log or factory-repository branch (T068, slice 22c). */
@@ -462,7 +462,7 @@ function changed(f: SummaryFacts, gate: SummaryGate): Part {
     }
     if (spec === undefined) return noSpec(f);
     if (prev !== undefined) {
-      // Showing more is safe; refusing would block re-approval for good after a rebase.
+      // Showing more is safe; refusing would block re-approval for good if the blob were lost.
       const which = prev.blob === '' ? '' : ` ${short(prev.blob)}`;
       const why = `the previously approved spec.md${which} is not available: showing the full spec`;
       return [...lines, why, ...quoted(source(f), spec.replace(/\n$/, '').split('\n'))];
@@ -479,7 +479,6 @@ function changed(f: SummaryFacts, gate: SummaryGate): Part {
   const label = {
     diff: `diff since the waived head ${r.head}:`,
     interdiff: `interdiff since the waived head ${r.head}:`,
-    gone: `the waived head ${r.head} is gone, so this is the full diff from the merge base:`,
   }[r.kind];
   const diff = r.text.replace(/\n$/, '').split('\n');
   return [...lines, label, ...diff.map((l) => `> ${visible(l)}`)];

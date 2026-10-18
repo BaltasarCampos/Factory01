@@ -8,6 +8,10 @@
 // factory clone as `factory merge` reads it, each from GitHub Actions workflow runs at the head of
 // the item's pull request (T168); no report decides CI, coverage or scans.
 //
+// A report counts only while it is current (T178, currency.ts): once a later commit is not a
+// report, a manifest, one tick or a clean merge of main, it reads as missing, so a stale conflict
+// report sends nothing back and stale Verify reports start Verify again.
+//
 // Release evidence, the signed deploy records on the inbox issue, is read once per pass by the
 // dispatcher (released.ts, T160). Not yet gathered: open questions, and what Release and Ops
 // would work on, so Release, Ops and blocked items start no session.
@@ -24,6 +28,7 @@ import { checkSpec } from '../stations/checks/spec.js';
 import { checkVerifyReport } from '../stations/checks/verify.js';
 import { conflictFailure } from '../stations/edges.js';
 import { featureOf, fetchBranch, git, type BranchContext } from './branch.js';
+import { reportCurrent } from './currency.js';
 import type { Candidate, StationEvidence } from './dispatch.js';
 import { pendingManifest } from './manifest.js';
 import { STATION_OF, type Evidence } from './transitions.js';
@@ -127,12 +132,20 @@ export function gatherEvidence(ctx: EvidenceContext) {
       }
     };
 
+    // On the branch, a report counts only while current; read from main, the item is merged.
+    const verified = new Set(main.commits.map((c) => c.commit));
+    const report = (name: string): string | undefined => {
+      const text = read(name);
+      if (text === undefined || tip === undefined) return text;
+      return reportCurrent(at, tip, dir, name, verified) ? text : undefined;
+    };
+
     const spec = read('spec.md');
     const plan = read('plan.md');
     const tasks = read('tasks.md');
-    const verify = read('reports/verify.md');
-    const security = read('reports/security.md');
-    const integrate = read('reports/integrate.md');
+    const verify = report('reports/verify.md');
+    const security = report('reports/security.md');
+    const integrate = report('reports/integrate.md');
     const specComplete = spec !== undefined && checkSpec(spec).complete;
     const sizeLimit = config.size_limit_lines;
     const planComplete =
@@ -142,7 +155,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
       checkPlan({ spec, plan, tasks, sizeLimit }).complete;
     const tasksDone =
       tasks !== undefined && /^\s*- \[[xX]\] T\d+/m.test(tasks) && !/^\s*- \[ \] T\d+/m.test(tasks);
-    const report = verify === undefined ? undefined : checkVerifyReport(verify);
+    const review = verify === undefined ? undefined : checkVerifyReport(verify);
     const failure = integrate === undefined ? undefined : conflictFailure(integrate);
     const [pr] = await listPrs(config.repo, { state: 'open', head: item.branch }, options);
     const checked = tip !== undefined && pr?.headRefOid === tip;
@@ -151,7 +164,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
       triaged: !specComplete,
       'spec-approved': !planComplete,
       building: !tasksDone,
-      verifying: report?.complete !== true,
+      verifying: review?.complete !== true,
       integrating: integrate === undefined,
     };
     // The session the dispatcher last issued has pushed nothing yet: do not start another.
@@ -171,8 +184,8 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(spec === undefined ? {} : { specSha: git(at, ['rev-parse', `${ref}:${dir}/spec.md`]) }),
       ...(tip === undefined ? {} : { branchHead: tip }),
       ...(rg === undefined ? {} : { redGreen: rg }),
-      ...(report === undefined ? {} : { verifyReport: report.checksPass }),
-      ...(report === undefined ? {} : { findingsResolved: report.findingsResolved }),
+      ...(review === undefined ? {} : { verifyReport: review.checksPass }),
+      ...(review === undefined ? {} : { findingsResolved: review.findingsResolved }),
       ...(ci === undefined ? {} : { requiredChecks: ci }),
       ...(security === undefined ? {} : { securityReport: checkSecurityReport(security).complete }),
       ...(failure === undefined ? {} : { failure }),

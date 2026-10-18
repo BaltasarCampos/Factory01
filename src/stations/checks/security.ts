@@ -1,9 +1,10 @@
 // Security's output check (T168; design § Tools and permissions): `specs/<feature>/reports/
 // security.md`, the only file Security writes. Its scanner runs are triage, so the check asks
-// only that it lists them under `## Scans` and words its findings under `## Findings`: each
-// blocking one `- [ ] blocking: <rule> at <path:line>: <why>` until a re-scan shows it gone, then
-// `- [x] …`. Any unchecked item under `## Findings`, or anywhere worded `blocking:`, is open, and
-// an open one keeps the item in `verifying`; a dismissal is the Owner's (T105).
+// only that it lists them, as list items under `## Scans`, and words its findings under
+// `## Findings`: each blocking one `- [ ] blocking: <rule> at <path:line>: <why>` until a re-scan
+// shows it gone, then `- [x] …`. Any unchecked item under `## Findings`, or anywhere worded
+// `blocking:`, is open, and an open one keeps the item in `verifying`; a dismissal is the Owner's
+// (T105).
 import type { CheckResult } from '../../hooks/stop.js';
 import { featureFiles } from './feature.js';
 
@@ -29,7 +30,7 @@ export function checkSecurityReport(text: string): SecurityResult {
       findings ||= section === 'findings';
       continue;
     }
-    if (section === 'scans' && line.trim() !== '') scans += 1;
+    if (section === 'scans' && /^\s*[-*]\s+\S/.test(line)) scans += 1;
     const item = /^\s*- \[ \]\s+(.*)$/.exec(line)?.[1];
     if (item === undefined) continue;
     const blocking = /^blocking:\s*/i.exec(item);

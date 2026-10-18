@@ -5,7 +5,13 @@ import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { appendOnly, resignView, safeDiff, type FileChange } from '../../src/git/diff.js';
+import {
+  appendOnly,
+  inHistory,
+  resignView,
+  safeDiff,
+  type FileChange,
+} from '../../src/git/diff.js';
 import { gitEnv, makeRepo, runGit, type TestRepo } from '../helpers/git-repo.js';
 import { tempDir } from '../helpers/keys.js';
 
@@ -249,12 +255,12 @@ describe('resignView: what changed since a waived head (T151)', () => {
     expect(view.text).not.toContain('export const c = 4;');
   });
 
-  it('after a rebase onto a moved main, the interdiff shows the item’s own changes, not main’s', () => {
+  it('after main is merged in, the interdiff shows the item’s own changes, not main’s', () => {
     const { repo, waivedHead } = waived();
     repo.checkout('main');
     repo.commit({ 'src/main-only.ts': 'export const fromMain = 1;\n' }, 'main moves');
     repo.checkout(ITEM);
-    repo.git(['rebase', '-q', 'main']);
+    repo.git(['merge', '-q', '--no-edit', 'main']);
     const head = repo.commit({ 'src/b.ts': 'export const later = true;\n' }, 'after the waiver');
 
     const view = resignView(repo.path, 'main', waivedHead, head);
@@ -273,7 +279,7 @@ describe('resignView: what changed since a waived head (T151)', () => {
         repo.checkout('main');
         repo.commit({ 'src/main-only.ts': 'x\n' }, 'main moves');
         repo.checkout(ITEM);
-        repo.git(['rebase', '-q', 'main']);
+        repo.git(['merge', '-q', '--no-edit', 'main']);
       }
       const head = repo.commit({ 'src/a.ts': `${CHANGED}export const hidden = 5;\n` }, 'more');
 
@@ -292,7 +298,7 @@ describe('resignView: what changed since a waived head (T151)', () => {
     repo.checkout('main');
     repo.commit({ 'src/main-only.ts': 'x\n' }, 'main moves');
     repo.checkout(ITEM);
-    repo.git(['rebase', '-q', 'main']);
+    repo.git(['merge', '-q', '--no-edit', 'main']);
     const head = repo.commit({ 'src/b.ts': 'export const later = true;\n' }, 'after the waiver');
     // Git reads $XDG_CONFIG_HOME/git/attributes whenever core.attributesFile is not set.
     const xdg = tempDir();
@@ -308,13 +314,22 @@ describe('resignView: what changed since a waived head (T151)', () => {
     expect(view.text).toContain('+export const later = true;');
   });
 
-  it('when the waived head is gone, the full diff from the merge base, labelled as such', () => {
-    const { repo } = waived();
+  it('T178: a waived head that is gone, or not in the head’s history, refuses: the branch was rewritten', () => {
+    const { repo, waivedHead } = waived();
     const head = repo.revParse('HEAD');
+    expect(() => resignView(repo.path, 'main', 'f'.repeat(40), head)).toThrow(
+      /the waived head ffffffffffff is not in the history of .*: the branch was rewritten/,
+    );
 
-    const view = resignView(repo.path, 'main', 'f'.repeat(40), head);
+    repo.checkout('main');
+    repo.commit({ 'src/main-only.ts': 'x\n' }, 'main moves');
+    repo.checkout(ITEM);
+    repo.git(['rebase', '-q', 'main']);
+    const rebased = repo.revParse('HEAD');
 
-    expect(view.kind).toBe('gone');
-    expect(view.text).toContain('+export const c = 4;');
+    expect(inHistory(repo.path, waivedHead, rebased)).toBe(false);
+    expect(() => resignView(repo.path, 'main', waivedHead, rebased)).toThrow(
+      /branch was rewritten/,
+    );
   });
 });

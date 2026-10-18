@@ -168,6 +168,9 @@ async function approve(waives: string) {
 }
 
 const item = () => readState().repos[REPO]?.issues.find((i) => i.number === ITEM);
+/** Comment bodies on the Owner inbox issue. */
+const inbox = () =>
+  (readState().repos[REPO]?.issues.find((i) => i.number === 1)?.comments ?? []).map((c) => c.body);
 /** The record in the item's newest comment, after checking its signature. */
 function posted(): ApprovalRecord {
   const signed = extractFromComment(item()?.comments.at(-1)?.body ?? '');
@@ -251,17 +254,22 @@ describe('test: waivers (T151, AC-061)', () => {
     expect(item()?.comments).toHaveLength(1);
   });
 
-  it('when the waived head is gone, says so and shows the full diff from the merge base', async () => {
+  it('T178: when the waived head is gone, refuses, alerts the Owner and signs nothing', async () => {
     const gone = 'e'.repeat(40);
     seed(first, { waives: 'test:tests/calc.test.ts#adds', head: gone });
 
     const r = await approve('test:tests/calc.test.ts#adds');
 
-    expect(r.code).toBe(0);
-    expect(r.stdout).toContain(
-      `the waived head ${gone} is gone, so this is the full diff from the merge base:`,
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain(
+      `#${String(ITEM)}: the head eeeeeeeeeeee that test:tests/calc.test.ts#adds was waived at is not in the history of the PR head ${first.slice(0, 12)}: the branch was rewritten; nothing was signed`,
     );
-    expect(r.stdout).toContain("> +it.skip('adds', () => { expect(add(1, 2)).toBe(3); });");
+    expect(item()?.comments).toHaveLength(2);
+    expect(inbox()).toEqual([
+      expect.stringMatching(
+        /^<!-- factory-alert id=\w+ urgency=urgent kind=tampering -->\n\n#7: the head eeeeeeeeeeee/,
+      ),
+    ]);
   });
 
   it('after a commit on the branch, shows the plain diff since the waived head', async () => {
@@ -280,16 +288,16 @@ describe('test: waivers (T151, AC-061)', () => {
     expect(posted().head).toBe(second);
   });
 
-  it('after a rebase onto a moved main, shows the interdiff of the item’s own changes', async () => {
+  it('after main is merged in, shows the interdiff of the item’s own changes', async () => {
     project.checkout('main');
     project.commit({ 'src/main-only.ts': 'export const fromMain = 1;\n' }, 'main moves', {
       signWith: owner,
     });
     project.push('main');
     project.checkout(BRANCH);
-    project.git(['rebase', '-q', 'main']);
+    project.git(['merge', '-q', '--no-edit', 'main']);
     const third = project.revParse('HEAD');
-    project.push(BRANCH, { force: true });
+    project.push(BRANCH);
     project.checkout('main');
     seed(third, { waives: 'test:tests/calc.test.ts#adds', head: first });
 
@@ -300,5 +308,23 @@ describe('test: waivers (T151, AC-061)', () => {
     expect(r.stdout).toContain('+export const extra = 1;');
     expect(r.stdout).not.toContain('fromMain');
     expect(posted().head).toBe(third);
+  });
+
+  it('T178: after a forced push drops the waived head, refuses and alerts the Owner', async () => {
+    project.checkout(BRANCH);
+    project.git(['reset', '-q', '--hard', first]);
+    project.git(['rebase', '-q', 'main']);
+    const rewritten = project.revParse('HEAD');
+    project.push(BRANCH, { force: true });
+    project.checkout('main');
+    seed(rewritten, { waives: 'test:tests/calc.test.ts#adds', head: first });
+
+    const r = await approve('test:tests/calc.test.ts#adds');
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('the branch was rewritten; nothing was signed');
+    expect(item()?.comments).toHaveLength(2);
+    expect(inbox()).toHaveLength(1);
+    expect(inbox()[0]).toContain('urgency=urgent kind=tampering');
   });
 });

@@ -58,7 +58,7 @@ export function probeMerge(c: MergeContext): { tree: string; probe: string } {
   if (merged.status === 1) {
     const conflicted = [...new Set(paths.filter((p) => p !== ''))].map(visible).join(', ');
     throw new RefusedError(
-      `#${n} conflicts with main in ${conflicted}; it needs a rebase before it can merge; ${NOTHING}`,
+      `#${n} conflicts with main in ${conflicted}; main must be merged into the branch before it can merge; ${NOTHING}`,
     );
   }
   if (merged.status !== 0 || !/^[0-9a-f]{40,64}$/.test(tree))

@@ -99,14 +99,14 @@ describe('Builder split (AC-057)', () => {
 });
 
 describe('Integrate conflicts (AC-058)', () => {
-  const REPORT = `# Integrate report\n\n## Conflicts\n\n- src/auth/login.ts: main renamed the session helper the handler calls\n- tests/unit/login.test.ts: fixture format changed\n\n## Rebase\n\n- onto 1c9d0e5\n`;
+  const REPORT = `# Integrate report\n\n## Conflicts\n\n- src/auth/login.ts: main renamed the session helper the handler calls\n- tests/unit/login.test.ts: fixture format changed\n\n## Merge\n\n- main at 1c9d0e5\n`;
 
   it("AC-058: before the Owner's merge, a conflict report sends the item back to Build", () => {
     const failure = conflictFailure(REPORT);
     expect(failure).toEqual({
       station: 4,
       reason:
-        'rebase conflicts need a behaviour change: src/auth/login.ts: main renamed the session helper the handler calls; tests/unit/login.test.ts: fixture format changed',
+        'conflicts with main: src/auth/login.ts: main renamed the session helper the handler calls; tests/unit/login.test.ts: fixture format changed',
     });
     if (failure === undefined) throw new Error('no failure');
     // Before the Owner's merge, the item goes back to Build.
@@ -124,7 +124,7 @@ describe('Integrate conflicts (AC-058)', () => {
     expect(decision).toMatchObject({ ok: true, to: 'releasing' });
     expect(decision.alert).toMatchObject({ urgency: 'info', kind: 'gate-failed' });
     expect(decision.alert?.text).toMatch(
-      /^failed a gate after the Owner's merge: rebase conflicts .*; file a follow-up issue$/,
+      /^failed a gate after the Owner's merge: conflicts with main: .*; file a follow-up issue$/,
     );
     // Found while already releasing: it stays there, still with the alert.
     const there = nextTransition({ state: 'releasing' }, merged, RUNNING);
@@ -133,7 +133,7 @@ describe('Integrate conflicts (AC-058)', () => {
   });
 
   it('AC-058: a report with no conflicts, or "none", routes nowhere', () => {
-    expect(conflictFailure('# Integrate report\n\n## Rebase\n\n- clean\n')).toBeUndefined();
+    expect(conflictFailure('# Integrate report\n\n## Merge\n\n- clean\n')).toBeUndefined();
     expect(conflictFailure('## Conflicts\n\n- none\n')).toBeUndefined();
     expect(conflictFailure('## Conflicts\n\n<!-- - [path]: [why] -->\n')).toBeUndefined();
   });

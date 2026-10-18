@@ -1,5 +1,5 @@
 // Contract tests for the role files (T070, T071, FR-017, FR-036; design § Agent roster and § Tools
-// and permissions; Owner decisions 2026-10-15 to 2026-10-17), which the renderer installs as
+// and permissions; Owner decisions 2026-10-15 to 2026-10-18), which the renderer installs as
 // `.claude/agents/`.
 // Claude Code silently ignores frontmatter keys it does not know and honours some, such as
 // `permissionMode`, `hooks`, `mcpServers`, `skills` and `initialPrompt`, that could widen a role,
@@ -37,7 +37,7 @@ const MAY_NOT: Readonly<Record<string, string[]>> = {
   planner: ['write code', '`research.md`', '`data-model.md`', '`quickstart.md`', '`contracts/`'],
   builder: ['push to `main`', 'secrets', 'edit `tasks.md`', 'rewrite a branch'],
   test: ['edit production code'],
-  reviewer: ["see the builder's reasoning", 'approve a merge'],
+  reviewer: ["see the builder's reasoning", 'approve a merge', 'other than `reports/verify.md`'],
   security: ['waive your own findings'],
   integrator: [
     'merge into `main`',
@@ -127,6 +127,23 @@ describe('the role files (T070, T071)', () => {
       }
     },
   );
+
+  it.each(['define', 'builder', 'integrator'])(
+    '%s: never rewrites a branch, in any form (Owner decisions 2026-10-17 and 2026-10-18)',
+    (name) => {
+      const { prose } = roleFile(`${name}.md`);
+
+      expect(prose.toLowerCase()).toContain('rewrite a branch');
+      for (const form of ['`git rebase`', '`git reset`', '`--amend`', '`--force-with-lease`'])
+        expect(prose).toContain(form);
+    },
+  );
+
+  it('define: pushes only to `claude/define`', () => {
+    expect(roleFile('define.md').prose).toContain(
+      'Work only on the branch `claude/define`, and push only to it.',
+    );
+  });
 
   it.each(Object.keys(MAY_NOT))('%s: its "May not" column, in a section of its own', (name) => {
     const { body } = roleFile(`${name}.md`);

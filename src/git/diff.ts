@@ -239,17 +239,29 @@ const READ_FLAGS = [
 ];
 
 /** What changed since a waived head, as `approve` and `merge` show it before a re-sign. */
-export type ResignView =
-  | { kind: 'diff'; text: string }
-  | { kind: 'interdiff'; text: string }
-  | { kind: 'gone'; text: string };
+export type ResignView = { kind: 'diff'; text: string } | { kind: 'interdiff'; text: string };
 
 /**
- * The diff since the waived head when the item's merge base with `main` did not move; else the
- * interdiff of the item's own changes, its cumulative patch at the waived head against the one at
- * `head`; when the waived head is not in the clone, the full diff from the merge base (T151).
- * `git range-diff` is not used: git 2.39 drops `--text` for the patches it compares and shows a
- * commit added after the waived head by its subject only.
+ * Whether `waivedHead` is in the clone and in `head`'s history. Branches only gain commits, so
+ * anything else means the branch was rewritten (T178).
+ */
+export function inHistory(
+  repo: string,
+  waivedHead: string,
+  head: string,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (!/^[0-9a-f]{40}$/.test(waivedHead)) return false;
+  if (safeGit(repo, ['cat-file', '-e', `${waivedHead}^{commit}`], env).status !== 0) return false;
+  return safeGit(repo, ['merge-base', '--is-ancestor', waivedHead, head], env).status === 0;
+}
+
+/**
+ * The diff since the waived head when the item's merge base with `main` did not move; else, after
+ * main was merged in, the interdiff of the item's own changes, its cumulative patch at the waived
+ * head against the one at `head` (T151). A waived head outside `head`'s history refuses: the
+ * branch was rewritten (T178). `git range-diff` is not used: git 2.39 drops `--text` for the
+ * patches it compares and shows a commit added after the waived head by its subject only.
  */
 export function resignView(
   repo: string,
@@ -260,10 +272,11 @@ export function resignView(
 ): ResignView {
   const patch = (from: string, to: string) =>
     git(repo, ['diff', ...READ_FLAGS, from, to], env).toString('utf8');
+  if (!inHistory(repo, waivedHead, head, env))
+    throw new RefusedError(
+      `the waived head ${waivedHead.slice(0, 12)} is not in the history of ${head.slice(0, 12)}: the branch was rewritten`,
+    );
   const newBase = mergeBase(repo, main, head, env);
-  const present = safeGit(repo, ['cat-file', '-e', `${waivedHead}^{commit}`], env).status === 0;
-  if (!/^[0-9a-f]{40}$/.test(waivedHead) || !present)
-    return { kind: 'gone', text: patch(newBase, head) };
   const oldBase = mergeBase(repo, main, waivedHead, env);
   if (oldBase === newBase) return { kind: 'diff', text: patch(waivedHead, head) };
 
