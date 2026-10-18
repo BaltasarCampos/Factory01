@@ -53,9 +53,17 @@ export interface Evidence {
   branchHead?: string;
   /** The `ci / red-green` check run, for the commit it ran on. */
   redGreen?: { head: string; green: boolean };
-  /** `reports/verify.md` lists every check passing. */
+  /**
+   * The required GitHub Actions jobs at a commit, from the pinned release's `required-checks.json`
+   * (T168); `unreadable` when the list or the runs could not be read.
+   */
+  requiredChecks?: { head: string; jobs: { job: string; state: string }[]; unreadable?: string };
+  /** `reports/verify.md`'s Review line passes. */
   verifyReport?: boolean;
+  /** No blocking finding is open in `reports/verify.md`. */
   findingsResolved?: boolean;
+  /** `reports/security.md` is on the branch; true when it is complete with no finding open. */
+  securityReport?: boolean;
   /** Main has an Owner-signed merge commit of the item's checked head. */
   ownerMerge?: boolean;
   /**
@@ -65,10 +73,15 @@ export interface Evidence {
   released?: boolean;
 }
 
-/** `alert`: the dispatcher tells the Owner, e.g. a gate failed after the Owner's merge. */
+/** What the dispatcher tells the Owner, once per text, e.g. a gate failed after the merge. */
+export interface DecisionAlert {
+  urgency: 'urgent' | 'info';
+  kind: string;
+  text: string;
+}
 export type Decision =
-  | { ok: true; to: State; reason: string; alert?: string }
-  | { ok: false; reason: string; alert?: string };
+  | { ok: true; to: State; reason: string; alert?: DecisionAlert }
+  | { ok: false; reason: string; alert?: DecisionAlert };
 
 /** The station that works on an item in each state; it is entered when the item arrives. */
 export const STATION_OF: Readonly<Record<State, Station | undefined>> = {
@@ -191,11 +204,18 @@ function forward(state: State, e: Evidence): Decision {
         return stay('no ci / red-green result for the branch head');
       return rg.green ? move('verifying', 'ci / red-green green') : stay('ci / red-green failed');
     }
-    case 'verifying':
+    case 'verifying': {
+      const waits = checksWait(e);
+      if (waits) return waits;
       if (!e.verifyReport) return stay('reports/verify.md does not pass');
-      return e.findingsResolved
-        ? move('integrating', 'verify report passes')
-        : stay('blocking review findings open');
+      if (!e.findingsResolved) return stay('blocking review findings open');
+      // The Lean lane gives tier 1 no Security session; an unknown tier is held as the highest.
+      const tier = ownerRecord(e, 'approved')?.tier ?? 3;
+      if (e.securityReport === undefined && tier > 1)
+        return stay(`no reports/security.md, which tier ${String(tier)} needs`);
+      if (e.securityReport === false) return stay('reports/security.md does not pass');
+      return move('integrating', 'required checks green, review passes, no finding open');
+    }
     case 'integrating':
       return move('releasing', 'merged by the Owner');
     case 'releasing':
@@ -205,6 +225,32 @@ function forward(state: State, e: Evidence): Decision {
     default:
       return stay(`no forward row from state:${state}`);
   }
+}
+
+const DONE = ['success'];
+const RUNNING = ['pending', 'missing'];
+
+/**
+ * Verify waits until every required job is green at the branch head (T168). Pending or missing
+ * runs wait silently; a red job waits too, and once every job at that head has finished the
+ * Owner is told which, one alert per head. Going back to Build waits for T096.
+ */
+function checksWait(e: Evidence): Decision | undefined {
+  const ci = e.requiredChecks;
+  if (ci === undefined || e.branchHead === undefined || ci.head !== e.branchHead)
+    return stay('no required check results for the branch head');
+  if (ci.unreadable !== undefined) return stay(`required checks unreadable: ${ci.unreadable}`);
+  const at = ci.head.slice(0, 12);
+  const named = (jobs: typeof ci.jobs) => jobs.map((j) => `${j.job} (${j.state})`).join(', ');
+  const red = ci.jobs.filter((j) => !DONE.includes(j.state) && !RUNNING.includes(j.state));
+  const running = ci.jobs.filter((j) => RUNNING.includes(j.state));
+  if (red.length > 0) {
+    const reason = `required checks red at ${at}: ${named(red)}`;
+    if (running.length > 0) return stay(reason);
+    return { ...stay(reason), alert: { urgency: 'info', kind: 'checks-red', text: reason } };
+  }
+  if (running.length > 0) return stay(`required checks not finished at ${at}: ${named(running)}`);
+  return undefined;
 }
 
 function decide(item: ItemStatus, e: Evidence): Decision {
@@ -218,7 +264,8 @@ function decide(item: ItemStatus, e: Evidence): Decision {
   if (e.questionOpen) return move('blocked', 'question to the Owner');
   if (e.failure !== undefined && e.ownerMerge) {
     // Main is the item now (AC-058, FR-012): a later problem is new work, never a route back.
-    const alert = `failed a gate after the Owner's merge: ${e.failure.reason}; file a follow-up issue`;
+    const text = `failed a gate after the Owner's merge: ${e.failure.reason}; file a follow-up issue`;
+    const alert = { urgency: 'info', kind: 'gate-failed', text } as const;
     return at(item.state) < at('releasing')
       ? { ok: true, to: 'releasing', reason: 'merged by the Owner; failure after the merge', alert }
       : { ok: false, reason: "failure after the Owner's merge", alert };

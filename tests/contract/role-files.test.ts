@@ -1,5 +1,5 @@
 // Contract tests for the role files (T070, T071, FR-017, FR-036; design § Agent roster and § Tools
-// and permissions; Owner decisions 2026-10-15 and 2026-10-16), which the renderer installs as
+// and permissions; Owner decisions 2026-10-15 to 2026-10-17), which the renderer installs as
 // `.claude/agents/`.
 // Claude Code silently ignores frontmatter keys it does not know and honours some, such as
 // `permissionMode`, `hooks`, `mcpServers`, `skills` and `initialPrompt`, that could widen a role,
@@ -35,11 +35,16 @@ const MAY_NOT: Readonly<Record<string, string[]>> = {
   intake: ['change code', 'lower a risk tier'],
   spec: ['approve your own spec', '`spec.md` and `checklists/requirements.md`'],
   planner: ['write code', '`research.md`', '`data-model.md`', '`quickstart.md`', '`contracts/`'],
-  builder: ['push to `main`', 'secrets', 'edit `tasks.md`'],
+  builder: ['push to `main`', 'secrets', 'edit `tasks.md`', 'rewrite a branch'],
   test: ['edit production code'],
   reviewer: ["see the builder's reasoning", 'approve a merge'],
   security: ['waive your own findings'],
-  integrator: ['merge', 'resolve conflicts', 'approve a pull request'],
+  integrator: [
+    'merge into `main`',
+    'resolve conflicts',
+    'approve a pull request',
+    'rewrite a branch',
+  ],
   release: ['deploy'],
   ops: ['change code', 'deploy', 'edit role files'],
   coach: [
@@ -53,13 +58,14 @@ const MAY_NOT: Readonly<Record<string, string[]>> = {
  */
 const COMMITS = ['define', 'builder'];
 /**
- * Intake writes nothing, and the Integrator pushes its rebased branch itself, with a lease, while
- * the Stop hook commits its report (Owner decision 2026-10-16); every other role says the default.
+ * Intake writes nothing, and the Integrator pushes the merge `git merge` writes, fast-forward
+ * only, while the Stop hook commits its report (Owner decisions 2026-10-16 and 2026-10-17); every
+ * other role says the default.
  */
 const STOP_HOOK: Readonly<Record<string, string>> = {
   intake: 'You write no files and make no commits.',
   integrator:
-    'You make no commits and push only the rebased item branch; when you stop, the factory commits your report.',
+    'The only commit you make is the one `git merge` writes, and you push only the item branch; when you stop, the factory commits your report.',
 };
 const GUARDRAILS = [
   '`.claude/`',

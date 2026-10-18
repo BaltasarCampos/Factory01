@@ -523,7 +523,7 @@ Visitors cannot sign in.
 const DECLINED = 'the Owner did not confirm the merge; nothing was merged';
 // The item's code and its tagged test: red at the base, where the code is missing, green at the head.
 const LOGIN = 'export const login = (name: string) => name.length > 0;\n';
-const VERIFY_REPORT = `| Check | Result |\n|---|---|\n${['CI', 'Coverage', 'SAST', 'SCA', 'Secrets', 'Licences', 'Review'].map((c) => `| ${c} | pass |`).join('\n')}\n`;
+const VERIFY_REPORT = '| Check | Result |\n|---|---|\n| Review | pass |\n';
 const LOGIN_TEST = [
   "import { expect, it } from 'vitest';",
   "import { login } from '../src/login.js';",
@@ -1572,7 +1572,8 @@ describe(
         'Changed test files (each listed, even when its counts net to zero):',
         'AC-001 → AC-001 signs in',
         'build-test (.github/workflows/ci.yml): success; 1 earlier run failed',
-        'reports/verify.md: all checks pass',
+        'reports/verify.md: the review passes',
+        'reports/security.md: none on the branch',
         'Waivers in force: none',
       ])
         expect(r.stdout).toContain(line);

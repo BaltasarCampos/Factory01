@@ -73,7 +73,7 @@ new ─▶ triaged ─▶ specified ─▶ spec-approved ─▶ planned ─▶ b
 | spec-approved → planned | `plan.md`, `tasks.md` present; Constitution Check passes; every AC mapped; test tasks first |
 | planned → building | always (dispatcher assigns the next task) |
 | building → verifying | all tasks done; `ci / red-green` green on the branch head (never event evidence) |
-| verifying → integrating | `reports/verify.md` all checks pass; blocking review findings resolved |
+| verifying → integrating | every job the pinned release's `required-checks.json` requires of an item (for the files the PR changes) green in GitHub Actions workflow runs at the head of the item's PR, read as `factory merge` reads them, never from a report or commit status (T168); `reports/verify.md`'s Review line passes and its blocking findings are resolved; `reports/security.md` complete with no blocking finding open, and required at tier 2–3 (tier 1's Lean lane has no Security session). A red job holds the item with one info alert per red head; pending or missing runs wait silently |
 | integrating → releasing | branch rebased, CI green, **merged by the Owner**: an Owner-signed merge of the item (`Factory-Merge: #<issue>`, § Merge trailers) of its checked head on main's first-parent history |
 | releasing → done | release notes and rollback path on `claude/factory-log`; Owner ran `factory deploy` |
 | X → earlier station | gate failed; target = earliest station able to fix (from failure report); never once main has an Owner-signed merge of the item (`Factory-Merge: #<issue>`, § Merge trailers): a later failure moves it on to, or keeps it in, `releasing` with an alert, and the dispatcher files a follow-up issue |

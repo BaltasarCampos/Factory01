@@ -122,13 +122,14 @@ describe('Integrate conflicts (AC-058)', () => {
     const merged = { ...GATED, failure, ownerMerge: true };
     const decision = nextTransition({ state: 'integrating' }, merged, RUNNING);
     expect(decision).toMatchObject({ ok: true, to: 'releasing' });
-    expect(decision.alert).toMatch(
+    expect(decision.alert).toMatchObject({ urgency: 'info', kind: 'gate-failed' });
+    expect(decision.alert?.text).toMatch(
       /^failed a gate after the Owner's merge: rebase conflicts .*; file a follow-up issue$/,
     );
     // Found while already releasing: it stays there, still with the alert.
     const there = nextTransition({ state: 'releasing' }, merged, RUNNING);
     expect(there).toMatchObject({ ok: false });
-    expect(there.alert).toMatch(/after the Owner's merge/);
+    expect(there.alert?.text).toMatch(/after the Owner's merge/);
   });
 
   it('AC-058: a report with no conflicts, or "none", routes nowhere', () => {

@@ -46,7 +46,7 @@ export interface TraceInput {
   /** `<issue>-<slug>`, the feature folder and the `Factory-Item:` value. */
   feature: string;
   /** Feature files as committed, by role in the trail. */
-  files: { spec?: string; plan?: string; tasks?: string; verify?: string };
+  files: { spec?: string; plan?: string; tasks?: string; verify?: string; security?: string };
   /** The item's commits, oldest first. */
   commits: readonly TraceCommit[];
   /** Full titles of the tests that ran (`describe › it`). */
@@ -144,7 +144,10 @@ export function trace(input: TraceInput): Trace {
     own.map((c) => c.sha.slice(0, 12)),
     own.length === 0 ? ['no commit names the item in Factory-Item:'] : [],
   );
+  // The review step holds both Verify reports; tier 1 has no Security session, so only the
+  // review's absence breaks the chain (T168).
   file('review', input.files.verify, 'reports/verify.md');
+  if (input.files.security !== undefined) links.at(-1)?.refs.push(`${dir}/reports/security.md`);
 
   const acs = input.files.spec === undefined ? [] : checkSpec(input.files.spec).acs;
   const named = (title: string) => acs.some((ac) => new RegExp(`\\b${ac}\\b`).test(title));

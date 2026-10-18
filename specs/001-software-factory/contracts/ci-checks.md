@@ -84,6 +84,14 @@ Edge Cases, and elsewhere each line with two or more of Given/When/Then or any o
 `guardrail-change` and `append-only` give early feedback only; `factory merge` repeats both
 checks on the laptop and trusts only its own result.
 
+**Verify reads these jobs too** (T168). No agent writes CI, coverage or scan results: the
+dispatcher's `verifying → integrating` evidence takes the jobs `required-checks.json` lists for
+the `item` kind and the PR's changed files, from the release pinned on main, each from GitHub
+Actions workflow runs at the PR's head, as `factory merge` does; every one must be green.
+`reports/verify.md` holds only the Review line and its blocking findings, and
+`reports/security.md` holds Security's triage. Like every CI result, these count only as far as
+CI can be trusted before the merge; `factory merge` reads the jobs again on the laptop.
+
 The release workflow of the **factory** repo only attaches `guardrails.manifest.json`,
 `allowed_signers` and `revoked_keys` to a tag the Owner has already signed with
 `factory release`; CI never creates or signs a tag.

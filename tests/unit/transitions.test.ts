@@ -46,6 +46,22 @@ const gated: Evidence = {
   ...base,
   owner: { ...NONE, approved: approved(), 'spec-approved': specApproved() },
 };
+/** Every required item job green at the branch head, or `states` for the named ones. */
+const checks = (states: Record<string, string> = {}): NonNullable<Evidence['requiredChecks']> => ({
+  head: HEAD,
+  jobs: ['build-test', 'coverage', 'red-green', 'semgrep', 'gitleaks'].map((job) => ({
+    job,
+    state: states[job] ?? 'success',
+  })),
+});
+const GREEN = checks();
+/** Verify's evidence besides the review: green checks at the head, a clean security report. */
+const verified: Evidence = {
+  ...gated,
+  branchHead: HEAD,
+  requiredChecks: GREEN,
+  securityReport: true,
+};
 const RUNNING = { line: false, stations: new Set<Station>() };
 const paused = (...stations: Station[]) => ({ line: false, stations: new Set(stations) });
 
@@ -172,10 +188,66 @@ describe('transition table rows (data-model.md § State machine)', () => {
   });
 
   it('verifying → integrating needs a passing verify report and no open blocking finding', () => {
-    const ready = { ...gated, verifyReport: true, findingsResolved: true };
+    const ready = { ...verified, verifyReport: true, findingsResolved: true };
     moves('verifying', ready, 'integrating');
     stays('verifying', { ...ready, verifyReport: false });
     stays('verifying', { ...ready, findingsResolved: false });
+  });
+
+  it('verifying → integrating needs every required job green at the branch head (T168)', () => {
+    const ready = { ...verified, verifyReport: true, findingsResolved: true };
+    const reviewed = { verifyReport: true, findingsResolved: true, securityReport: true };
+    const none = { ...gated, branchHead: HEAD, ...reviewed };
+    expect(next('verifying', none)).toMatchObject({ ok: false, reason: /no required check/ });
+    const old = { ...ready, requiredChecks: { ...GREEN, head: OLD_HEAD } };
+    expect(next('verifying', old)).toMatchObject({ ok: false, reason: /no required check/ });
+    const unreadable = { ...GREEN, unreadable: 'the release pinned on main has no list' };
+    expect(next('verifying', { ...ready, requiredChecks: unreadable })).toMatchObject({
+      ok: false,
+      reason: /unreadable: the release pinned on main has no list/,
+    });
+  });
+
+  it('a red required job holds Verify with one info alert naming it, once the head has finished (T168)', () => {
+    const ready = { ...verified, verifyReport: true, findingsResolved: true };
+    const red = checks({ coverage: 'failure', semgrep: 'cancelled' });
+    expect(next('verifying', { ...ready, requiredChecks: red })).toEqual({
+      ok: false,
+      reason: 'required checks red at 1c9d0e5f6a7b: coverage (failure), semgrep (cancelled)',
+      alert: {
+        urgency: 'info',
+        kind: 'checks-red',
+        text: 'required checks red at 1c9d0e5f6a7b: coverage (failure), semgrep (cancelled)',
+      },
+    });
+    const stillRunning = checks({ coverage: 'failure', semgrep: 'pending' });
+    const waiting = next('verifying', { ...ready, requiredChecks: stillRunning });
+    expect(waiting).toMatchObject({ ok: false, reason: /red at 1c9d0e5f6a7b: coverage/ });
+    expect(waiting).not.toHaveProperty('alert');
+  });
+
+  it('pending or missing required jobs wait silently (T168)', () => {
+    const ready = { ...verified, verifyReport: true, findingsResolved: true };
+    const running = checks({ 'red-green': 'pending', gitleaks: 'missing' });
+    expect(next('verifying', { ...ready, requiredChecks: running })).toEqual({
+      ok: false,
+      reason:
+        'required checks not finished at 1c9d0e5f6a7b: red-green (pending), gitleaks (missing)',
+    });
+  });
+
+  it('a missing reports/security.md holds tier 2 and 3, never tier 1; a failing one holds any tier (T168)', () => {
+    const reviewed = { verifyReport: true, findingsResolved: true };
+    const noReport = { ...gated, branchHead: HEAD, requiredChecks: GREEN, ...reviewed };
+    const at = (tier: Tier) => ({
+      ...noReport,
+      owner: { ...gated.owner, approved: approved(tier) },
+    });
+    moves('verifying', at(1), 'integrating');
+    expect(next('verifying', at(2))).toMatchObject({ reason: /no reports\/security.md.*tier 2/ });
+    expect(next('verifying', at(3))).toMatchObject({ reason: /no reports\/security.md.*tier 3/ });
+    const open = { ...at(1), securityReport: false };
+    expect(next('verifying', open)).toMatchObject({ reason: 'reports/security.md does not pass' });
   });
 
   it('integrating → releasing only on an Owner-signed merge of the checked head', () => {
@@ -205,8 +277,10 @@ describe('a state: label never stands in for an Owner gate', () => {
     tasksDone: true,
     branchHead: HEAD,
     redGreen: { head: HEAD, green: true },
+    requiredChecks: GREEN,
     verifyReport: true,
     findingsResolved: true,
+    securityReport: true,
     ownerMerge: true,
     released: true,
   };

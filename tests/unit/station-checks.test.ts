@@ -263,7 +263,8 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
   const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nagents: local\nprofile: typescript\nrepo: owner/project\ninbox_issue: 1\n`;
   const role = (name: string) =>
     `---\nname: ${name}\nmodel: sonnet\ntools: Read, Write\nversion: 1\n---\nYou are the ${name}.\n`;
-  const VERIFY = `| Check | Result |\n|---|---|\n${['CI', 'Coverage', 'SAST', 'SCA', 'Secrets', 'Licences', 'Review'].map((c) => `| ${c} | pass |`).join('\n')}\n`;
+  const VERIFY = '| Check | Result |\n|---|---|\n| Review | pass |\n';
+  const SECURITY = '## Scans\n\n- semgrep: none\n\n## Findings\n\n- none\n';
 
   /** An item branch whose station manifest names `station` and `agent`, with `files` committed. */
   function stationRun(station: number, agent: string, files: Files, config = CONFIG) {
@@ -312,8 +313,25 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
     const report = `${FEATURE}/reports/verify.md`;
     expect(await stationRun(5, 'reviewer', { [report]: VERIFY }).stop()).toEqual({ block: false });
     const failing = stationRun(5, 'reviewer', {
-      [report]: VERIFY.replace('| SCA | pass |', '| SCA | fail |'),
+      [report]: VERIFY.replace('| Review | pass |', '| Review | fail |'),
     });
-    expect((await failing.stop()).reason).toMatch(/SCA: fail/);
+    expect((await failing.stop()).reason).toMatch(/Review: fail/);
+  });
+
+  it('AC-063: Security at Verify may stop only with its own report, never on the review (T168)', async () => {
+    const security = `${FEATURE}/reports/security.md`;
+    const review = `${FEATURE}/reports/verify.md`;
+    const done = stationRun(5, 'security', { [security]: SECURITY });
+    expect(await done.stop()).toEqual({ block: false });
+    const reviewOnly = stationRun(5, 'security', { [review]: VERIFY });
+    expect((await reviewOnly.stop()).reason).toMatch(/reports\/security.md/);
+    const open = stationRun(5, 'security', {
+      [security]: SECURITY.replace(
+        '- none',
+        '- [ ] blocking: eval at src/a.ts:1: input reaches eval',
+      ),
+    });
+    expect((await open.stop()).reason).toMatch(/unresolved blocking finding: eval at src\/a.ts:1/);
+    expect((await stationRun(5, 'reviewer', { [security]: SECURITY }).stop()).block).toBe(true);
   });
 });

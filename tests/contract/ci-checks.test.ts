@@ -1,22 +1,17 @@
 // T051: the Verify report check (slice 14) and `factory ci coverage`, `size` and `ac-map`
 // (slice 18b, contracts/ci-checks.md). The CI checks read the diff through the safe diff only,
-// and their limits from the release and main's config, never from the pull request.
+// and their limits from the release and main's config, never from the pull request. Since slice
+// 24b-2 (T168) the Verify report holds only the review: CI, coverage and scan results come from
+// the required check runs, and Security's findings from `reports/security.md`.
 import { chmodSync, mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/commands.js';
+import { checkSecurityReport } from '../../src/stations/checks/security.js';
 import { checkVerifyReport, VERIFY_CHECKS } from '../../src/stations/checks/verify.js';
 import { gitEnv, makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
 
-const ROWS = {
-  CI: 'pass | run 812 green on 3f9a0c1',
-  Coverage: 'pass | 94.2% of changed lines',
-  SAST: 'pass | semgrep: 0 new findings',
-  SCA: 'pass | npm audit: 0 at or above high',
-  Secrets: 'pass | gitleaks: none',
-  Licences: 'pass | all on the allowed list',
-  Review: 'pass | 2 findings, both resolved',
-};
+const ROWS = { Review: 'pass | 2 findings, both resolved' };
 
 function report(
   rows: Record<string, string> = ROWS,
@@ -30,8 +25,8 @@ function report(
 
 const why = (text: string) => checkVerifyReport(text).missing.join('\n');
 
-describe('Verify report check (AC-013)', () => {
-  it('AC-013: a report with every check passing and blocking findings resolved lets the item move on', () => {
+describe('Verify report check (AC-013, T168)', () => {
+  it('AC-013: a passing review with blocking findings resolved lets the item move on', () => {
     expect(checkVerifyReport(report())).toEqual({
       complete: true,
       missing: [],
@@ -41,42 +36,36 @@ describe('Verify report check (AC-013)', () => {
     });
   });
 
-  it('AC-013: the report must list CI, coverage, SAST, SCA, secrets, licences and review', () => {
-    expect([...VERIFY_CHECKS]).toEqual([
-      'CI',
-      'Coverage',
-      'SAST',
-      'SCA',
-      'Secrets',
-      'Licences',
-      'Review',
-    ]);
+  it('AC-013: the report holds only the review; CI, coverage and scan results come from check runs', () => {
+    expect([...VERIFY_CHECKS]).toEqual(['Review']);
   });
 
-  it.each(Object.keys(ROWS))('AC-013: a report without %s blocks the item', (check) => {
-    const rows = Object.fromEntries(Object.entries(ROWS).filter(([c]) => c !== check));
-    const result = checkVerifyReport(report(rows));
-    expect(result).toMatchObject({ complete: false, checksPass: false });
-    expect(why(report(rows))).toMatch(new RegExp(`reports/verify.md: no ${check} line`));
+  it('AC-013: a report without the Review line blocks the item', () => {
+    expect(checkVerifyReport(report({}))).toMatchObject({ complete: false, checksPass: false });
+    expect(why(report({}))).toMatch(/reports\/verify.md: no Review line/);
   });
 
-  it.each(Object.keys(ROWS))('AC-013: a failing %s line blocks the item', (check) => {
-    const rows = { ...ROWS, [check]: 'fail | see the job log' };
+  it('AC-013: a failing Review line blocks the item', () => {
+    const rows = { Review: 'fail | the lockout is never reset' };
     expect(checkVerifyReport(report(rows))).toMatchObject({ complete: false, checksPass: false });
-    expect(why(report(rows))).toMatch(new RegExp(`${check}: fail`));
+    expect(why(report(rows))).toMatch(/Review: fail/);
   });
 
   it('AC-013: anything other than pass counts as failing', () => {
-    const rows = { ...ROWS, SAST: 'skipped | semgrep was not run' };
-    expect(why(report(rows))).toMatch(/SAST: skipped/);
+    expect(why(report({ Review: 'skipped | no diff' }))).toMatch(/Review: skipped/);
   });
 
-  it('AC-013: a check listed twice with different results counts as failing', () => {
-    const text = report().replace('| Review |', '| Coverage | fail | 88% |\n| Review |');
-    expect(why(text)).toMatch(/Coverage: listed 2 times/);
+  it('AC-013: Review listed twice with different results counts as failing', () => {
+    const text = report().replace('| Review |', '| Review | fail | lockout |\n| Review |');
+    expect(why(text)).toMatch(/Review: listed 2 times/);
   });
 
-  it('AC-013: an unresolved blocking review finding blocks the item even when every check passes', () => {
+  it('AC-013: CI, coverage or scan rows a reviewer writes anyway are ignored, failing or not', () => {
+    const rows = { CI: 'fail | red', Coverage: 'pass | 99%', SAST: 'fail | semgrep', ...ROWS };
+    expect(checkVerifyReport(report(rows)).complete).toBe(true);
+  });
+
+  it('AC-013: an unresolved blocking review finding blocks the item even when the review passes', () => {
     const text = report(ROWS, '- [ ] blocking: passwords are logged\n- [x] blocking: lockout\n');
     expect(checkVerifyReport(text)).toMatchObject({
       complete: false,
@@ -86,11 +75,69 @@ describe('Verify report check (AC-013)', () => {
     expect(why(text)).toMatch(/unresolved blocking finding: passwords are logged/);
   });
 
-  it('AC-013: check names are matched without regard to case, and Licenses is accepted', () => {
-    const rows = Object.fromEntries(
-      Object.entries(ROWS).map(([c, r]) => [c === 'Licences' ? 'Licenses' : c.toLowerCase(), r]),
-    );
-    expect(checkVerifyReport(report(rows)).complete).toBe(true);
+  it('AC-013: check names are matched without regard to case', () => {
+    expect(checkVerifyReport(report({ review: ROWS.Review })).complete).toBe(true);
+  });
+});
+
+const SECURITY = [
+  '# Security report: #42 Add login',
+  '',
+  '## Scans',
+  '',
+  '- semgrep: 1 finding',
+  '- gitleaks: none',
+  '- npm audit: none at or above high',
+  '',
+  '## Findings',
+  '',
+  '- [x] blocking: javascript.express.eval at src/login.ts:12: user input reaches eval',
+  '- non-blocking: a dependency is a major version behind',
+  '',
+  '## Re-scan',
+  '',
+  '- semgrep at 9c1e2d0: the eval finding is gone',
+  '',
+].join('\n');
+
+describe('Security report check (T168)', () => {
+  it('AC-013: scans listed and every blocking finding resolved by a re-scan lets the item move on', () => {
+    expect(checkSecurityReport(SECURITY)).toEqual({
+      complete: true,
+      missing: [],
+      findingsResolved: true,
+      open: [],
+    });
+  });
+
+  it('AC-013: an open blocking finding holds the item', () => {
+    const text = SECURITY.replace('- [x] blocking:', '- [ ] blocking:');
+    expect(checkSecurityReport(text)).toMatchObject({
+      complete: false,
+      findingsResolved: false,
+      open: ['javascript.express.eval at src/login.ts:12: user input reaches eval'],
+    });
+    expect(checkSecurityReport(text).missing).toEqual([
+      'reports/security.md: unresolved blocking finding: javascript.express.eval at src/login.ts:12: user input reaches eval',
+    ]);
+  });
+
+  it('AC-013: any unchecked item under Findings counts as blocking, worded or not', () => {
+    const text = SECURITY.replace('- non-blocking: a dependency', '- [ ] a dependency');
+    expect(checkSecurityReport(text).open).toEqual(['a dependency is a major version behind']);
+  });
+
+  it('AC-013: a report without its scans, or without its findings section, is incomplete', () => {
+    const noScans = SECURITY.replace(/## Scans\n\n(- .*\n)+/, '');
+    expect(checkSecurityReport(noScans).missing).toEqual([
+      'reports/security.md: no scans listed under ## Scans',
+    ]);
+    const empty = SECURITY.replace(/(## Scans\n\n)(- .*\n)+/, '$1');
+    expect(checkSecurityReport(empty).complete).toBe(false);
+    const noFindings = SECURITY.replace('## Findings', '## Notes');
+    expect(checkSecurityReport(noFindings).missing).toEqual([
+      'reports/security.md: no ## Findings section',
+    ]);
   });
 });
 
