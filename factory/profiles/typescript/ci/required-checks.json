@@ -58,6 +58,20 @@
       "kinds": ["item", "define", "upgrade", "log"]
     },
     {
+      "workflow": "workflows/security.yml",
+      "installed": ".github/workflows/security.yml",
+      "job": "npm-audit",
+      "if": null,
+      "kinds": ["item", "define", "upgrade", "log"]
+    },
+    {
+      "workflow": "workflows/security.yml",
+      "installed": ".github/workflows/security.yml",
+      "job": "licences",
+      "if": null,
+      "kinds": ["item", "define", "upgrade", "log"]
+    },
+    {
       "workflow": "workflows/append-only.yml",
       "installed": ".github/workflows/append-only.yml",
       "job": "append-only",

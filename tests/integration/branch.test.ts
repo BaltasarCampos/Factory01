@@ -726,7 +726,11 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
   /** Every job the release requires of an item that changes no events.jsonl, green. */
   const ITEM_JOBS: Ran[] = [
     ...CI_JOBS.map((job): Ran => [CI_YML, job, 'success']),
-    ...['semgrep', 'gitleaks'].map((job): Ran => [SECURITY_YML, job, 'success']),
+    ...['semgrep', 'gitleaks', 'npm-audit', 'licences'].map((job): Ran => [
+      SECURITY_YML,
+      job,
+      'success',
+    ]),
   ];
   const withJob = (job: string, conclusion: string | null): Ran[] =>
     ITEM_JOBS.map(([w, j, c]) => [w, j, j === job ? conclusion : c]);

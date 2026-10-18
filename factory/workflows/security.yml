@@ -1,8 +1,9 @@
-# Security scans (contracts/ci-checks.md, T066, T107): semgrep with the suppression markers, and
-# gitleaks over every commit, built from the factory commit pinned in main's .factory/config and
-# called only as `factory ci scan <tool>`. The tools are installed at the versions pinned in the
-# release's tools.json, which `factory ci scan` checks. Neither tool runs pull request code.
-# Inputs reach scripts only through env.
+# Security scans (contracts/ci-checks.md, T066, T107, T169): semgrep with the suppression markers,
+# gitleaks over every commit, npm audit of the advisories the pull request introduces, and the
+# licences of the packages it adds or changes, read from the registry. Each job is built from the
+# factory commit pinned in main's .factory/config and calls only `factory ci`. The tools are
+# installed at the versions pinned in the release's tools.json, which `factory ci scan` checks.
+# No tool runs pull request code. Inputs reach scripts only through env.
 name: security
 
 on:
@@ -25,6 +26,7 @@ env:
   SEMGREP_VERSION: 1.180.0
   GITLEAKS_VERSION: 8.30.1
   GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+  NPM_VERSION: 11.11.0
 
 defaults:
   run:
@@ -130,3 +132,92 @@ jobs:
           gitleaks version
       - name: Gitleaks
         run: factory ci scan gitleaks "$BASE_SHA" "$HEAD_SHA"
+
+  npm-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Install npm (pinned)
+        working-directory: ${{ runner.temp }}
+        run: |
+          npm install -g --ignore-scripts "npm@$NPM_VERSION"
+          npm --version
+      - name: npm audit
+        run: factory ci scan audit "$BASE_SHA" "$HEAD_SHA"
+
+  licences:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out the head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: project
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Pinned factory commit
+        id: pin
+        run: |
+          from=origin/main
+          case "$HEAD_REF" in factory/upgrade-*) from="$HEAD_SHA" ;; esac
+          sha=$(git show "$from:.factory/config" |
+            sed -nE 's/^factory_release:[[:space:]]*v[0-9.]+@([0-9a-f]{40})[[:space:]]*$/\1/p')
+          if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - name: Check out the factory at the pinned commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: ${{ env.FACTORY_REPO }}
+          ref: ${{ steps.pin.outputs.sha }}
+          path: factory
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Build the factory CLI
+        working-directory: factory
+        run: |
+          npm ci --ignore-scripts
+          node node_modules/typescript/bin/tsc -p .
+          mkdir -p "$RUNNER_TEMP/bin"
+          printf '#!/bin/sh\nexec node "%s/dist/cli/main.js" "$@"\n' "$PWD" > "$RUNNER_TEMP/bin/factory"
+          chmod +x "$RUNNER_TEMP/bin/factory"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - name: Licences
+        run: factory ci licences "$BASE_SHA" "$HEAD_SHA"

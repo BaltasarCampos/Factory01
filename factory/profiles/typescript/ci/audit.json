@@ -1,0 +1,4 @@
+{
+  "comment": "factory ci scan audit (T169): an advisory npm audit reports at the head fails when its severity is at or above level and no advisory with the same ID and package name is at the merge base. Levels, lowest first: info, low, moderate, high, critical.",
+  "level": "high"
+}

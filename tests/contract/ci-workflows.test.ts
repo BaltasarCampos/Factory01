@@ -119,6 +119,8 @@ describe('project CI workflow templates (T066)', () => {
         ),
         'security/gitleaks',
         'security/semgrep',
+        'security/npm-audit',
+        'security/licences',
       ].sort(),
     );
     for (const { j } of checking) {
@@ -145,7 +147,10 @@ describe('project CI workflow templates (T066)', () => {
       ).toBe(1);
     for (const { s } of allSteps)
       for (const line of (s.run ?? '').split('\n')) {
-        expect(line).not.toMatch(/\b(?:npx|yarn|pnpm)\b|\bnpm (?!ci --ignore-scripts$)/);
+        // npm runs only to install the factory, and to install itself at the pinned version (T169).
+        expect(line).not.toMatch(
+          /\b(?:npx|yarn|pnpm)\b|\bnpm (?!ci --ignore-scripts$|install -g --ignore-scripts "npm@\$NPM_VERSION"$|--version$)/,
+        );
         expect(line).not.toMatch(/^\s*node (?!node_modules\/typescript\/bin\/tsc -p \.$)/);
       }
   });
@@ -292,7 +297,7 @@ describe('project CI workflow templates (T066)', () => {
   it('(10) the factory’s own CI installs the pinned semgrep and gitleaks before its tests, which then require them; security.yml installs the same, without bubblewrap', () => {
     const pins = JSON.parse(
       readFileSync(join(ROOT, 'factory', 'profiles', 'typescript', 'ci', 'tools.json'), 'utf8'),
-    ) as { semgrep: string; gitleaks: string };
+    ) as { semgrep: string; gitleaks: string; npm: string };
     const self = parse(readFileSync(join(ROOT, 'factory', 'self', 'ci.yml'), 'utf8')) as Workflow;
     for (const w of [self, flow('security')])
       expect(w.env).toMatchObject({
@@ -314,6 +319,11 @@ describe('project CI workflow templates (T066)', () => {
     );
     const checked = '"$GITLEAKS_SHA256  gitleaks.tar.gz" | sha256sum -c -';
     expect(runs.filter((r) => r.includes(checked))).toHaveLength(2);
+    // The audit's npm is pinned too (T169); only security.yml runs it.
+    expect(flow('security').env.NPM_VERSION).toBe(pins.npm);
+    const npm = stepNamed(job('security', 'npm-audit'), /^Install npm \(pinned\)$/);
+    const audit = stepNamed(job('security', 'npm-audit'), /^npm audit$/);
+    expect([npm >= 0, npm < audit]).toEqual([true, true]);
     for (const n of NAMES) expect(TEXT[n]).not.toContain('bubblewrap');
   });
 
@@ -357,7 +367,7 @@ describe('project CI workflow templates (T066)', () => {
     expect(new Set(checks)).toEqual(
       new Set([
         ...['lint', 'test', 'coverage', 'ac-map', 'red-green', 'weakened', 'size', 'append-only'],
-        ...['scan semgrep', 'scan gitleaks', 'scan markers'],
+        ...['scan semgrep', 'scan gitleaks', 'scan markers', 'scan audit', 'licences'],
       ]),
     );
     for (const line of lines) {

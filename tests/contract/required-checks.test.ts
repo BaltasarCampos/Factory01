@@ -85,6 +85,8 @@ describe('required-checks.json against the workflow templates (T068)', () => {
       'size',
       'semgrep',
       'gitleaks',
+      'npm-audit',
+      'licences',
     ]);
   });
 

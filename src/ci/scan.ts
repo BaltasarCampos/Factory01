@@ -42,7 +42,7 @@ const finding = (rule: string, path: string, line: number, what: string) => {
 };
 
 /** The tool on PATH, refused unless its `--version` names the release's pin. */
-export function pinnedTool(name: 'semgrep' | 'gitleaks', env: NodeJS.ProcessEnv): string {
+export function pinnedTool(name: 'semgrep' | 'gitleaks' | 'npm', env: NodeJS.ProcessEnv): string {
   const pins = JSON.parse(readFileSync(join(RELEASE_CI, 'tools.json'), 'utf8')) as Record<
     string,
     string
