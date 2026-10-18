@@ -165,7 +165,7 @@ probes are tasks in Phase 0 and their results amend this file.
   files match the manifest **fetched by the commit hash pinned in the merge base's config**
   (not the project's own copy, not by tag), so tampering with both the files and the local
   manifest is still caught. Checking against the merge base rather than main keeps in-flight
-  items running after an upgrade; they pick up the new release at Integrate's rebase.
+  items running after an upgrade; they pick up the new release when Integrate merges main.
   Mismatch → stop session, urgent alert.
 - **CI `guardrail-change`**: fails any item or Define PR touching a protected path,
   `.gitattributes`, `.gitmodules` or `.factory/config` (no waiver); an upgrade PR must equal

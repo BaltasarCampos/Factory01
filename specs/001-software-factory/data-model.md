@@ -18,7 +18,7 @@ per project, so it is **not** hashed against the release manifest. Instead:
   signed commit on main.
 - The session-start check refuses a branch whose own commits (since its merge base with main)
   changed it. A branch created before an upgrade or `config set` keeps its merge base's copy
-  until Integrate rebases it.
+  until Integrate merges main into it.
 - The dispatcher and CI always read it from main.
 
 | Field | Type | Rules |
@@ -74,9 +74,11 @@ new ─▶ triaged ─▶ specified ─▶ spec-approved ─▶ planned ─▶ b
 | planned → building | always (dispatcher assigns the next task) |
 | building → verifying | all tasks done; `ci / red-green` green on the branch head (never event evidence) |
 | verifying → integrating | every job the pinned release's `required-checks.json` requires of an item (for the files the PR changes) green in GitHub Actions workflow runs at the head of the item's PR, read as `factory merge` reads them, never from a report or commit status (T168); `reports/verify.md`'s Review line passes and its blocking findings are resolved; `reports/security.md` complete with no blocking finding open, and required at tier 2–3 (tier 1's Lean lane has no Security session). A red job holds the item with one info alert per red head; pending or missing runs wait silently |
-| integrating → releasing | branch rebased, CI green, **merged by the Owner**: an Owner-signed merge of the item (`Factory-Merge: #<issue>`, § Merge trailers) of its checked head on main's first-parent history |
+| integrating → releasing | main merged in, CI green, **merged by the Owner**: an Owner-signed merge of the item (`Factory-Merge: #<issue>`, § Merge trailers) of its checked head on main's first-parent history |
 | releasing → done | release notes and rollback path on `claude/factory-log`; Owner ran `factory deploy` |
 | X → earlier station | gate failed; target = earliest station able to fix (from failure report); never once main has an Owner-signed merge of the item (`Factory-Merge: #<issue>`, § Merge trailers): a later failure moves it on to, or keeps it in, `releasing` with an alert, and the dispatcher files a follow-up issue |
+
+Report currency (T178): a report (`reports/integrate.md`, `reports/verify.md`, `reports/security.md`) counts only while every first-parent commit after the one that last wrote it is one of: a commit that changes only files under the feature's `reports/`; a commit that changes only the feature's `.station.json` or one `tasks.md` checkbox; or a clean merge of main, whose second parent is on main's verified first-parent history and whose tree is exactly `git merge-tree --write-tree` of its two parents. Any other later commit makes the report stale, decided by content, never by author or trailer: a stale `integrate.md` sends nothing back, and the Integrator runs again; stale Verify reports count as missing, so Verify runs again.
 
 Global guards: no item is admitted, and none moves, until main's first-parent history has an
 Owner-signed merge of `claude/define` (`Factory-Merge: define`, § Signed main history); if that
@@ -144,7 +146,7 @@ For `deployed` and `deploy-healthy` records, `repo` names the project and `issue
 | `finding:<rule>@<path:line>` | security issue | Dismissal (AC-043) |
 
 `tier` and `branch` are present only when `issue` is a work item; for PR-scoped waivers
-`branch` is the PR's head branch. When Integrate's rebase changes the head, `factory merge`
+`branch` is the PR's head branch. When Integrate's merge of main changes the head, `factory merge`
 shows the diff between a code-gate waiver's head and the current head and asks the Owner to
 sign a new waiver in the same step.
 
@@ -158,9 +160,9 @@ the waived head when the merge base did not move, else the interdiff of the item
 both cumulative patches (old merge base to waived head, new merge base to head) made through
 `safeGit` with `--no-color --no-ext-diff --no-textconv --text --no-renames --diff-algorithm=myers
 -U3`, then compared with `git diff --no-index --text` and `core.attributesFile=/dev/null` in a temp
-folder outside any repository, so no attributes or config apply. Moved hunk headers and context from main are acceptable noise. When
-the waived head can no longer be fetched, it shows the full diff from the merge base, labelled as
-such. (`git range-diff` is not used: git 2.39.5 drops `--text` for the patches it compares, and
+folder outside any repository, so no attributes or config apply. Moved hunk headers and context from main are acceptable noise. Branches only gain commits, so
+a waived head that is not in the clone, or not an ancestor of the head, means the branch was
+rewritten: the re-sign refuses and `factory approve` posts an urgent `tampering` alert (T178). (`git range-diff` is not used: git 2.39.5 drops `--text` for the patches it compares, and
 shows a commit added after the waived head by its subject only.)
 
 ## Pull request merge checks
@@ -213,7 +215,7 @@ the approval summary (§ Approval summary), then:
 1. asks "Merge #N into main? [y/N]", then makes the merge commit with
    `git commit-tree -S <tree> -p <main> -p <checked sha>` (Owner-signed, passphrase prompted),
    never `git merge`: no checkout, index, hooks or file of the Owner's working copy is involved.
-   For an item, main must be an ancestor of the checked commit (else "it needs a rebase") and the
+   For an item, main must be an ancestor of the checked commit (else "Integrate must merge main again") and the
    tree is exactly the checked commit's; for the other branches it is `git merge-tree
    --write-tree` of the two, refused on any conflict, and before the prompt the rule's path check
    runs again on the merge result: an unsigned probe commit of that tree with the same two
@@ -245,8 +247,8 @@ text (issue, spec, reports) is shown as "quoted from <file> at <commit>", and ev
 Unicode `Cc`, `Cf`, `Zl` and `Zp` character removed except newline (tab included). `approve`
 reads the item branch once, at one resolved commit, and refuses a code-gate waiver when the PR
 head is another commit. A spec re-approval finds the last approval with main's pinned
-`allowed_signers` and `revoked_keys`; when that spec.md blob is not available (after a rebase or
-force-push), it shows the full current spec instead of refusing. The list below is the constant
+`allowed_signers` and `revoked_keys`; when that spec.md blob is not available (only a rewritten
+branch loses it), it shows the full current spec instead of refusing. The list below is the constant
 in `src/notify/summary.ts`, pinned with the release.
 
 **R** required (missing → the command refuses) · **—** not applicable · **S** shown when
@@ -258,7 +260,7 @@ missing the summary says "unavailable (telemetry missing)" and goes on.
 | Item approval (`approve <issue>`) | R: the request (issue title and body) | — | — | S: estimate for the proposed lane and weekly headroom left | R: the tier (the proposed `tier:` label or `--tier`); other labels shown only if present |
 | Spec approval (`approve <issue> spec`) | R: first approval — Problem and Affected areas; re-approval — `spec.md` diff from the previously approved blob to the one signed | R: each `AC-###` listed; none → refuse | — | S | R: tier; at tier 3 the spec's Risks section (none → refuse) |
 | Waiver, pre-build `gate:` | R: target | — | — | S | R: tier |
-| Waiver, code `gate:` | R: target; PR head (= the commit read); diffstat since the merge base; after the head moved, the diff since the waived head, or the interdiff of the item's own changes when the merge base moved, or the full diff when the waived head is gone (T151) | R: each `AC-###` → its test tasks | R: the waived gate's result | S | R: tier; what the waiver lets through, computed from the waived check (for `red-green`, the criteria whose tests do not go from failing to passing) |
+| Waiver, code `gate:` | R: target; PR head (= the commit read); diffstat since the merge base; after the head moved, the diff since the waived head, or the interdiff of the item's own changes when the merge base moved, and a re-sign refused when the waived head is gone (T151, T178) | R: each `AC-###` → its test tasks | R: the waived gate's result | S | R: tier; what the waiver lets through, computed from the waived check (for `red-green`, the criteria whose tests do not go from failing to passing) |
 | Waiver, other targets (`finding:`, `dep:`, `check:`) | R: target | — | — | — | R: what stays unfixed or accepted |
 | Merge, item | R: diffstat of the checked head; every changed test file, even when its counts net to zero; every removed, skipped, focused or retried test, removed assertion and changed setup or helper file (AC-061), each with the `test:` waiver that covers it, or "none" | R: each `AC-###` → its tagged tests | R: CI on the checked head; verify report | S | R: tier; open findings; waivers in force |
 | Merge, Define / upgrade / log / factory repository | R: the pull request and branch; diffstat of the merge result against main, labelled so, since main may have moved since the branch was cut (Owner decision 2026-10-13, slice 22c) | — | R: CI on the checked head; the branch's own check: Define output check, manifest equality, the log rules, the factory-repository path rule | — | R: upgrade — the keys it revokes and the in-flight items whose approvals used them; Define, log and factory repository — the per-branch check results |
