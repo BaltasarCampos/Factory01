@@ -3,7 +3,9 @@
 import { join, resolve } from 'node:path';
 import { checkAcMap, checkedSet, passingTitles } from '../ci/ac-map.js';
 import { checkAppendOnly, LOG_BRANCH } from '../ci/append-only.js';
+import { scanAudit } from '../ci/audit.js';
 import { meetsThreshold, measureCoverage, parseLcov } from '../ci/coverage.js';
+import { checkLicences } from '../ci/licences.js';
 import { lintHead } from '../ci/lint.js';
 import { redGreen } from '../ci/red-green.js';
 import { scanGitleaks, scanMarkers, scanSemgrep } from '../ci/scan.js';
@@ -23,6 +25,7 @@ const KNOWN = [
   'test',
   'lint',
   'scan',
+  'licences',
   'coverage',
   'red-green',
   'weakened',
@@ -209,7 +212,7 @@ function lintCheck(ctx: CommandContext, args: readonly string[]): number {
 
 function scanCheck(ctx: CommandContext, args: readonly string[]): number {
   const [tool = '', ...rest] = args;
-  const [base, head] = range(rest, 'scan <semgrep|gitleaks|markers> <base> <head>');
+  const [base, head] = range(rest, 'scan <semgrep|gitleaks|markers|audit> <base> <head>');
   const check = `scan ${tool}`;
   if (tool === 'semgrep') {
     const r = scanSemgrep(ctx.cwd, base, head, ctx.env);
@@ -221,10 +224,26 @@ function scanCheck(ctx: CommandContext, args: readonly string[]): number {
     return report(ctx, check, r.findings, [`${String(r.commits)} commits scanned`]);
   }
   if (tool === 'markers') return report(ctx, check, scanMarkers(ctx.cwd, base, head, ctx.env));
-  throw new UsageError('usage: factory ci scan <semgrep|gitleaks|markers> <base> <head>');
+  if (tool === 'audit') {
+    const r = scanAudit(ctx.cwd, base, head, ctx.env, ctx.npmRegistry);
+    const summary = r.unchanged
+      ? 'package-lock.json is unchanged since the merge base: nothing new to audit'
+      : `${String(r.head)} advisories at the head, ${String(r.base)} at the merge base`;
+    return report(ctx, check, r.findings, [summary]);
+  }
+  throw new UsageError('usage: factory ci scan <semgrep|gitleaks|markers|audit> <base> <head>');
 }
 
-const CHECKS: Readonly<Record<string, (ctx: CommandContext, args: readonly string[]) => number>> = {
+async function licencesCheck(ctx: CommandContext, args: readonly string[]): Promise<number> {
+  const [base, head] = range(args, 'licences <base> <head>');
+  const r = await checkLicences(ctx.cwd, base, head, ctx.env, ctx.npmRegistry);
+  const summary = `${String(r.checked)} packages new or changed since the merge base`;
+  return report(ctx, 'licences', r.findings, [summary]);
+}
+
+type Check = (ctx: CommandContext, args: readonly string[]) => number | Promise<number>;
+
+const CHECKS: Readonly<Record<string, Check>> = {
   'append-only': appendOnlyCheck,
   size: sizeCheck,
   coverage: coverageCheck,
@@ -234,6 +253,7 @@ const CHECKS: Readonly<Record<string, (ctx: CommandContext, args: readonly strin
   test: testCheck,
   lint: lintCheck,
   scan: scanCheck,
+  licences: licencesCheck,
 };
 
 export function ci(ctx: CommandContext): Promise<number> {

@@ -1,0 +1,55 @@
+#!/usr/bin/env node
+// A stand-in for the pinned npm in the audit tests (T169), shaped like npm 11.11.0's
+// `npm audit --json`. It never goes online: each package's advisories come from a
+// `fakeAdvisories` list on its entry in the lockfile, `{ source, severity, title }`, and a root
+// entry with `fakeOffline` fails as an offline run does. It answers only an isolated run, the way
+// `factory ci scan audit` must make it, and otherwise prints npm's error report: the folder holds
+// only package.json, package-lock.json and the two empty configs, no npm_config_* variable is
+// set, the registry is registry.npmjs.org, and the user and global configs are two empty files.
+import { readdirSync, readFileSync } from 'node:fs';
+
+const args = process.argv.slice(2);
+const pins = new URL('../../../factory/profiles/typescript/ci/tools.json', import.meta.url);
+if (args[0] === '--version') {
+  console.log(process.env.FAKE_NPM_VERSION ?? JSON.parse(readFileSync(pins, 'utf8')).npm);
+  process.exit(0);
+}
+const fail = (summary) => {
+  console.log(JSON.stringify({ error: { code: 'EFAKE', summary } }));
+  process.exit(1);
+};
+const option = (name) => args.find((a) => a.startsWith(`${name}=`))?.slice(name.length + 1);
+if (args[0] !== 'audit' || !args.includes('--json') || !args.includes('--package-lock-only'))
+  fail(`unexpected arguments: ${args.join(' ')}`);
+const files = readdirSync('.').sort().join(',');
+if (files !== 'global-npmrc,package-lock.json,package.json,user-npmrc')
+  fail(`unexpected files: ${files}`);
+const set = Object.keys(process.env).filter((k) => k.toLowerCase().startsWith('npm_config_'));
+if (set.length > 0) fail(`npm config from the environment: ${set.join(', ')}`);
+if (option('--registry') !== 'https://registry.npmjs.org/') fail('another registry');
+for (const config of ['--userconfig', '--globalconfig'])
+  if (readFileSync(option(config) ?? '/nonexistent', 'utf8') !== '') fail(`${config} not empty`);
+// npm 11 refuses to load one file as both configs.
+if (option('--userconfig') === option('--globalconfig')) fail('double-loading config');
+const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+// The environment is cleaned before npm runs, so the lockfile's root entry stands in for a network.
+if (lock.packages?.['']?.fakeOffline === true) fail('request to https://registry.npmjs.org failed');
+const vulnerabilities = {};
+for (const [path, entry] of Object.entries(lock.packages ?? {})) {
+  if (path === '' || !Array.isArray(entry.fakeAdvisories)) continue;
+  const name = path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
+  vulnerabilities[name] = {
+    name,
+    severity: entry.fakeAdvisories[0]?.severity,
+    isDirect: true,
+    via: entry.fakeAdvisories.map((a) => ({
+      ...{ source: a.source, name, dependency: name, title: a.title },
+      ...{ url: `https://github.com/advisories/GHSA-fake-${String(a.source)}` },
+      ...{ severity: a.severity, range: '*' },
+    })),
+    effects: [],
+    nodes: [path],
+  };
+}
+console.log(JSON.stringify({ auditReportVersion: 2, vulnerabilities, metadata: {} }, null, 2));
+process.exit(Object.keys(vulnerabilities).length > 0 ? 1 : 0);

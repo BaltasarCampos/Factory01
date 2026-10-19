@@ -60,6 +60,8 @@ export interface CommandContext {
   startMs?: number;
   /** How long the app must then keep one main process, in ms: 10 s unless a test sets less. */
   steadyMs?: number;
+  /** The npm registry `factory ci` reads: registry.npmjs.org unless a test serves its own. */
+  npmRegistry?: string;
 }
 
 export interface CommandSpec {
@@ -101,6 +103,8 @@ export interface CliDeps {
   startMs?: number;
   /** Default: 10 s, and never under 1 s. Tests only; main.ts never sets it. */
   steadyMs?: number;
+  /** Default: registry.npmjs.org. Tests only; main.ts never sets it. */
+  npmRegistry?: string;
   /** Unread Owner-inbox alerts (src/notify/inbox.ts `projectUnreadAlerts` in main.ts). */
   unreadAlerts: () => Promise<readonly Alert[]>;
   /** Override the command table (tests). */
@@ -390,6 +394,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       ...(deps.healthMs === undefined ? {} : { healthMs: deps.healthMs }),
       ...(deps.startMs === undefined ? {} : { startMs: deps.startMs }),
       ...(deps.steadyMs === undefined ? {} : { steadyMs: deps.steadyMs }),
+      ...(deps.npmRegistry === undefined ? {} : { npmRegistry: deps.npmRegistry }),
     });
   } catch (err) {
     if (err instanceof UsageError) {

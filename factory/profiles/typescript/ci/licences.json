@@ -1,0 +1,17 @@
+{
+  "comment": "factory ci licences (T169): the SPDX licences a package new or changed at the head may have on registry.npmjs.org. An OR expression needs one allowed side, an AND both; a WITH exception passes only when listed whole, as \"<licence> WITH <exception>\".",
+  "allowed": [
+    "MIT",
+    "MIT-0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "0BSD",
+    "Apache-2.0",
+    "BlueOak-1.0.0",
+    "Python-2.0",
+    "CC0-1.0",
+    "CC-BY-4.0",
+    "Unlicense"
+  ]
+}
