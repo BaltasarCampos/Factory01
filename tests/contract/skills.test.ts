@@ -1,7 +1,9 @@
 // Contract tests for the Spec Kit commands the release ships as `factory/skills/<name>/SKILL.md`
 // (T171, T172; design v1.8 § Tech stack): each takes the feature folder from the station prompt,
 // and none runs a script, follows an extension hook, sends out a subagent, edits an ignore file
-// or waits for an answer. The release's `.specify/` holds only what the commands read.
+// or waits for an answer. Their frontmatter has only the keys the release uses, since Claude Code
+// honours keys that would break the rules (Owner decision 2026-10-19). The release's `.specify/`
+// holds only what the commands read.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,7 +21,29 @@ const FORBIDDEN: readonly [string, RegExp][] = [
   ['edits an ignore file', /\.[a-z]*ignore\b/],
   ['waits for an answer', /\bwait/i],
   ['reads the folder from anywhere but the prompt', /feature\.json|SPECIFY_FEATURE|init-options/],
+  ['asks a question in the conversation', /would you like|do you want|shall I|\(yes\/no\)/i],
 ];
+
+/**
+ * The frontmatter keys a shipped command may have. Claude Code also honours `allowed-tools`
+ * (pre-approves tools), `context: fork` with `agent` (runs the command as a subagent), `model`
+ * (switches the model, Fable included) and `hooks` (adds hooks): none is allowed.
+ */
+const KEYS = [
+  'argument-hint',
+  'description',
+  'disable-model-invocation',
+  'metadata',
+  'name',
+  'user-invocable',
+];
+
+/** Each frontmatter key that is not the release's. */
+const strayKeys = (front: Record<string, unknown> | null) =>
+  Object.keys(front ?? {}).filter((key) => !KEYS.includes(key));
+
+const frontmatter = (text: string) =>
+  parseYaml(/^---\n([\s\S]*?)\n---\n/.exec(text)?.[1] ?? '') as Record<string, unknown> | null;
 
 /** Each forbidden step a command's text names. */
 function problems(text: string): string[] {
@@ -35,15 +59,29 @@ function files(dir: string): string[] {
 
 const commands = readdirSync(SKILLS).map((name) => {
   const text = readFileSync(join(SKILLS, name, 'SKILL.md'), 'utf8');
-  const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1] ?? '';
-  return { name, text, front: parseYaml(front) as Record<string, unknown> | null };
+  return { name, text, front: frontmatter(text) };
 });
 
-describe('the release’s Spec Kit commands (T171)', () => {
-  it('ships its own speckit-specify and speckit-clarify', () => {
-    expect(commands.map((c) => c.name)).toEqual(
-      expect.arrayContaining(['speckit-specify', 'speckit-clarify']),
+describe('the release’s Spec Kit commands (T171, T172)', () => {
+  it('ships its own six: specify, clarify, plan, tasks, analyze and implement', () => {
+    expect(commands.map((c) => c.name).sort()).toEqual(
+      ['analyze', 'clarify', 'implement', 'plan', 'specify', 'tasks'].map((n) => `speckit-${n}`),
     );
+  });
+
+  it.each(commands)('$name: has exactly the frontmatter keys the release uses', (c) => {
+    expect(Object.keys(c.front ?? {}).sort()).toEqual(KEYS);
+  });
+
+  it.each([
+    ['allowed-tools', 'allowed-tools: Bash(git push:*)'],
+    ['context', 'context: fork'],
+    ['agent', 'agent: general-purpose'],
+    ['model', 'model: claude-fable-5-1'],
+    ['hooks', 'hooks:\n  Stop:\n    - command: echo'],
+  ])('the check refuses the frontmatter key %s', (key, line) => {
+    const front = frontmatter(`---\nname: x\ndescription: y\n${line}\n---\nBody.\n`);
+    expect(strayKeys(front)).toEqual([key]);
   });
 
   it.each(commands)('$name: names itself and takes the feature folder from the prompt', (c) => {
@@ -84,8 +122,35 @@ describe('the release’s Spec Kit commands (T171)', () => {
     ['edits an ignore file', 'Create `.dockerignore` if Docker is used.'],
     ['waits for an answer', '**Your choice**: _[Wait for user response]_'],
     ['reads the folder from anywhere but the prompt', 'Read `.specify/feature.json`.'],
+    ['asks a question in the conversation', 'Would you like me to suggest remediation edits?'],
   ])('the check finds a command that %s', (what, line) => {
     expect(problems(`---\nname: x\n---\n${line}\n`)).toContain(what);
+  });
+});
+
+describe('Planner’s and Builder’s commands (T172)', () => {
+  const text = (name: string) => commands.find((c) => c.name === name)?.text ?? '';
+
+  it('speckit-plan and speckit-tasks write only their own files, from the release’s templates', () => {
+    expect(text('speckit-plan')).toContain('.specify/templates/plan-template.md');
+    expect(text('speckit-tasks')).toContain('.specify/templates/tasks-template.md');
+    expect(text('speckit-tasks')).toMatch(/Write nothing but `tasks\.md`/);
+  });
+
+  it('speckit-tasks puts the test tasks first, a file list on every task and maps every criterion', () => {
+    expect(text('speckit-tasks')).toContain('### Tests …');
+    expect(text('speckit-tasks')).toContain('· Files:');
+    expect(text('speckit-tasks')).toMatch(/Every `AC-###` in the spec has at least one test/);
+  });
+
+  it('speckit-analyze is read-only and ends with its report', () => {
+    expect(text('speckit-analyze')).toMatch(/read-only: it writes no file/);
+    expect(text('speckit-analyze')).toMatch(/End with the report, and ask nothing/);
+  });
+
+  it('speckit-implement builds one task and never edits tasks.md', () => {
+    expect(text('speckit-implement')).toMatch(/Build this one task, and no other/);
+    expect(text('speckit-implement')).toMatch(/Never edit `tasks\.md`/);
   });
 });
 
