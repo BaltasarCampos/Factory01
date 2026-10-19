@@ -136,16 +136,19 @@ probes are tasks in Phase 0 and their results amend this file.
 
 ## R9. Spec Kit integration (FR-016a, FR-026)
 
-- **Decision**: The installed Spec Kit (1.0.13) selects its feature from
-  `SPECIFY_FEATURE` / `SPECIFY_FEATURE_DIRECTORY` or `.specify/feature.json`. When it creates
-  the item branch, the dispatcher commits `.specify/feature.json` with
-  `{"feature_directory": "specs/<issue>-<slug>"}` on that branch and sets both env vars for
-  local sessions. `/speckit-specify` then writes into the existing folder instead of creating
-  a branch.
+- **Decision** (design v1.8, Owner decisions 2026-10-16 and 2026-10-18; T170): the feature
+  folder comes from the item's signed branch name, `claude/<issue>-<slug>` →
+  `specs/<issue>-<slug>`, never from `.specify/feature.json`, which the dispatcher no longer
+  commits. The station prompt names the folder; the release ships its own Spec Kit commands,
+  which take it from the prompt and never create a branch or folder (T171, T172). CI's ac-map
+  and red-green take it from `--branch`, `factory merge` from the branch the verified
+  `approved` record names, and the log hook and stop checks from the checked-out branch.
+  Items merged one after another then never conflict on `.specify/feature.json` when main is
+  merged in.
 - **Command form**: the installed version exposes hyphenated skills (`/speckit-specify`);
   station prompts and role files use that form, and constitution v2.5.0 adopts it (FR-026).
-- **Phase 0 probe**: run `/speckit-specify` on a dispatcher-created branch and confirm no new
-  branch or folder is made.
+- **Phase 0 probe** (T124, after slice 26c): the release's commands work in a session with no
+  shell, the feature folder taken from the station prompt.
 
 ## R10. Owner notification
 
