@@ -96,12 +96,10 @@ describe('LocalLauncher (research R8, R9)', () => {
     const clone = work(t.home, '42-add-login');
     expect(launch?.cwd).toBe(clone);
     expect(launch?.args).toEqual(localInvocation(REQUEST));
-    expect(launch?.env).toMatchObject({
-      FACTORY_ITEM: '42',
-      FACTORY_STATION: '2',
-      SPECIFY_FEATURE: '42-add-login',
-      SPECIFY_FEATURE_DIRECTORY: 'specs/42-add-login',
-    });
+    expect(launch?.env).toMatchObject({ FACTORY_ITEM: '42', FACTORY_STATION: '2' });
+    // The release's commands take the feature folder from the prompt (T171, T172).
+    expect(launch?.env).not.toHaveProperty('SPECIFY_FEATURE');
+    expect(launch?.env).not.toHaveProperty('SPECIFY_FEATURE_DIRECTORY');
     // A clone, not a worktree: it shares no config, hooks or branches with the Owner's clone.
     expect(t.repo.git(['worktree', 'list']).split('\n')).toHaveLength(1);
     const common = resolve(clone, runGit(clone, ['rev-parse', '--git-common-dir']));
@@ -112,7 +110,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(t.owner()).toEqual(before);
   });
 
-  it('runs Intake in a detached clone of main, with its item and station but no feature', async () => {
+  it('runs Intake in a detached clone of main, with its item and station', async () => {
     const t = setup();
 
     await t.launcher.launch({ ...REQUEST, role: 'intake', station: 1, branch: 'main' });
@@ -120,7 +118,6 @@ describe('LocalLauncher (research R8, R9)', () => {
     const launch = t.sessions().at(-1);
     expect(launch?.cwd).toBe(work(t.home, 'main'));
     expect(launch?.env).toMatchObject({ FACTORY_ITEM: '42', FACTORY_STATION: '1' });
-    expect(launch?.env.SPECIFY_FEATURE).toBeUndefined();
     expect(runGit(work(t.home, 'main'), ['rev-parse', 'HEAD'])).toBe(
       t.repo.revParse('origin/main'),
     );

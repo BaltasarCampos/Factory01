@@ -263,17 +263,12 @@ export class LocalLauncher implements SessionLauncher {
       const check = guardrailCheck(found, settings, manifest, request.branch);
       if (!check.ok)
         throw new LaunchRefused(`no local session started: ${check.reason}`, check.urgent);
-      const feature = ITEM_BRANCH.test(request.branch)
-        ? request.branch.slice('claude/'.length)
-        : undefined;
+      // No Spec Kit variables: the release's commands take the feature folder from the prompt.
       const env = {
         ...this.options.env,
         // Define works for the project, not an item: it gets a station and no item.
         ...(request.item > 0 ? { FACTORY_ITEM: String(request.item) } : {}),
         FACTORY_STATION: String(request.station),
-        ...(feature === undefined
-          ? {}
-          : { SPECIFY_FEATURE: feature, SPECIFY_FEATURE_DIRECTORY: `specs/${feature}` }),
       };
       const result = await this.run('claude', localInvocation(request), { cwd, env });
       if (result.status !== 0)
