@@ -501,7 +501,6 @@ describe('stop check (AC-063)', () => {
     const manifest = { item: 42, station: 5, role: 'reviewer', branch: BRANCH };
     r.commit(
       {
-        '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/42-add-login' }),
         'specs/42-add-login/.station.json': JSON.stringify(manifest),
       },
       'manifest',

@@ -41,9 +41,7 @@ export const DISPATCHER = 'dispatcher';
 
 /** The only files a dispatcher commit may change. */
 const dispatcherFile = (path: string, feature: string) =>
-  path === '.specify/feature.json' ||
-  path === `specs/${feature}/events.jsonl` ||
-  path === `specs/${feature}/.station.json`;
+  path === `specs/${feature}/events.jsonl` || path === `specs/${feature}/.station.json`;
 
 export interface TraceInput {
   issue: number;

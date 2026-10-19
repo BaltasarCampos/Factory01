@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   readdirSync,
@@ -24,9 +25,16 @@ function roleFile(role: string, model = 'sonnet'): string {
   return `---\nname: ${role}\nmodel: ${model}\ntools: Read, Write\nversion: 1\n---\nYou are the ${role}.\n`;
 }
 
+/** Run git in `dir`, failing the test when it fails. */
+function git(dir: string, ...args: string[]): void {
+  const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+  if (r.status !== 0) throw new Error(`git ${args.join(' ')}: ${r.stderr}`);
+}
+
 /** A project working copy on an item branch with a Builder station manifest. */
 function workingCopy(opts: { manifestRole?: string; model?: string } = {}): string {
   const dir = tempDir();
+  git(dir, 'init', '-q', '-b', 'claude/42-add-login');
   const write = (path: string, text: string) => {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
     writeFileSync(join(dir, path), text);
@@ -37,7 +45,6 @@ function workingCopy(opts: { manifestRole?: string; model?: string } = {}): stri
   );
   for (const role of ['builder', 'ops', 'define', 'intake', 'spec'])
     write(`.claude/agents/${role}.md`, roleFile(role, opts.model));
-  write('.specify/feature.json', JSON.stringify({ feature_directory: FEATURE }));
   write(
     `${FEATURE}/.station.json`,
     JSON.stringify({
@@ -151,11 +158,47 @@ describe('factory hook log (FR-021, AC-048)', () => {
     const other = workingCopy({ manifestRole: 'spec' });
     expect((await hook('log', input(other))).stderr).toMatch(/station\.json.*spec/);
     const none = workingCopy();
+    git(none, 'checkout', '-q', '-b', 'claude/9-x');
+    const r = await hook('log', input(none));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/specs\/9-x\/\.station\.json not found/);
+  });
+
+  it('T170: the folder comes from the checked-out branch; .specify/feature.json is ignored', async () => {
+    const dir = workingCopy();
+    mkdirSync(join(dir, '.specify'));
     writeFileSync(
-      join(none, '.specify', 'feature.json'),
+      join(dir, '.specify', 'feature.json'),
       JSON.stringify({ feature_directory: 'specs/9-x' }),
     );
-    expect((await hook('log', input(none))).code).toBe(2);
+    expect((await hook('log', input(dir))).code).toBe(0);
+    expect(readFileSync(join(dir, FEATURE, 'events.jsonl'), 'utf8')).toMatch(/"role":"builder"/);
+    expect(existsSync(join(dir, 'specs', '9-x'))).toBe(false);
+  });
+
+  const commit = [
+    '-c',
+    'user.name=t',
+    '-c',
+    'user.email=t@t',
+    'commit',
+    '-qm',
+    'x',
+    '--allow-empty',
+  ];
+  it.each([
+    ['on main', [['checkout', '-q', '-b', 'main']]],
+    ['on a branch that is not claude/<issue>-<slug>', [['checkout', '-q', '-b', 'claude/42-A_B']]],
+    ['with a detached HEAD', [commit, ['checkout', '-q', '--detach']]],
+    ['outside a git checkout', []],
+  ])('T170: blocks and writes nothing %s', async (_name, steps) => {
+    const dir = workingCopy();
+    for (const step of steps) git(dir, ...step);
+    if (steps.length === 0) rmSync(join(dir, '.git'), { recursive: true });
+    const r = await hook('log', input(dir));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/not on a work-item branch/);
+    expect(existsSync(join(dir, FEATURE, 'events.jsonl'))).toBe(false);
   });
 
   it('blocks when the role file names a Fable model', async () => {
@@ -166,12 +209,6 @@ describe('factory hook log (FR-021, AC-048)', () => {
   });
 
   it.each([
-    [
-      'feature_directory outside specs/',
-      '.specify/feature.json',
-      { feature_directory: '../x' },
-      /feature_directory/,
-    ],
     [
       'a manifest without an issue number',
       `${FEATURE}/.station.json`,

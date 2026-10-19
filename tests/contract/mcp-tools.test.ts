@@ -1,6 +1,7 @@
 // Contract tests for the factory MCP tools (contracts/mcp-tools.md, FR-022, R7): requests and
 // events only, never a label; session facts come from the launcher and the working copy, never
 // from the caller.
+import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -20,6 +21,7 @@ const ROLE_FILE = '---\nname: builder\nmodel: sonnet\ntools: Read\nversion: 1\n-
 /** A Builder's working copy on the item branch, as the launcher's clone would hold it. */
 function workingCopy(): string {
   const dir = tempDir();
+  spawnSync('git', ['init', '-q', '-b', 'claude/42-add-login'], { cwd: dir });
   const write = (path: string, text: string) => {
     mkdirSync(dirname(join(dir, path)), { recursive: true });
     writeFileSync(join(dir, path), text);
@@ -29,7 +31,6 @@ function workingCopy(): string {
     `factory_release: v1.0.0@${SHA40}\nagents: local\nprofile: typescript\nrepo: owner/project\ninbox_issue: 1\n`,
   );
   write('.claude/agents/builder.md', ROLE_FILE);
-  write('.specify/feature.json', JSON.stringify({ feature_directory: FEATURE }));
   write(
     `${FEATURE}/.station.json`,
     JSON.stringify({

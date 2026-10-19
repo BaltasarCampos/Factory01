@@ -456,9 +456,6 @@ const SPEC = (ids: string[]) =>
         `${String(i + 1)}. **${id}** — **Given** a user, **When** they log in, **Then** it works.`,
     )
     .join('\n')}\n`;
-const FEATURE = {
-  '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/42-add-login' }),
-};
 
 /** Vitest JSON results with one test per [title, status]. */
 function results(repo: TestRepo, tests: [string, 'passed' | 'failed' | 'skipped'][]) {
@@ -478,10 +475,7 @@ function results(repo: TestRepo, tests: [string, 'passed' | 'failed' | 'skipped'
 describe('factory ci ac-map (QG-2, AC-097)', () => {
   it('FR-038 (QG-2): passes when every checked criterion has a passing test naming it', async () => {
     const { repo, base } = project();
-    const head = repo.commit(
-      { ...FEATURE, 'specs/42-add-login/spec.md': SPEC(['AC-001', 'AC-002']) },
-      's',
-    );
+    const head = repo.commit({ 'specs/42-add-login/spec.md': SPEC(['AC-001', 'AC-002']) }, 's');
     results(repo, [
       ['AC-001: logs in', 'passed'],
       ['AC-002: locks out', 'passed'],
@@ -493,10 +487,7 @@ describe('factory ci ac-map (QG-2, AC-097)', () => {
 
   it('FR-038 (QG-2): a criterion whose only test fails, or a longer ID, does not count', async () => {
     const { repo, base } = project();
-    const head = repo.commit(
-      { ...FEATURE, 'specs/42-add-login/spec.md': SPEC(['AC-001', 'AC-01']) },
-      's',
-    );
+    const head = repo.commit({ 'specs/42-add-login/spec.md': SPEC(['AC-001', 'AC-01']) }, 's');
     results(repo, [
       ['AC-001: logs in', 'failed'],
       ['AC-010: something else', 'passed'],
@@ -509,7 +500,7 @@ describe('factory ci ac-map (QG-2, AC-097)', () => {
 
   it('FR-038 (QG-2): tier 1, or no --tier: deleting a criterion from spec.md on the branch does not remove it', async () => {
     const { repo, base } = project();
-    repo.commit({ ...FEATURE, 'specs/42-add-login/spec.md': SPEC(['AC-001', 'AC-002']) }, 's1');
+    repo.commit({ 'specs/42-add-login/spec.md': SPEC(['AC-001', 'AC-002']) }, 's1');
     const head = repo.commit({ 'specs/42-add-login/spec.md': SPEC(['AC-001']) }, 's2');
     results(repo, [['AC-001: logs in', 'passed']]);
     for (const tier of [['--tier', '1'], []]) {
@@ -521,7 +512,7 @@ describe('factory ci ac-map (QG-2, AC-097)', () => {
 
   it('FR-038 (QG-2): tier 2–3 check the IDs in spec.md at the head, so a dropped criterion is not required', async () => {
     const { repo, base } = project();
-    repo.commit({ ...FEATURE, 'specs/42-add-login/spec.md': SPEC(['AC-001', 'AC-002']) }, 's1');
+    repo.commit({ 'specs/42-add-login/spec.md': SPEC(['AC-001', 'AC-002']) }, 's1');
     const head = repo.commit({ 'specs/42-add-login/spec.md': SPEC(['AC-001']) }, 's2');
     results(repo, [['AC-001: logs in', 'passed']]);
     expect(await ci(repo, ['ac-map', base, head, '--branch', BRANCH, '--tier', '3'])).toMatchObject(
@@ -531,10 +522,7 @@ describe('factory ci ac-map (QG-2, AC-097)', () => {
 
   it('AC-097: an empty checked set fails, at every tier', async () => {
     const { repo, base } = project();
-    const head = repo.commit(
-      { ...FEATURE, 'specs/42-add-login/spec.md': '# Feature: login\n' },
-      's',
-    );
+    const head = repo.commit({ 'specs/42-add-login/spec.md': '# Feature: login\n' }, 's');
     results(repo, []);
     for (const tier of ['1', '2']) {
       const r = await ci(repo, ['ac-map', base, head, '--branch', BRANCH, '--tier', tier]);
@@ -546,7 +534,7 @@ describe('factory ci ac-map (QG-2, AC-097)', () => {
   it('AC-097: a criterion line without an ID fails', async () => {
     const { repo, base } = project();
     const spec = `${SPEC(['AC-001'])}2. **Given** a user, **When** they log out, **Then** it works.\n`;
-    const head = repo.commit({ ...FEATURE, 'specs/42-add-login/spec.md': spec }, 's');
+    const head = repo.commit({ 'specs/42-add-login/spec.md': spec }, 's');
     results(repo, [['AC-001: logs in', 'passed']]);
     const r = await ci(repo, ['ac-map', base, head, '--branch', BRANCH, '--tier', '2']);
     expect(r.code).toBe(1);
@@ -557,31 +545,35 @@ describe('factory ci ac-map (QG-2, AC-097)', () => {
     const { repo, base } = project();
     results(repo, [['AC-001: logs in', 'passed']]);
     repo.git(['add', '-f', 'coverage/vitest-results.json']);
-    const head = repo.commit({ ...FEATURE, 'specs/42-add-login/spec.md': SPEC(['AC-001']) }, 's');
+    const head = repo.commit({ 'specs/42-add-login/spec.md': SPEC(['AC-001']) }, 's');
     const r = await ci(repo, ['ac-map', base, head, '--branch', BRANCH, '--tier', '2']);
     expect(r.code).toBe(1);
     expect(r.output).toContain('coverage/vitest-results.json is committed at the head');
   });
 
-  it('FR-038 (QG-2): a feature.json pointing at another feature fails; no --branch is a usage error', async () => {
+  it('FR-038 (QG-2), T170: the folder comes from --branch, never .specify/feature.json; no --branch is a usage error', async () => {
     const { repo, base } = project();
-    repo.commit({ 'specs/7-other/spec.md': SPEC(['AC-001']) }, 'other');
     const head = repo.commit(
-      { '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/7-other' }) },
+      {
+        '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/7-other' }),
+        'specs/7-other/spec.md': SPEC(['AC-001', 'AC-002']),
+        'specs/42-add-login/spec.md': SPEC(['AC-001']),
+      },
       'repoint',
     );
     results(repo, [['AC-001: logs in', 'passed']]);
-    const r = await ci(repo, ['ac-map', base, head, '--branch', BRANCH, '--tier', '2']);
-    expect(r.code).toBe(1);
-    expect(r.output).toContain(
-      `.specify/feature.json names specs/7-other, but the branch ${BRANCH} is the feature specs/42-add-login`,
+    expect((await ci(repo, ['ac-map', base, head, '--branch', BRANCH, '--tier', '2'])).code).toBe(
+      0,
     );
+    const main = await ci(repo, ['ac-map', base, head, '--branch', 'main', '--tier', '2']);
+    expect(main.code).toBe(1);
+    expect(main.output).toContain('main is not a work-item branch (claude/<issue>-<slug>)');
     expect((await ci(repo, ['ac-map', base, head, '--tier', '2'])).code).toBe(2);
   });
 
   it('refuses a --tier other than 1, 2 or 3', async () => {
     const { repo, base } = project();
-    const head = repo.commit({ ...FEATURE, 'specs/42-add-login/spec.md': SPEC(['AC-001']) }, 's');
+    const head = repo.commit({ 'specs/42-add-login/spec.md': SPEC(['AC-001']) }, 's');
     expect((await ci(repo, ['ac-map', base, head, '--branch', BRANCH, '--tier', '4'])).code).toBe(
       2,
     );

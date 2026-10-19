@@ -275,7 +275,6 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
     const manifest = { item: 42, station, role: agent, branch: 'claude/42-add-login' };
     r.commit(
       {
-        '.specify/feature.json': JSON.stringify({ feature_directory: FEATURE }),
         [`${FEATURE}/.station.json`]: JSON.stringify(manifest),
         ...files,
       },
@@ -288,6 +287,18 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
   it('AC-063: Specify may stop once a complete spec.md is committed', async () => {
     const { stop } = stationRun(2, 'spec', { [`${FEATURE}/spec.md`]: SPEC });
     expect(await stop()).toEqual({ block: false });
+  });
+
+  it('T170: the stop check reads the folder of the checked-out branch, ignoring .specify/feature.json', async () => {
+    const other = { '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/9-x' }) };
+    const { stop } = stationRun(2, 'spec', { ...other, [`${FEATURE}/spec.md`]: SPEC });
+    expect(await stop()).toEqual({ block: false });
+  });
+
+  it('T170: off a work-item branch the stop hook refuses', async () => {
+    const { r, stop } = stationRun(2, 'spec', { [`${FEATURE}/spec.md`]: SPEC });
+    r.checkout('main');
+    await expect(stop()).rejects.toThrow(/not on a work-item branch \(on main\)/);
   });
 
   it('AC-063: a spec.md written but not committed does not count', async () => {

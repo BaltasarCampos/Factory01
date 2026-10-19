@@ -83,8 +83,8 @@ export function redGreenPlan(
   if (problems.length > 0)
     return { done: { skipped: false, findings: problems, checked: set.ids.size, seen: 0 } };
 
-  const feature = featureDir(repo, to, options.branch, env);
-  const own = (path: string) => path === '.specify/feature.json' || path.startsWith(`${feature}/`);
+  const feature = featureDir(options.branch);
+  const own = (path: string) => path.startsWith(`${feature}/`);
   const changed = safeDiff(repo, start, to, env).map((c) => c.path);
   if (changed.every((path) => own(path) || isTestCode(path, config)))
     return { done: { skipped: true, files: changed } };

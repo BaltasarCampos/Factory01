@@ -732,7 +732,6 @@ function mergeSetup(o: MergeSetup = {}) {
   const branchName = o.branch ?? ITEM_BRANCH;
   const [first = {}, ...more] = o.commits ?? [
     {
-      '.specify/feature.json': '{ "feature_directory": "specs/7-add-login" }\n',
       'specs/7-add-login/spec.md': ITEM_SPEC,
       'src/login.ts': LOGIN,
       'tests/login.test.ts': LOGIN_TEST,

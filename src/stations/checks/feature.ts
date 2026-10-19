@@ -1,8 +1,9 @@
 // Station outputs as committed on the item branch. Checks read git objects at HEAD, never the
-// work tree, so only what was committed counts; the feature folder is the one the dispatcher
-// named in `.specify/feature.json`.
+// work tree, so only what was committed counts; the feature folder is the checked-out branch's,
+// `claude/<issue>-<slug>` → `specs/<issue>-<slug>` (T170).
 import { spawnSync } from 'node:child_process';
 import { EnvironmentError } from '../../cli/env.js';
+import { branchFeatureDir } from '../../model/naming.js';
 
 /** A file at HEAD, or undefined when it is not committed. */
 export function committed(cwd: string, path: string): string | undefined {
@@ -14,19 +15,26 @@ export function committed(cwd: string, path: string): string | undefined {
   return result.status === 0 ? result.stdout : undefined;
 }
 
-/** The committed feature folder, `specs/<feature>`. */
+/** The checked-out branch; undefined on a detached HEAD or outside a git checkout. */
+export function checkedOutBranch(cwd: string): string | undefined {
+  const result = spawnSync('git', ['symbolic-ref', '--short', '-q', 'HEAD'], {
+    cwd,
+    encoding: 'utf8',
+  });
+  if (result.error) throw new EnvironmentError(`could not run git: ${result.error.message}`);
+  return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+/** `specs/<issue>-<slug>` for the checked-out `claude/<issue>-<slug>`; any other refuses. */
 export function featureDir(cwd: string): string {
-  const text = committed(cwd, '.specify/feature.json');
-  let dir: unknown;
-  try {
-    dir = (JSON.parse(text ?? '{}') as { feature_directory?: unknown }).feature_directory;
-  } catch {
-    dir = undefined;
-  }
-  if (typeof dir !== 'string' || !/^specs\/[^/.][^/]*$/.test(dir))
-    throw new EnvironmentError('.specify/feature.json at HEAD names no specs/<feature> folder');
+  const branch = checkedOutBranch(cwd);
+  const dir = branch === undefined ? undefined : branchFeatureDir(branch);
+  if (dir === undefined) throw new EnvironmentError(notOnItemBranch(branch));
   return dir;
 }
+
+export const notOnItemBranch = (branch: string | undefined) =>
+  `not on a work-item branch (on ${branch ?? 'no branch'}); the feature folder comes from claude/<issue>-<slug>`;
 
 export interface FeatureFiles {
   /** Path of each file, for messages. */
