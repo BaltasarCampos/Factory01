@@ -1,8 +1,9 @@
 // Template renderer (plan.md § Project Structure): copies a release's `factory/` material into a
 // project at the guardrail paths. Guardrail files are copied byte for byte, so they match the
-// release manifest; `{{name}}` placeholders are filled only in the other files. Any protected
-// file the release does not ship (for example Spec Kit's own `.claude/skills/`) is removed, so
-// the project's protected set is exactly the release's.
+// release manifest; `{{name}}` placeholders are filled only in the other files. The release's
+// `factory/specify/` is the project's `.specify/` (T171): Spec Kit's `specify init` never runs.
+// Any protected file the release does not ship (for example Spec Kit's own `.claude/skills/`)
+// is removed, so the project's protected set is exactly the release's.
 import {
   existsSync,
   lstatSync,
@@ -38,7 +39,7 @@ const MAPPINGS: readonly Mapping[] = [
   { from: 'settings/settings.json', to: '.claude/settings.json', required: true },
   { from: 'workflows', to: '.github/workflows' },
   { from: 'constitution.md', to: '.specify/memory/constitution.md', required: true },
-  { from: 'speckit', to: '.specify/templates/overrides' },
+  { from: 'specify', to: '.specify' },
   { from: 'lockfile-policy', to: '.factory/lockfile-policy' },
 ];
 

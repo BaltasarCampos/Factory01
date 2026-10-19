@@ -7,7 +7,7 @@ cloud marker confirmed in Phase 0) is set or when stdin is not a TTY.
 
 | Command | Where | Effect | Spec |
 |---------|-------|--------|------|
-| `factory new "<pitch>" [--name <repo>]` | laptop | Consent prompt → choose `cloud`/`local` → verify the release tag's signature with the laptop's key list → create an **empty** private repo → `specify init` → write `.factory/` (pin `<tag>@<sha>`) → install guardrails from the pinned release → push a signed root commit → labels, CI workflows → pinned inbox issue → `claude/define` branch → local clone → start Define | FR-003, FR-004, AC-001, AC-003 |
+| `factory new "<pitch>" [--name <repo>]` | laptop | Consent prompt → choose `cloud`/`local` → verify the release tag's signature with the laptop's key list → create an **empty** private repo → write `.factory/` (pin `<tag>@<sha>`) → install guardrails and the release's `.specify/` from the pinned release (never `specify init`, T171) → push a signed root commit → labels, CI workflows → pinned inbox issue → `claude/define` branch → local clone → start Define | FR-003, FR-004, AC-001, AC-003 |
 | `factory adopt <owner/repo>` | laptop | Same as `new`, attaching to an existing repo: records `baseline` = main's last unsigned commit and makes a signed adopt commit after it; Define reads the code | FR-003, AC-007 |
 | `factory run [--once]` | laptop | Run the dispatcher loop locally until an Owner gate, usage limit, cap or pause | FR-005 |
 | `factory dispatch` | routine / laptop | One dispatcher pass: read state, verify records, derive pause state, start at most one session (or N if approved), apply label moves | FR-016, FR-016f, FR-027 |

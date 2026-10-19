@@ -17,7 +17,7 @@ import { dirname, join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ownerKeyPath } from '../../src/approvals/sign.js';
 import { runCli } from '../../src/cli/commands.js';
-import { EnvironmentError, RefusedError } from '../../src/cli/env.js';
+import { RefusedError } from '../../src/cli/env.js';
 import { signedTag } from '../../src/git/sign.js';
 import { createRepo } from '../../src/github/repo.js';
 import { render } from '../../src/install/render.js';
@@ -29,7 +29,7 @@ import {
   serialiseManifest,
 } from '../../src/install/manifest.js';
 import { installLabels } from '../../src/install/labels.js';
-import { createDefineBranch, installProject, runSpecifyInit } from '../../src/install/project.js';
+import { createDefineBranch, installProject } from '../../src/install/project.js';
 import { parseConfig } from '../../src/model/config.js';
 import { ITEM_TYPES, STATES, STATIONS, type GuardrailManifest } from '../../src/model/types.js';
 import { calls, readState, seedState } from '../helpers/fake-gh.js';
@@ -58,7 +58,8 @@ const SOURCES: Record<string, string> = {
   'constitution.md': '# Constitution\n\nv2.6.0\n',
   'lockfile-policy': 'npm ci --ignore-scripts\n',
   'skills/speckit-plan/SKILL.md': 'release copy of speckit-plan\n',
-  'speckit/spec-template.md': '# Spec for {{repo}}\n',
+  'specify/templates/spec-template.md': '# Spec for {{repo}}\n',
+  'specify/templates/checklist-template.md': '# Checklist\n',
 };
 
 /** Where each source lands in the project; `.mcp.json` is generated. */
@@ -127,15 +128,12 @@ async function setup(manifest = expectedManifest()) {
   return { work, factoryRoot };
 }
 
-/** Stands in for `specify init`: Spec Kit files, plus its own `.claude/` skills. */
-function fakeSpecify(cwd: string): void {
-  writeTree(cwd, {
-    '.specify/templates/plan-template.md': '# Plan\n',
-    '.specify/memory/constitution.md': '# Spec Kit default constitution\n',
-    '.claude/skills/speckit-plan/SKILL.md': 'spec kit copy of speckit-plan\n',
-    '.claude/skills/speckit-extra/SKILL.md': 'not in the release\n',
-  });
-}
+/** What a repository may already hold from Spec Kit's own `specify init`. */
+const SPEC_KIT_LEFTOVERS = {
+  '.specify/memory/constitution.md': '# Spec Kit default constitution\n',
+  '.claude/skills/speckit-plan/SKILL.md': 'spec kit copy of speckit-plan\n',
+  '.claude/skills/speckit-extra/SKILL.md': 'not in the release\n',
+};
 
 function install(work: string, factoryRoot: string) {
   return installProject({
@@ -145,7 +143,6 @@ function install(work: string, factoryRoot: string) {
     factoryRoot,
     pin: PIN,
     agents: 'local',
-    runSpecify: fakeSpecify,
   });
 }
 
@@ -158,6 +155,7 @@ describe('install steps (AC-003)', { timeout: 60_000 }, () => {
   beforeAll(async () => {
     const made = await setup();
     work = made.work;
+    writeTree(work, SPEC_KIT_LEFTOVERS);
     ({ inboxIssue } = await install(work, made.factoryRoot));
   }, 60_000);
 
@@ -167,14 +165,16 @@ describe('install steps (AC-003)', { timeout: 60_000 }, () => {
     expect(buildManifest(work, PIN)).toEqual(expectedManifest());
     expect(existsSync(join(work, '.claude/skills/speckit-extra'))).toBe(false);
     expect(read(work, '.specify/memory/constitution.md')).toBe(SOURCES['constitution.md']);
-    expect(read(work, '.specify/templates/plan-template.md')).toBe('# Plan\n');
+  });
+
+  it("T171: installs the release's .specify/ templates, with no overrides folder", () => {
+    expect(read(work, '.specify/templates/checklist-template.md')).toBe('# Checklist\n');
+    expect(existsSync(join(work, '.specify/templates/overrides'))).toBe(false);
   });
 
   it('AC-003: substitutes {{repo}} only outside guardrail files', () => {
     expect(read(work, '.claude/agents/define.md')).toContain('{{repo}}');
-    expect(read(work, '.specify/templates/overrides/spec-template.md')).toBe(
-      `# Spec for ${PROJECT}\n`,
-    );
+    expect(read(work, '.specify/templates/spec-template.md')).toBe(`# Spec for ${PROJECT}\n`);
   });
 
   it('AC-003: writes .factory/config pinning <tag>@<sha> with the pinned inbox issue', () => {
@@ -257,13 +257,6 @@ describe('install refusals (AC-003)', { timeout: 30_000 }, () => {
     await expect(install(work, factoryRoot)).rejects.toThrow(/factory\/constitution\.md/);
     expect(readState().repos[PROJECT]?.issues).toEqual([]);
   });
-
-  it('AC-003: a missing `specify` is an environment error', () => {
-    const empty = tempDir('factory-path-');
-    expect(() => {
-      runSpecifyInit(empty, { ...process.env, PATH: empty });
-    }).toThrow(EnvironmentError);
-  });
 });
 
 describe('guardrail manifest (AC-003)', { timeout: 30_000 }, () => {
@@ -335,16 +328,15 @@ beforeAll(() => {
   ownerKeys = makeKeys();
 });
 
-/** Stands in for `specify init` on PATH. */
+/** A `specify` on PATH that records any run: the factory never runs it (T171). */
 const SPECIFY = `#!/bin/sh
-mkdir -p .specify/templates .specify/memory
-printf '# Plan\\n' > .specify/templates/plan-template.md
-printf '# Spec Kit default\\n' > .specify/memory/constitution.md
+touch "$(dirname "$0")/specify-ran"
+exit 1
 `;
 
 /**
  * The Owner's laptop: a factory clone whose release v1.0.0 is tagged with `tagKey` (`null`: an
- * unsigned annotated tag), the Owner key and key list in `~/.factory`, a fake `specify`, and the
+ * unsigned annotated tag), the Owner key and key list in `~/.factory`, a `specify` that must not run, and the
  * public factory repo on the fake GitHub serving the same tag.
  */
 function laptop({ tagKey }: { tagKey?: TestKeys | null } = {}) {
@@ -431,7 +423,8 @@ function laptop({ tagKey }: { tagKey?: TestKeys | null } = {}) {
     });
     return { code, stdout: out.join(''), stderr: err.join(''), asked };
   };
-  return { cli, cwd, sha, launchers };
+  const ranSpecify = () => existsSync(join(bin, 'specify-ran'));
+  return { cli, cwd, sha, launchers, ranSpecify };
 }
 
 function signedBy(dir: string, commit: string, keys: TestKeys): boolean {
@@ -484,6 +477,8 @@ describe('factory new (AC-001, AC-003)', { timeout: 120_000 }, () => {
     expect(project?.labels.map((l) => l.name)).toContain('pause:line');
     for (const [rel, text] of Object.entries(INSTALLED)) expect(read(work, rel)).toBe(text);
     expect(runGit(work, ['status', '--porcelain'])).toBe('');
+    expect(read(work, '.specify/templates/spec-template.md')).toBe('# Spec for owner/sample\n');
+    expect(made.ranSpecify()).toBe(false);
   });
 
   it('AC-003: main starts with one Owner-signed root commit; claude/define is pushed from it', () => {
@@ -574,6 +569,8 @@ describe('factory adopt (AC-007, AC-064)', { timeout: 120_000 }, () => {
     expect(read(work, 'src/app.ts')).toBe(APP);
     expect(read(work, '.gitattributes')).toBe(ATTRIBUTES);
     for (const [rel, text] of Object.entries(INSTALLED)) expect(read(work, rel)).toBe(text);
+    expect(read(work, '.specify/templates/checklist-template.md')).toBe('# Checklist\n');
+    expect(made.ranSpecify()).toBe(false);
     expect(made.launchers.local.launches).toEqual([]);
     expect(made.launchers.cloud.launches).toMatchObject([
       { role: 'define', station: 0, branch: 'claude/define' },
