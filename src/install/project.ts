@@ -1,7 +1,7 @@
-// Install steps shared by `factory new` and `factory adopt` (contracts/cli.md): Spec Kit, the
-// pinned release's guardrails checked against its manifest, labels, the pinned Owner inbox,
-// `.factory/config`, and the `claude/define` branch. The commands commit and push the result
-// as an Owner-signed commit.
+// Install steps shared by `factory new` and `factory adopt` (contracts/cli.md): the pinned
+// release's guardrails and `.specify/`, checked against its manifest (never `specify init`,
+// T171), labels, the pinned Owner inbox, `.factory/config`, and the `claude/define` branch. The
+// commands commit and push the result as an Owner-signed commit.
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -36,23 +36,6 @@ export interface InstallOptions extends GhOptions {
   agents: AgentsMode;
   /** Adopted repos: main's last unsigned commit. */
   baseline?: string;
-  /** Default: `specify init` in the work tree. */
-  runSpecify?: (cwd: string) => void;
-}
-
-/** Spec Kit's own files, without prompts. Its `.claude/` output is replaced by the release's. */
-export function runSpecifyInit(cwd: string, env: NodeJS.ProcessEnv = process.env): void {
-  const args = ['init', '--here', '--force', '--non-interactive', '--integration', 'claude'];
-  const result = spawnSync('specify', [...args, '--script', 'sh', '--ignore-agent-tools'], {
-    cwd,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    encoding: 'utf8',
-  });
-  if ((result.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT')
-    throw new EnvironmentError('`specify` not found on PATH; install Spec Kit and try again');
-  if (result.status !== 0)
-    throw new EnvironmentError(`specify init failed: ${(result.stderr || result.stdout).trim()}`);
 }
 
 export function formatConfig(fields: {
@@ -85,8 +68,6 @@ export async function installProject(options: InstallOptions): Promise<{ inboxIs
     throw new RefusedError(`${repo} already has ${CONFIG_PATH}; it is installed`);
 
   const manifest = await fetchPinnedManifest(options.factoryRepo, pin, options);
-  if (options.runSpecify) options.runSpecify(workdir);
-  else runSpecifyInit(workdir, options.env);
   render(options.factoryRoot, workdir, { repo });
   const mismatches = manifestMismatches(manifest.files, buildManifest(workdir, pin).files);
   if (mismatches.length > 0)

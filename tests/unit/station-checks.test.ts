@@ -139,7 +139,9 @@ describe('Specify output check (AC-010)', () => {
   });
 
   it('AC-010: the factory spec template has the three sections and fails until it is filled in', () => {
-    const path = fileURLToPath(new URL('../../factory/speckit/spec-template.md', import.meta.url));
+    const path = fileURLToPath(
+      new URL('../../factory/specify/templates/spec-template.md', import.meta.url),
+    );
     const template = readFileSync(path, 'utf8');
     for (const s of ['Problem', 'Non-goals', 'Affected areas'])
       expect(template).toMatch(new RegExp(`^## ${s} \\*\\(mandatory\\)\\*$`, 'm'));
