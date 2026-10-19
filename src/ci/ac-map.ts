@@ -6,37 +6,21 @@
 // tier and record.
 import { RefusedError } from '../cli/env.js';
 import { fileAt, mergeBase, resolveCommit, safeGit } from '../git/diff.js';
+import { branchFeatureDir } from '../model/naming.js';
 import { criterionLines } from '../stations/checks/spec.js';
 import type { Tier } from '../model/types.js';
 
 const AC_ID = /\bAC-\d+\b/g;
 
-const ITEM_BRANCH = /^claude\/(\d+-[a-z0-9-]+)$/;
-
 /**
- * The item's feature folder: `specs/<issue>-<slug>` for the branch `claude/<issue>-<slug>`, and
- * `.specify/feature.json` at `commit` must name exactly that. Otherwise a branch could point the
- * checks at another feature's criteria, or at a new trivial spec.
+ * The item's feature folder, `specs/<issue>-<slug>` for the branch `claude/<issue>-<slug>`, from
+ * the branch name alone (T170): nothing committed on the branch can point the checks at another
+ * feature's criteria, or at a new trivial spec.
  */
-export function featureDir(
-  repo: string,
-  commit: string,
-  branch: string,
-  env: NodeJS.ProcessEnv,
-): string {
-  const item = ITEM_BRANCH.exec(branch)?.[1];
-  if (item === undefined)
+export function featureDir(branch: string): string {
+  const dir = branchFeatureDir(branch);
+  if (dir === undefined)
     throw new RefusedError(`${branch} is not a work-item branch (claude/<issue>-<slug>)`);
-  const bytes = fileAt(repo, commit, '.specify/feature.json', env);
-  if (bytes === undefined) throw new RefusedError('no .specify/feature.json at the head');
-  const dir = (JSON.parse(bytes.toString('utf8')) as { feature_directory?: unknown })
-    .feature_directory;
-  if (typeof dir !== 'string' || !/^specs\/[^/]+$/.test(dir))
-    throw new RefusedError('.specify/feature.json: feature_directory must be specs/<feature>');
-  if (dir !== `specs/${item}`)
-    throw new RefusedError(
-      `.specify/feature.json names ${dir}, but the branch ${branch} is the feature specs/${item}`,
-    );
   return dir;
 }
 
@@ -57,7 +41,7 @@ export function checkedSet(
   env: NodeJS.ProcessEnv = process.env,
 ): CheckedSet {
   const to = resolveCommit(repo, head, env);
-  const spec = `${featureDir(repo, to, branch, env)}/spec.md`;
+  const spec = `${featureDir(branch)}/spec.md`;
   const text = fileAt(repo, to, spec, env)?.toString('utf8');
   if (text === undefined) throw new RefusedError(`no ${spec} at the head`);
   const lines = criterionLines(text);

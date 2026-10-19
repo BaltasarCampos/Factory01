@@ -1,8 +1,8 @@
 // The work-item branch (FR-016a, AC-066): created by the dispatcher, never by a session, under
 // the name the Owner signed in the `approved` record's `branch` field, never re-derived from the
-// issue title. Its first commit sets Spec Kit's feature folder (`.specify/feature.json`, research
-// R9) and seeds `events.jsonl` with Intake's issue-comment events; one draft pull request per
-// item is opened before Specify starts.
+// issue title, from which every reader takes the feature folder (T170, research R9). Its first
+// commit seeds `events.jsonl` with Intake's issue-comment events; one draft pull request per item
+// is opened before Specify starts.
 //
 // Commits are built with git plumbing on a temporary index, so the dispatcher's working copy is
 // never touched, and carry `Factory-Role: dispatcher`, which the trace accepts only for the files
@@ -145,7 +145,7 @@ export function seedEvents(issue: number, comments: readonly PostedComment[]): s
 }
 
 /**
- * Create the item branch from main with `.specify/feature.json` and the seeded event log.
+ * Create the item branch from main with the seeded event log.
  * False when the branch already exists: a later pass copies nothing.
  */
 export function createItemBranch(
@@ -156,10 +156,7 @@ export function createItemBranch(
 ): boolean {
   const feature = featureOf(item);
   if (fetchBranch(ctx, item.branch) !== undefined) return false;
-  const files = {
-    '.specify/feature.json': `${JSON.stringify({ feature_directory: `specs/${feature}` })}\n`,
-    [`specs/${feature}/events.jsonl`]: seedEvents(item.issue, comments),
-  };
+  const files = { [`specs/${feature}/events.jsonl`]: seedEvents(item.issue, comments) };
   const main = git(ctx, ['rev-parse', '--verify', `${mainRef}^{commit}`]);
   commitAndPush(ctx, main, files, dispatcherMessage(`create ${item.branch}`, feature), item.branch);
   git(ctx, [

@@ -14,7 +14,6 @@ import { tempDir } from '../helpers/keys.js';
 
 const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: owner/project\ninbox_issue: 1\n`;
 const FEATURE_DIR = 'specs/42-calc';
-const FEATURE = { '.specify/feature.json': JSON.stringify({ feature_directory: FEATURE_DIR }) };
 const SPEC = (ids: string[]) =>
   `# Feature: calc\n\n### Acceptance Scenarios\n\n${ids
     .map(
@@ -83,7 +82,6 @@ describe('factory ci red-green: each checked criterion (AC-012, AC-089)', () => 
       const { repo, base } = project();
       const head = repo.commit(
         {
-          ...FEATURE,
           [`${FEATURE_DIR}/spec.md`]: SPEC([
             'AC-001',
             'AC-002',
@@ -140,7 +138,7 @@ describe('factory ci red-green: each checked criterion (AC-012, AC-089)', () => 
     'AC-089: at tier 1 a criterion deleted from spec.md stays checked, and the finding names its waiver',
     async () => {
       const { repo, base } = project();
-      repo.commit({ ...FEATURE, [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001', 'AC-002']) }, 'spec');
+      repo.commit({ [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001', 'AC-002']) }, 'spec');
       const head = repo.commit(
         {
           [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001']),
@@ -163,10 +161,7 @@ describe('factory ci red-green: each checked criterion (AC-012, AC-089)', () => 
 
   it('AC-097: an empty checked set fails, and so does a criterion line without an ID', async () => {
     const { repo, base } = project();
-    const empty = repo.commit(
-      { ...FEATURE, [`${FEATURE_DIR}/spec.md`]: '# Feature: calc\n' },
-      'spec',
-    );
+    const empty = repo.commit({ [`${FEATURE_DIR}/spec.md`]: '# Feature: calc\n' }, 'spec');
     expect((await ci(repo, [base, empty, '--tier', '2'])).output).toContain(
       'no acceptance criteria to check',
     );
@@ -189,7 +184,6 @@ describe('factory ci red-green: a pass that is not green', () => {
       const { repo, base } = project();
       const head = repo.commit(
         {
-          ...FEATURE,
           [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001', 'AC-002', 'AC-003']),
           // A new module: the file cannot load at base, which is red for every test in it.
           'src/mul.ts': 'export const mul = (a: number, b: number) => a * b;\n',
@@ -216,21 +210,28 @@ describe('factory ci red-green: a pass that is not green', () => {
 });
 
 describe('factory ci red-green: the feature folder is the branch’s', () => {
-  it('AC-089: a feature.json pointing at another feature fails; no --branch is a usage error', async () => {
+  it(
+    'AC-089, T170: a .specify/feature.json naming another feature is ignored, and stops the skip',
+    async () => {
+      const { repo, base } = project();
+      const head = repo.commit(
+        {
+          '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/7-other' }),
+          [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001']),
+          'tests/more.test.ts': "import { it } from 'vitest';\nit('AC-001: more', () => {});\n",
+        },
+        'repoint',
+      );
+      const r = await ci(repo, [base, head, '--tier', '2']);
+      expect(r.output).not.toContain('skipped');
+      expect(r.output).toContain('AC-001: no tagged test fails at the merge base');
+    },
+    RUN,
+  );
+
+  it('AC-089: no --branch is a usage error; a branch that is not claude/<issue>-<slug> fails', async () => {
     const { repo, base } = project();
-    repo.commit({ 'specs/7-other/spec.md': SPEC(['AC-001']) }, 'other');
-    const head = repo.commit(
-      {
-        '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/7-other' }),
-        'tests/more.test.ts': "import { it } from 'vitest';\nit('AC-001: more', () => {});\n",
-      },
-      'repoint',
-    );
-    const r = await ci(repo, [base, head, '--tier', '2']);
-    expect(r.code).toBe(1);
-    expect(r.output).toContain(
-      `.specify/feature.json names specs/7-other, but the branch ${BRANCH} is the feature specs/42-calc`,
-    );
+    const head = repo.commit({ [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001']) }, 'spec');
     expect((await ci(repo, [base, head, '--tier', '2'], [])).code).toBe(2);
     expect((await ci(repo, [base, head], ['--branch', 'claude/define'])).output).toContain(
       'claude/define is not a work-item branch',
@@ -268,7 +269,6 @@ describe('factory ci red-green: the test-only skip (FR-042)', () => {
     const { repo, base } = project();
     const head = repo.commit(
       {
-        ...FEATURE,
         [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001']),
         'tests/helpers/numbers.ts': 'export const two = 2;\n',
         'tests/more.test.ts': "import { it } from 'vitest';\nit('AC-001: more', () => {});\n",
@@ -288,7 +288,6 @@ describe('factory ci red-green: the test-only skip (FR-042)', () => {
       const { repo, base } = project();
       const other = repo.commit(
         {
-          ...FEATURE,
           [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001']),
           'specs/7-other/spec.md': '# Other\n',
           'tests/more.test.ts': "import { it } from 'vitest';\nit('AC-001: more', () => {});\n",
@@ -314,7 +313,6 @@ describe('factory ci red-green: the test-only skip (FR-042)', () => {
 const featureCommit = (repo: TestRepo, extra: Files = {}) =>
   repo.commit(
     {
-      ...FEATURE,
       [`${FEATURE_DIR}/spec.md`]: SPEC(['AC-001', 'AC-002']),
       'src/mul.ts':
         "import { factor } from 'fake-dep';\nexport const mul = (a: number, b: number) => a * b * factor;\n",

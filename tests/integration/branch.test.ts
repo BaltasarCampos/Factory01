@@ -178,13 +178,14 @@ function editState(
 }
 
 describe('work-item branch creation (AC-066, FR-016a)', { timeout: 60_000 }, () => {
-  it('on new → triaged the dispatcher creates the branch named by the approved record, with feature.json (AC-066)', async () => {
+  it('on new → triaged the dispatcher creates the branch named by the approved record, committing no .specify/feature.json (AC-066, T170)', async () => {
     const t = setup();
 
     const result = await dispatchOnce(t.ctx);
 
     expect(result.moves).toEqual([expect.objectContaining({ from: 'new', to: 'triaged' })]);
-    expect(JSON.parse(t.show('.specify/feature.json'))).toEqual({ feature_directory: FEATURE });
+    const created = ['diff-tree', '--no-commit-id', '--name-only', '-r', `origin/${BRANCH}~1`];
+    expect(t.project.git(created)).toBe(`${FEATURE}/events.jsonl`);
     const message = t.project.git(['log', '-1', '--format=%B', `origin/${BRANCH}~1`]);
     expect(message).toMatch(/Factory-Role: dispatcher\nFactory-Item: 2-add-login/);
     expect(t.project.git(['rev-parse', `origin/${BRANCH}~2`])).toBe(t.project.revParse('main'));
@@ -440,7 +441,6 @@ describe('building → verifying (AC-012)', { timeout: 60_000 }, () => {
       tier: 1,
       states: ['state:building'],
       branch: {
-        '.specify/feature.json': `{"feature_directory": "${FEATURE}"}\n`,
         [`${FEATURE}/tasks.md`]: done,
         [`${FEATURE}/events.jsonl`]: `${forged}\n`,
       },
@@ -511,7 +511,10 @@ const SPEC = [
   '1. **AC-001** Given a visitor, When they sign in, Then they see the home page.',
   '',
 ].join('\n');
-const FEATURE_JSON = { '.specify/feature.json': `{"feature_directory": "${FEATURE}"}\n` };
+/** The branch as the dispatcher creates it, with no Intake events. */
+const CREATED = { [`${FEATURE}/events.jsonl`]: '' };
+/** A branch at Verify with no new events, so the path-filtered `append-only` job is not required. */
+const SPECIFIED = { [`${FEATURE}/spec.md`]: SPEC };
 
 describe('station evidence (T060)', { timeout: 60_000 }, () => {
   type State = Parameters<ReturnType<typeof gatherEvidence>>[0]['state'];
@@ -553,7 +556,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
   const tipOf = (t: ReturnType<typeof setup>) => t.project.git(['rev-parse', `origin/${BRANCH}`]);
 
   it('reads a merged item from main once its branch is deleted', async () => {
-    const t = setup({ branch: { ...FEATURE_JSON, [`${FEATURE}/spec.md`]: SPEC } });
+    const t = setup({ branch: { ...CREATED, [`${FEATURE}/spec.md`]: SPEC } });
     mergeIntoMain(t.project, BRANCH, '#2', { signWith: owner });
     t.project.git(['push', '-q', 'origin', '--delete', BRANCH]);
 
@@ -576,7 +579,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     ['plan.md', { [`${FEATURE}/spec.md`]: SPEC, [`${FEATURE}/tasks.md`]: '- [X] T001 a\n' }],
     ['tasks.md', { [`${FEATURE}/spec.md`]: SPEC, [`${FEATURE}/plan.md`]: '# Plan\n' }],
   ])('with %s missing the plan is not complete', async (missing, files) => {
-    const t = setup({ branch: { ...FEATURE_JSON, ...files } });
+    const t = setup({ branch: { ...CREATED, ...files } });
 
     const e = await gather(t, 'spec-approved');
 
@@ -587,7 +590,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
   });
 
   it('counts no red-green run when the open PR’s head is not the branch tip', async () => {
-    const t = setup({ branch: FEATURE_JSON });
+    const t = setup({ branch: CREATED });
     checkRun(tipOf(t), 'success');
     editState((repo) => {
       // Without the remote the fake GitHub keeps the PR head it was given: an older commit.
@@ -611,7 +614,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     ['a failed run', 'failure', {}, false],
     ['a passing run', 'success', {}, true],
   ] as const)('reads %s on the PR head', async (_name, conclusion, run, green) => {
-    const t = setup({ branch: FEATURE_JSON });
+    const t = setup({ branch: CREATED });
     editState((repo) => {
       repo.prs.push({
         ...{ number: 9, title: '#2', body: '', author: 'owner', headRefName: BRANCH },
@@ -635,7 +638,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
   });
 
   it('a session commit dressed as a manifest commit is not a pending manifest', async () => {
-    const t = setup({ branch: FEATURE_JSON });
+    const t = setup({ branch: CREATED });
     t.project.checkout(BRANCH);
     t.project.commit({ 'src/x.ts': 'x\n' }, 'Dispatcher: station 2 (spec) manifest');
     t.project.push(BRANCH);
@@ -649,7 +652,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     const integrate = '## Conflicts\n\n- src/login.ts changes behaviour\n';
     const t = setup({
       branch: {
-        ...FEATURE_JSON,
+        ...CREATED,
         [`${FEATURE}/reports/verify.md`]: verify.join('\n'),
         [`${FEATURE}/reports/integrate.md`]: integrate,
       },
@@ -672,7 +675,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
   it('T178: a stale conflict report sends nothing back, and the Integrator runs again', async () => {
     const integrate = '## Conflicts\n\n- src/login.ts\n';
     const t = setup({
-      branch: { ...FEATURE_JSON, [`${FEATURE}/reports/integrate.md`]: integrate },
+      branch: { ...CREATED, [`${FEATURE}/reports/integrate.md`]: integrate },
     });
     later(t, { [`${FEATURE}/.station.json`]: '{"station": 6}\n' });
     expect((await gather(t, 'integrating')).failure).toMatchObject({ station: 4 });
@@ -687,7 +690,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
   it('T178: stale Verify reports read as missing, so Verify runs again', async () => {
     const t = setup({
       branch: {
-        ...FEATURE_JSON,
+        ...CREATED,
         [`${FEATURE}/reports/verify.md`]: '| Check | Result |\n|---|---|\n| Review | pass |\n',
         [`${FEATURE}/reports/security.md`]:
           '## Scans\n\n- semgrep: none\n\n## Findings\n\n- none\n',
@@ -773,7 +776,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
   const SECURITY = '## Scans\n\n- semgrep: none\n\n## Findings\n\n- none\n';
   /** Evidence at Verify, read the way the dispatcher reads it, with `factory` as the release. */
   const verifying = (branch: Record<string, string>, factory = factoryClone()) => {
-    const t = setup({ branch: { ...FEATURE_JSON, ...branch } });
+    const t = setup({ branch: { ...SPECIFIED, ...branch } });
     openPr();
     return { t, factory, tip: tipOf(t) };
   };
@@ -821,7 +824,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
     actionsAt(tip, ITEM_JOBS);
     expect((await gatherAt(t, 'building', factory)).requiredChecks).toBeUndefined();
 
-    const noPr = setup({ branch: FEATURE_JSON });
+    const noPr = setup({ branch: CREATED });
     expect((await gatherAt(noPr, 'verifying', factory)).requiredChecks).toBeUndefined();
   });
 
@@ -858,7 +861,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       pin: `v1.0.0@${factory.sha}`,
       states: ['state:verifying'],
       branch: {
-        ...FEATURE_JSON,
+        ...SPECIFIED,
         [`${FEATURE}/reports/verify.md`]: '| Check | Result |\n|---|---|\n| Review | pass |\n',
         [`${FEATURE}/reports/security.md`]: SECURITY,
       },
@@ -901,7 +904,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
   });
 
   it('a Builder manifest without tasks.md names no task, and a missing branch is refused', () => {
-    const t = setup({ branch: FEATURE_JSON });
+    const t = setup({ branch: CREATED });
     const at = { projectDir: t.project.path, now: () => new Date('2026-10-01T11:00:00Z') };
 
     const manifest = writeStationManifest(

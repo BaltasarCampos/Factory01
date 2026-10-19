@@ -3,12 +3,14 @@
 // an item role's item, station and log come from the dispatcher-written `.station.json`, which
 // no role may edit. Anything that cannot be determined is an error, and the caller blocks.
 import { existsSync, readFileSync } from 'node:fs';
-import { join, normalize } from 'node:path';
+import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { appendEvent, type EventInput, type LogTarget } from '../events/append.js';
 import { roleVersion } from '../events/schema.js';
 import { loadConfig } from '../model/config.js';
+import { branchFeatureDir } from '../model/naming.js';
 import { ROLES, type RoleName, type Station } from '../model/types.js';
+import { checkedOutBranch, notOnItemBranch } from '../stations/checks/feature.js';
 
 export interface HookContext {
   /** The session's working copy. */
@@ -67,13 +69,11 @@ function readJson(path: string, what: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-/** The current item's station manifest: item, station and feature folder. */
+/** The current item's station manifest, in the checked-out branch's feature folder (T170). */
 function stationManifest(cwd: string, role: RoleName) {
-  const feature = readJson(join(cwd, '.specify', 'feature.json'), '.specify/feature.json');
-  const dir = feature.feature_directory;
-  if (typeof dir !== 'string' || !/^specs\/[^/]+$/.test(normalize(dir))) {
-    throw new HookError(`.specify/feature.json: feature_directory must be specs/<feature>`);
-  }
+  const branch = checkedOutBranch(cwd);
+  const dir = branch === undefined ? undefined : branchFeatureDir(branch);
+  if (dir === undefined) throw new HookError(notOnItemBranch(branch));
   const manifest = readJson(join(cwd, dir, '.station.json'), `${dir}/.station.json`);
   const { item, station } = manifest;
   if (manifest.role !== role) {

@@ -40,6 +40,19 @@ export function featureDir(issue: number, slug: string): string {
   return `specs/${String(issue)}-${slug}/`;
 }
 
+const ITEM_BRANCH = /^claude\/([1-9]\d*)-(.+)$/;
+
+/**
+ * `specs/<issue>-<slug>`, the feature folder of the item branch `claude/<issue>-<slug>` (T170);
+ * undefined for any other branch.
+ */
+export function branchFeatureDir(branch: string): string | undefined {
+  const m = ITEM_BRANCH.exec(branch);
+  return m?.[1] !== undefined && m[2] !== undefined && isSlug(m[2])
+    ? `specs/${m[1]}-${m[2]}`
+    : undefined;
+}
+
 /** Parse `<tag>@<sha>`; undefined when malformed (a bare tag is malformed). */
 export function parseReleasePin(text: string): ReleasePin | undefined {
   const m = RELEASE_PIN.exec(text);

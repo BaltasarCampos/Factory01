@@ -2,11 +2,10 @@
 // red-green, sandboxed (T164, always `{ sandbox: true }`, never reading `GITHUB_ACTIONS`) on the
 // checked head against main's verified head, in one workspace with one install: the head runs
 // once and all three read that run, then the base (weakened) and the base with the head's test
-// code (red-green) run once each. The feature folder comes
-// from the branch the verified `approved` record names; `featureDir` still refuses a
-// `.specify/feature.json` naming another folder. A weakened finding counts as covered only by a
-// `test:` waiver in force at the checked head; any finding covered by none refuses. No `gate:`
-// waiver applies: this release signs none (`CODE_CHECKS` is empty, T167).
+// code (red-green) run once each. The feature folder comes from the branch the verified
+// `approved` record names, and from nothing committed on it (T170). A weakened finding counts as
+// covered only by a `test:` waiver in force at the checked head; any finding covered by none
+// refuses. No `gate:` waiver applies: this release signs none (`CODE_CHECKS` is empty, T167).
 import { checkAcMap, type CheckedSet } from '../ci/ac-map.js';
 import { redGreenIn, redGreenPlan, type RedGreen } from '../ci/red-green.js';
 import { cleanPass, inWorkspace } from '../ci/vitest-run.js';

@@ -33,7 +33,7 @@ skims it for tier 1; you never approve it.
 ## Rules
 
 - You commit and push nothing; when you stop, the factory commits your output.
-- Work only in the feature folder `.specify/feature.json` names. Never create a branch or a
+- Work only in the feature folder your station prompt names. Never create a branch or a
   feature folder.
 - Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`,
   `.specify/memory/constitution.md`, `.factory/config`, `.factory/lockfile-policy`,
