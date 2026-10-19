@@ -524,6 +524,7 @@ const DECLINED = 'the Owner did not confirm the merge; nothing was merged';
 // The item's code and its tagged test: red at the base, where the code is missing, green at the head.
 const LOGIN = 'export const login = (name: string) => name.length > 0;\n';
 const VERIFY_REPORT = '| Check | Result |\n|---|---|\n| Review | pass |\n';
+const SECURITY_REPORT = '## Scans\n\n- semgrep: none\n\n## Findings\n\n- none\n';
 const LOGIN_TEST = [
   "import { expect, it } from 'vitest';",
   "import { login } from '../src/login.js';",
@@ -669,6 +670,8 @@ interface MergeSetup {
   noBrief?: boolean;
   /** The head branch's commits in order, in place of the item's one commit. */
   commits?: Files[];
+  /** Commits after the default first one (T179). */
+  then?: Files[];
   /** More issues on the project. */
   issues?: (Partial<FakeIssue> & { number: number })[];
   /** The pull request's fields besides its number and head branch. */
@@ -734,8 +737,10 @@ function mergeSetup(o: MergeSetup = {}) {
       'src/login.ts': LOGIN,
       'tests/login.test.ts': LOGIN_TEST,
       'specs/7-add-login/reports/verify.md': VERIFY_REPORT,
+      'specs/7-add-login/reports/security.md': SECURITY_REPORT,
       ...o.files,
     },
+    ...(o.then ?? []),
   ];
   let head = branch(repo, branchName, first);
   if (more.length > 0) {
@@ -1160,7 +1165,12 @@ function staleWaiver(
     ],
   });
   t.repo.checkout(ITEM_BRANCH);
-  const moved = t.repo.commit(movedFiles, 'moved on');
+  // Verify ran again on the moved head (T179), so its reports are current there.
+  const reports = {
+    'specs/7-add-login/reports/verify.md': `${VERIFY_REPORT}\nAfter the move.\n`,
+    'specs/7-add-login/reports/security.md': `${SECURITY_REPORT}\nAfter the move.\n`,
+  };
+  const moved = t.repo.commit({ ...movedFiles, ...reports }, 'moved on');
   t.repo.push(ITEM_BRANCH);
   t.repo.checkout('main');
   actionsAt(moved);
@@ -1573,7 +1583,8 @@ describe(
         'AC-001 → AC-001 signs in',
         'build-test (.github/workflows/ci.yml): success; 1 earlier run failed',
         'reports/verify.md: the review passes',
-        'reports/security.md: none on the branch',
+        `quoted from specs/7-add-login/reports/security.md written at ${t.head.slice(0, 12)}:`,
+        '> - semgrep: none',
         'Waivers in force: none',
       ])
         expect(r.stdout).toContain(line);
@@ -1587,6 +1598,41 @@ describe(
       expect(r.stderr).toMatch(
         /not merging: the approval summary is incomplete:\n\s+Tests and review: /,
       );
+    });
+
+    it('T179: a verify report a later commit made stale counts as missing, naming both commits', async () => {
+      const t = mergeSetup({ then: [{ 'src/login.ts': `${LOGIN}// later\n` }] });
+      const wrote = t.repo.git(['rev-parse', `${t.head}~1`]);
+
+      const r = await t.cli();
+
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(
+        `reports/verify.md written at ${wrote.slice(0, 12)} is stale: ${t.head.slice(0, 12)} came after it, so Verify must run again`,
+      );
+    });
+
+    it('T179: at tier 2 a missing or stale security report refuses; at tier 1 none is needed', async () => {
+      const security = 'specs/7-add-login/reports/security.md';
+      const none = await mergeSetup({ files: { [security]: null } }).cli();
+      expect(none.code).toBe(1);
+      expect(none.stderr).toContain(
+        'no reports/security.md on claude/7-add-login, which tier 2 needs',
+      );
+
+      const stale = await mergeSetup({
+        then: [
+          { 'src/login.ts': `${LOGIN}// later\n` },
+          { 'specs/7-add-login/reports/verify.md': `${VERIFY_REPORT}\n` },
+        ],
+      }).cli();
+      expect(stale.code).toBe(1);
+      expect(stale.stderr).toMatch(
+        /reports\/security\.md written at \w{12} is stale: \w{12} came after it/,
+      );
+
+      const one = await mergeSetup({ tier: 1, files: { [security]: null } }).cli();
+      expect(one.stderr).not.toContain('reports/security.md');
     });
 
     it('refuses an upgrade pull request until slice 35', async () => {

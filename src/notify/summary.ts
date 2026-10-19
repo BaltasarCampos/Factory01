@@ -102,6 +102,16 @@ export interface SummaryFacts {
         events?: string | undefined;
       }
     | undefined;
+  /**
+   * `factory merge`: where each Verify report was written, and the first later commit that made it
+   * stale (T179); a stale report is absent from `files`.
+   */
+  reports?:
+    | {
+        verify?: { wrote: string; staleAt?: string } | undefined;
+        security?: { wrote: string; staleAt?: string } | undefined;
+      }
+    | undefined;
   pause?: PauseFacts | undefined;
   /** Spec re-approval: the last approved blob and the diff from it (undefined: not available). */
   previousSpec?: { blob: string; diff: string | undefined } | undefined;
@@ -242,6 +252,22 @@ function source(f: SummaryFacts, name = 'spec.md'): string {
   return `${dir}/${name}${f.commit ? ` at ${short(f.commit)}` : ''}`;
 }
 
+/** A Verify report's source: the commit it was written at, when `factory merge` found it. */
+function reportSource(f: SummaryFacts, report: 'verify' | 'security'): string {
+  const at = f.reports?.[report];
+  if (at === undefined) return source(f, `reports/${report}.md`);
+  const dir = `specs/${(f.branch ?? '').slice('claude/'.length)}`;
+  return `${dir}/reports/${report}.md written at ${short(at.wrote)}`;
+}
+
+/** Why a Verify report counts as missing: there is none, or a later commit made it stale. */
+function noReport(f: SummaryFacts, report: 'verify' | 'security', needs = ''): string {
+  const at = f.reports?.[report];
+  if (at?.staleAt !== undefined)
+    return `reports/${report}.md written at ${short(at.wrote)} is stale: ${short(at.staleAt)} came after it, so Verify must run again`;
+  return `no reports/${report}.md on ${f.branch ?? 'the branch'}${needs}`;
+}
+
 /** The meaningful lines of a spec section, without list markers. */
 function specSection(spec: string, name: string): string[] {
   const lines = spec.replace(/<!--[\s\S]*?-->/g, '').split('\n');
@@ -263,7 +289,7 @@ function securityLines(f: SummaryFacts): string[] {
   );
   const r = checkSecurityReport(report);
   const gaps = r.missing.slice(0, r.missing.length - r.open.length);
-  return quoted(source(f, 'reports/security.md'), [...shown, ...gaps].map(visible));
+  return quoted(reportSource(f, 'security'), [...shown, ...gaps].map(visible));
 }
 
 /** Open findings from both Verify reports, and the waivers in force at the checked head. */
@@ -276,8 +302,8 @@ function mergeRisks(f: SummaryFacts): string[] {
       ? ['Open findings: none in reports/verify.md or reports/security.md']
       : [
           'Open findings:',
-          ...quoted(source(f, 'reports/verify.md'), review.map(visible)),
-          ...quoted(source(f, 'reports/security.md'), security.map(visible)),
+          ...quoted(reportSource(f, 'verify'), review.map(visible)),
+          ...quoted(reportSource(f, 'security'), security.map(visible)),
         ]),
     `Waivers in force: ${(f.merge?.waivers ?? []).map(visible).join(', ') || 'none'}`,
   ];
@@ -526,14 +552,18 @@ function results(f: SummaryFacts, gate: SummaryGate): Part {
       missing: `this release has no ${checkName(f)} check yet, so there is nothing to waive`,
     };
   const report = f.files?.verify;
-  if (report === undefined) return { missing: `no reports/verify.md on ${f.branch ?? ''}` };
+  if (report === undefined) return { missing: noReport(f, 'verify') };
   const r = checkVerifyReport(report);
   const lines = r.complete ? ['reports/verify.md: the review passes'] : r.missing;
   if (gate !== 'merge') return quoted(source(f, 'reports/verify.md'), lines);
   if (f.merge === undefined) return noMerge;
+  // As Verify holds it: tier 2–3 needs a current security report; an unknown tier counts as 3.
+  const tier = f.tier ?? 3;
+  if (f.files?.security === undefined && tier >= 2)
+    return { missing: noReport(f, 'security', `, which tier ${String(tier)} needs`) };
   return [
     ...mergeResults(f.merge),
-    ...quoted(source(f, 'reports/verify.md'), lines.map(visible)),
+    ...quoted(reportSource(f, 'verify'), lines.map(visible)),
     ...securityLines(f),
   ];
 }

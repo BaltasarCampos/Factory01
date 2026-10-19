@@ -18,6 +18,7 @@ import { assertNewestKey } from '../approvals/newest-key.js';
 import { checkedSet, type CheckedSet } from '../ci/ac-map.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
+import { reportAt, type Git } from '../dispatcher/currency.js';
 import { pendingManifest } from '../dispatcher/manifest.js';
 import { mergeBase, safeDiff, safeGit, type FileChange } from '../git/diff.js';
 import { checkedHead, checkedMain, type MergeContext } from '../merge/context.js';
@@ -252,6 +253,27 @@ const rulesInput = (c: MergeContext) => ({
  * Run the laptop's checks of the item, then show its merge summary (AC-094), built from what the
  * checks found; refuse when a required part is missing.
  */
+/**
+ * The Verify reports at the checked head as the report currency rule reads them (T179), with
+ * main's history as this laptop verified it: a stale report is dropped from the files, so it
+ * counts as missing, and the summary names where each was written.
+ */
+function currentReports(c: MergeContext, branch: string, view: ReturnType<typeof viewAt>) {
+  const run: Git = (args) => {
+    const r = safeGit(c.cwd, args, c.env);
+    if (r.status !== 0) throw new RefusedError(`git ${args[0] ?? ''} failed: ${r.stderr}`);
+    return r.stdout.toString().trim();
+  };
+  const verified = new Set(c.commits.map((m) => m.commit));
+  const dir = `specs/${branch.slice('claude/'.length)}`;
+  const at = (name: string) => reportAt(run, c.head, dir, `reports/${name}.md`, verified);
+  const reports = { verify: at('verify'), security: at('security') };
+  const files = { ...view.files };
+  if (reports.verify?.staleAt !== undefined) delete files.verify;
+  if (reports.security?.staleAt !== undefined) delete files.security;
+  return { files, reports };
+}
+
 async function itemSummary(
   ctx: CommandContext,
   c: MergeContext,
@@ -270,10 +292,11 @@ async function itemSummary(
     ...{ repo: c.config.repo, inboxIssue: c.config.inbox_issue },
     ...{ home: c.home, cwd: c.cwd, env: c.env },
   };
+  const { files, reports } = currentReports(c, chain.branch, viewAt(project, chain.branch, c.head));
   const summary = buildSummary({
     ...{ gate: 'merge', kind: 'merge', issue: await viewIssue(project, at.issue) },
     ...{ tier: chain.tier, branch: chain.branch, commit: c.head },
-    files: viewAt(project, chain.branch, c.head).files,
+    ...{ files, reports },
     merge: mergeView(c, at.base, at.changes, chain, at.set, at.ci, laptop),
   });
   if (!summary.ok)

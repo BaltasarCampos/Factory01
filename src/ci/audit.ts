@@ -9,19 +9,20 @@
 //   against registry.npmjs.org, with npm's user and global config disabled and no `npm_config_*`
 //   variable passed through, so no `.npmrc`, in the pull request or on the runner, changes the
 //   registry or the level. A run that reports no audit, offline included, fails the check.
-// An unchanged lockfile cannot introduce an advisory, so it is not audited at all.
+// Before anything else, the head's lockfile must pass the identity rule (lockfile.ts). An unchanged
+// lockfile cannot introduce an advisory, so it is not audited at all.
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RefusedError } from '../cli/env.js';
 import { fileAt, mergeBase, safeGit } from '../git/diff.js';
+import { LOCK, readLockfile } from './lockfile.js';
 import { pinnedTool } from './scan.js';
 import { RELEASE_CI } from './test.js';
 
 export const REGISTRY = 'https://registry.npmjs.org';
 const LEVELS = ['info', 'low', 'moderate', 'high', 'critical'];
-const LOCK = 'package-lock.json';
 
 interface Advisory {
   id: string;
@@ -89,6 +90,9 @@ export function scanAudit(
   };
   if (!LEVELS.includes(level)) throw new RefusedError(`audit.json: unknown level ${level}`);
   const start = mergeBase(repo, base, head, env);
+  // The lockfile identity rule first (lockfile.ts): npm must audit the packages the entries name.
+  const identity = readLockfile(repo, head, env).problems;
+  if (identity.length > 0) return { findings: identity, base: 0, head: 0, unchanged: false };
   const blob = (commit: string) =>
     safeGit(repo, ['rev-parse', '--verify', '-q', `${commit}:${LOCK}`], env)
       .stdout.toString()

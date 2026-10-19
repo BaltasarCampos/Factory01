@@ -10,6 +10,7 @@ import { delimiter } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { licenceAllowed } from '../../src/ci/licences.js';
+import { readLockfile } from '../../src/ci/lockfile.js';
 import { runCli } from '../../src/cli/commands.js';
 import { gitEnv, makeRepo, type TestRepo } from '../helpers/git-repo.js';
 
@@ -17,15 +18,28 @@ const NPM = fileURLToPath(new URL('../helpers/npm', import.meta.url));
 
 interface Pkg {
   version: string;
+  /** Default: the registry tarball of the entry's name and version; null leaves it out. */
+  resolved?: string | null;
+  name?: string;
+  inBundle?: boolean;
   /** What the lockfile claims; the check must never read it. */
   license?: string;
   fakeAdvisories?: { source: number; severity: string; title: string }[];
 }
 
+/** The registry tarball npm resolves `name@version` to. */
+const tgz = (name: string, version: string) =>
+  `https://registry.npmjs.org/${name}/-/${name.slice(name.indexOf('/') + 1)}-${version}.tgz`;
+
 /** A lockfile v3 listing `packages` under node_modules/. */
 function lockfile(packages: Record<string, Pkg>, root: Record<string, unknown> = {}): string {
   const entries = Object.fromEntries(
-    Object.entries(packages).map(([name, p]) => [`node_modules/${name}`, p]),
+    Object.entries(packages).map(([key, { resolved, ...p }]) => {
+      const name = p.name ?? key;
+      const tarball = tgz(name, p.version);
+      const at = resolved === null ? {} : { resolved: resolved ?? tarball };
+      return [`node_modules/${key}`, { ...p, ...at }];
+    }),
   );
   return `${JSON.stringify(
     {
@@ -186,7 +200,10 @@ describe('factory ci licences (T169)', () => {
         return;
       }
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ name, version, license: licences[key] }));
+      const found = licences[key];
+      // A `{ licenses: [...] }` value stands for the registry's legacy array field.
+      const legacy = typeof found === 'object' && found !== null && 'licenses' in found;
+      res.end(JSON.stringify({ name, version, ...(legacy ? found : { license: found }) }));
     });
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
     registry = `http://127.0.0.1:${String((server.address() as AddressInfo).port)}`;
@@ -261,6 +278,12 @@ describe('factory ci licences (T169)', () => {
     ['SEE LICENSE IN', 'SEE LICENSE IN LICENSE.md', false],
     ['an unbalanced expression', '(MIT OR ISC', false],
     ['a legacy { type } object', { type: 'BSD-3-Clause' }, true],
+    [
+      'a legacy licenses array, read as an OR',
+      { licenses: [{ type: 'GPL-3.0' }, { type: 'MIT' }] },
+      true,
+    ],
+    ['a legacy licenses array with no allowed type', { licenses: [{ type: 'GPL-3.0' }] }, false],
   ])('%s: allowed is %s', async (_name, licence, ok) => {
     licences = { 'pkg@1.0.0': licence };
     const r = await check(lockfile({}), lockfile({ pkg: { version: '1.0.0' } }));
@@ -273,5 +296,69 @@ describe('factory ci licences (T169)', () => {
     expect(licenceAllowed('Apache-2.0', list)).toBe(false);
     expect(licenceAllowed('MIT OR', list)).toBe(false);
     expect(licenceAllowed('', list)).toBe(false);
+  });
+});
+
+describe('the lockfile identity rule, before both checks (T169, 24b-5)', () => {
+  const MIT = { version: '1.0.0' };
+  it.each<[string, Record<string, Pkg>, string]>([
+    [
+      'an alias without its name field',
+      { 'nice-mit': { ...MIT, resolved: tgz('evil', '1.0.0') } },
+      'node_modules/nice-mit: resolves to "https://registry.npmjs.org/evil/-/evil-1.0.0.tgz", not https://registry.npmjs.org/nice-mit/-/nice-mit-1.0.0.tgz',
+    ],
+    [
+      'a registry tarball of another package',
+      { left: { ...MIT, resolved: tgz('right', '1.0.0') } },
+      'node_modules/left: resolves to "https://registry.npmjs.org/right/-/right-1.0.0.tgz"',
+    ],
+    [
+      'another host',
+      { left: { ...MIT, resolved: 'https://registry.evil.invalid/left/-/left-1.0.0.tgz' } },
+      'node_modules/left: resolves to "https://registry.evil.invalid/left/-/left-1.0.0.tgz"',
+    ],
+    [
+      'a git dependency',
+      { left: { ...MIT, resolved: 'git+ssh://git@github.com/someone/left.git#0123456789abcdef' } },
+      'node_modules/left: resolves to "git+ssh://git@github.com/someone/left.git#0123456789abcdef"',
+    ],
+    [
+      'no resolved outside a bundle',
+      { left: { ...MIT, resolved: null } },
+      'node_modules/left: resolves to nothing',
+    ],
+    [
+      'a name npm refuses',
+      { 'Bad Name': MIT },
+      'node_modules/Bad Name: "Bad Name" is not a valid npm package name',
+    ],
+    [
+      'a version that is not semver',
+      { left: { version: '1.0' } },
+      'node_modules/left: version "1.0" is not semver',
+    ],
+  ])('%s fails both jobs, naming the entry', async (_name, packages, finding) => {
+    const { repo, start } = project(lockfile({}), lockfile(packages));
+    const audit = await ci(repo, ['scan', 'audit', start, 'HEAD']);
+    const licences = await ci(repo, ['licences', start, 'HEAD'], {
+      registry: 'http://127.0.0.1:9',
+    });
+
+    for (const r of [audit, licences]) {
+      expect(r.code).toBe(1);
+      expect(r.output).toContain(`package-lock.json: ${finding}`);
+    }
+  });
+
+  it('a bundled dependency may have no resolved; this repository’s own lockfile passes', () => {
+    const { repo } = project(
+      lockfile({}),
+      lockfile({ inner: { version: '2.0.0', resolved: null, inBundle: true } }),
+    );
+    expect(readLockfile(repo.path, 'HEAD', gitEnv).problems).toEqual([]);
+    const root = fileURLToPath(new URL('../..', import.meta.url));
+    const own = readLockfile(root, 'HEAD', gitEnv);
+    expect(own.problems).toEqual([]);
+    expect(own.packages.some((p) => p.name.startsWith('@'))).toBe(true);
   });
 });
