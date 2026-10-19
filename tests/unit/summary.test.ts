@@ -507,7 +507,14 @@ describe('merge summary of a work item (T068, AC-094)', () => {
     facts({
       gate: 'merge',
       kind: 'merge',
-      files: { spec: SPEC, tasks: TASKS, verify: VERIFY, events: EVENTS, ...files },
+      files: {
+        spec: SPEC,
+        tasks: TASKS,
+        verify: VERIFY,
+        security: SECURITY,
+        events: EVENTS,
+        ...files,
+      },
       merge: view(over),
     });
 
@@ -641,11 +648,37 @@ describe('merge summary of a work item (T068, AC-094)', () => {
     const risks = part(t, PART_TITLES.risks);
     expect(risks).toContain('quoted from specs/42-add-login/reports/security.md at 5e6f7a8b9c0d:');
     expect(risks).toContain('> eval at src/a.ts:1: input\\u{202e}reaches eval');
-    expect(part(text(merge()), PART_TITLES.results)).toContain(
+    const tierOne = { ...merge({}, { security: undefined }), tier: 1 as const };
+    expect(part(text(tierOne), PART_TITLES.results)).toContain(
       'reports/security.md: none on the branch',
     );
     expect(part(text(merge()), PART_TITLES.risks)).toContain(
       'Open findings: none in reports/verify.md or reports/security.md',
+    );
+  });
+
+  it('T179: at tier 2–3 no security report refuses; a stale report names both commits; a current one where it was written', () => {
+    const none = buildSummary(merge({}, { security: undefined }));
+    expect(none.ok ? [] : none.missing).toEqual([
+      'Tests and review: no reports/security.md on claude/42-add-login, which tier 2 needs',
+    ]);
+
+    const wrote = 'a'.repeat(40);
+    const later = 'b'.repeat(40);
+    const stale = buildSummary({
+      ...merge({}, { verify: undefined }),
+      reports: { verify: { wrote, staleAt: later }, security: { wrote } },
+    });
+    expect(stale.ok ? [] : stale.missing).toEqual([
+      'Tests and review: reports/verify.md written at aaaaaaaaaaaa is stale: bbbbbbbbbbbb came after it, so Verify must run again',
+    ]);
+
+    const t = text({ ...merge(), reports: { verify: { wrote }, security: { wrote: later } } });
+    expect(part(t, PART_TITLES.results)).toContain(
+      'quoted from specs/42-add-login/reports/verify.md written at aaaaaaaaaaaa:',
+    );
+    expect(part(t, PART_TITLES.results)).toContain(
+      'quoted from specs/42-add-login/reports/security.md written at bbbbbbbbbbbb:',
     );
   });
 

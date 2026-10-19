@@ -28,7 +28,7 @@ import { checkSpec } from '../stations/checks/spec.js';
 import { checkVerifyReport } from '../stations/checks/verify.js';
 import { conflictFailure } from '../stations/edges.js';
 import { featureOf, fetchBranch, git, type BranchContext } from './branch.js';
-import { reportCurrent } from './currency.js';
+import { branchGit, reportCurrent } from './currency.js';
 import type { Candidate, StationEvidence } from './dispatch.js';
 import { pendingManifest } from './manifest.js';
 import { STATION_OF, type Evidence } from './transitions.js';
@@ -137,7 +137,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const report = (name: string): string | undefined => {
       const text = read(name);
       if (text === undefined || tip === undefined) return text;
-      return reportCurrent(at, tip, dir, name, verified) ? text : undefined;
+      return reportCurrent(branchGit(at), tip, dir, name, verified) ? text : undefined;
     };
 
     const spec = read('spec.md');

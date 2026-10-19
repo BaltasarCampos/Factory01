@@ -332,4 +332,19 @@ describe('resignView: what changed since a waived head (T151)', () => {
       /branch was rewritten/,
     );
   });
+
+  it('T178 (24b-5): a shallow clone or a malformed waived head refuses with an error, never as a rewrite', () => {
+    const { repo, waivedHead } = waived();
+    repo.commit({ 'src/b.ts': 'export const later = true;\n' }, 'after the waiver');
+    repo.push(ITEM);
+    const shallow = tempDir();
+    runGit(shallow, ['clone', '-q', '--depth=1', '--branch', ITEM, `file://${repo.origin}`, '.']);
+    const head = runGit(shallow, ['rev-parse', 'HEAD']);
+
+    expect(() => inHistory(shallow, waivedHead, head)).toThrow(
+      /this clone is shallow, so its history cannot show whether the branch was rewritten/,
+    );
+    expect(() => inHistory(repo.path, 'HEAD~1', head)).toThrow(/is not a commit name/);
+    expect(inHistory(repo.path, waivedHead, head)).toBe(true);
+  });
 });

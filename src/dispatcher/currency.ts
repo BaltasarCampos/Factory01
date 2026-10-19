@@ -9,12 +9,22 @@
 //   tree is exactly what `git merge-tree --write-tree` makes of its two parents.
 //
 // Any other later commit makes the report stale. The rule reads only content: commit authors and
-// trailers are agent-written and can be forged.
+// trailers are agent-written and can be forged. The dispatcher and `factory merge` (T179) share it,
+// each with its own git runner and its own verified history of main.
 import { git, type BranchContext } from './branch.js';
+
+/** Runs git with these arguments and returns its trimmed stdout; throws when git fails. */
+export type Git = (args: readonly string[]) => string;
+
+/** The dispatcher's runner, in its clone. */
+export const branchGit =
+  (at: BranchContext): Git =>
+  (args) =>
+    git(at, args);
 
 /** Whether `commit`, with these parents, is a merge of main that git makes on its own. */
 export function cleanMainMerge(
-  at: BranchContext,
+  run: Git,
   commit: string,
   parents: readonly string[],
   verified: ReadonlySet<string>,
@@ -24,8 +34,8 @@ export function cleanMainMerge(
   if (!verified.has(theirs)) return false;
   try {
     // Exit 1 (a conflict) throws, like any failure: the merge is then not clean.
-    const tree = git(at, ['merge-tree', '--write-tree', ours, theirs]).split('\n')[0];
-    return tree === git(at, ['rev-parse', `${commit}^{tree}`]);
+    const tree = run(['merge-tree', '--write-tree', ours, theirs]).split('\n')[0];
+    return tree === run(['rev-parse', `${commit}^{tree}`]);
   } catch {
     return false;
   }
@@ -34,9 +44,9 @@ export function cleanMainMerge(
 const TICK = /^(\s*- \[) (\] T\d+.*)$/;
 
 /** Whether `path` differs between the two commits in exactly one line, a task's `[ ]` ticked. */
-function oneTick(at: BranchContext, parent: string, commit: string, path: string): boolean {
-  const before = git(at, ['show', `${parent}:${path}`]).split('\n');
-  const after = git(at, ['show', `${commit}:${path}`]).split('\n');
+function oneTick(run: Git, parent: string, commit: string, path: string): boolean {
+  const before = run(['show', `${parent}:${path}`]).split('\n');
+  const after = run(['show', `${commit}:${path}`]).split('\n');
   if (before.length !== after.length) return false;
   const changed = before.flatMap((line, i) => (line === after[i] ? [] : [i]));
   if (changed.length !== 1) return false;
@@ -46,16 +56,16 @@ function oneTick(at: BranchContext, parent: string, commit: string, path: string
 }
 
 function keepsReport(
-  at: BranchContext,
+  run: Git,
   dir: string,
   commit: string,
   parents: readonly string[],
   verified: ReadonlySet<string>,
 ): boolean {
-  if (parents.length > 1) return cleanMainMerge(at, commit, parents, verified);
+  if (parents.length > 1) return cleanMainMerge(run, commit, parents, verified);
   const [parent] = parents;
   if (parent === undefined) return false;
-  const names = git(at, [
+  const names = run([
     ...['diff-tree', '-r', '-z', '--name-only', '--no-commit-id', '--no-renames'],
     ...[parent, commit],
   ])
@@ -65,29 +75,48 @@ function keepsReport(
   if (names.every((p) => p.startsWith(`${dir}/reports/`))) return true;
   if (names.length !== 1) return false;
   if (names[0] === `${dir}/.station.json`) return true;
-  return names[0] === `${dir}/tasks.md` && oneTick(at, parent, commit, `${dir}/tasks.md`);
+  return names[0] === `${dir}/tasks.md` && oneTick(run, parent, commit, `${dir}/tasks.md`);
+}
+
+/** Where a report was written, and the first later commit that made it stale, if any. */
+export interface ReportAt {
+  wrote: string;
+  staleAt?: string;
 }
 
 /**
- * Whether `${dir}/${name}` at `tip` is current: false when no commit wrote it, or when a later
- * first-parent commit is not one the rule keeps. `verified` holds main's verified first-parent
- * commits.
+ * Where `${dir}/${name}` at `tip` was last written, and whether it is still current: undefined when
+ * no commit wrote it. `verified` holds main's verified first-parent commits.
  */
+export function reportAt(
+  run: Git,
+  tip: string,
+  dir: string,
+  name: string,
+  verified: ReadonlySet<string>,
+): ReportAt | undefined {
+  const wrote = run(['rev-list', '-1', tip, '--', `${dir}/${name}`]);
+  if (wrote === '') return undefined;
+  // Oldest first, so the first commit the rule does not keep is the one named.
+  const later = run(['rev-list', '--first-parent', '--reverse', '--parents', `${wrote}..${tip}`]);
+  const stale = later
+    .split('\n')
+    .filter((l) => l !== '')
+    .find((line) => {
+      const [commit = '', ...parents] = line.split(' ');
+      return !keepsReport(run, dir, commit, parents, verified);
+    });
+  return stale === undefined ? { wrote } : { wrote, staleAt: stale.split(' ')[0] ?? '' };
+}
+
+/** Whether `${dir}/${name}` at `tip` was written and is still current. */
 export function reportCurrent(
-  at: BranchContext,
+  run: Git,
   tip: string,
   dir: string,
   name: string,
   verified: ReadonlySet<string>,
 ): boolean {
-  const wrote = git(at, ['rev-list', '-1', tip, '--', `${dir}/${name}`]);
-  if (wrote === '') return false;
-  const later = git(at, ['rev-list', '--first-parent', '--parents', `${wrote}..${tip}`]);
-  return later
-    .split('\n')
-    .filter((l) => l !== '')
-    .every((line) => {
-      const [commit = '', ...parents] = line.split(' ');
-      return keepsReport(at, dir, commit, parents, verified);
-    });
+  const at = reportAt(run, tip, dir, name, verified);
+  return at !== undefined && at.staleAt === undefined;
 }

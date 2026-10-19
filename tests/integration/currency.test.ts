@@ -2,7 +2,12 @@
 // first-parent commit is a report, the dispatcher's manifest, one task ticked, or a clean merge of
 // main as git recomputes it; decided by content, never by author or trailer.
 import { beforeEach, describe, expect, it } from 'vitest';
-import { cleanMainMerge, reportCurrent } from '../../src/dispatcher/currency.js';
+import {
+  branchGit,
+  cleanMainMerge,
+  reportAt,
+  reportCurrent,
+} from '../../src/dispatcher/currency.js';
 import { makeRepo, type TestRepo } from '../helpers/git-repo.js';
 
 const ITEM = 'claude/42-add-login';
@@ -11,7 +16,7 @@ const TASKS = '# Tasks\n\n- [X] T001 write the test\n- [ ] T002 make it pass\n- 
 
 describe('report currency (T178)', { timeout: 60_000 }, () => {
   let repo: TestRepo;
-  const at = () => ({ projectDir: repo.path, now: () => new Date() });
+  const at = () => branchGit({ projectDir: repo.path, now: () => new Date() });
   /** Main's first-parent commits, as the signed-history walk would verify them. */
   const verifiedMain = () => new Set(repo.git(['rev-list', '--first-parent', 'main']).split('\n'));
   const current = (verified = verifiedMain()) =>
@@ -121,6 +126,21 @@ describe('report currency (T178)', { timeout: 60_000 }, () => {
     mergeMain();
 
     expect(current(new Set())).toBe(false);
+  });
+
+  it('T179: reportAt names the commit that wrote the report and the first later one that made it stale', () => {
+    const wrote = repo.revParse(ITEM);
+    repo.commit({ [`${DIR}/.station.json`]: '{}\n' }, 'Dispatcher');
+    const first = repo.commit({ 'src/login.ts': 'export const login = 2;\n' }, 'fix');
+    repo.commit({ 'src/login.ts': 'export const login = 3;\n' }, 'fix again');
+    const tip = repo.revParse(ITEM);
+
+    expect(reportAt(at(), tip, DIR, 'reports/integrate.md', verifiedMain())).toEqual({
+      wrote,
+      staleAt: first,
+    });
+    expect(reportAt(at(), wrote, DIR, 'reports/integrate.md', verifiedMain())).toEqual({ wrote });
+    expect(reportAt(at(), tip, DIR, 'reports/verify.md', verifiedMain())).toBeUndefined();
   });
 
   it('cleanMainMerge refuses a commit with one parent or three', () => {

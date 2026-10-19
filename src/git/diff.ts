@@ -242,8 +242,11 @@ const READ_FLAGS = [
 export type ResignView = { kind: 'diff'; text: string } | { kind: 'interdiff'; text: string };
 
 /**
- * Whether `waivedHead` is in the clone and in `head`'s history. Branches only gain commits, so
- * anything else means the branch was rewritten (T178).
+ * Whether `waivedHead` is in `head`'s history, decided on the clone alone: branches only gain
+ * commits, so false means the branch was rewritten (T178). It answers false only when the clone
+ * can prove it: `git merge-base --is-ancestor` exits 1, or the waived head is missing from a
+ * complete clone that has `head`. A shallow clone, a missing head or any other git failure refuses
+ * with an error instead, so neither a lost connection nor a partial clone reads as a rewrite.
  */
 export function inHistory(
   repo: string,
@@ -251,9 +254,26 @@ export function inHistory(
   head: string,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  if (!/^[0-9a-f]{40}$/.test(waivedHead)) return false;
-  if (safeGit(repo, ['cat-file', '-e', `${waivedHead}^{commit}`], env).status !== 0) return false;
-  return safeGit(repo, ['merge-base', '--is-ancestor', waivedHead, head], env).status === 0;
+  const failed = (what: string, r: ReturnType<typeof safeGit>) =>
+    new RefusedError(
+      `cannot tell whether ${what}: ${r.stderr || `git exited ${String(r.status)}`}`,
+    );
+  if (!/^[0-9a-f]{40}$/.test(waivedHead))
+    throw new RefusedError(`the waived head ${JSON.stringify(waivedHead)} is not a commit name`);
+  const shallow = safeGit(repo, ['rev-parse', '--is-shallow-repository'], env);
+  if (shallow.status !== 0) throw failed('the clone is complete', shallow);
+  if (shallow.stdout.toString().trim() !== 'false')
+    throw new RefusedError(
+      'this clone is shallow, so its history cannot show whether the branch was rewritten; run git fetch --unshallow and retry',
+    );
+  const present = (sha: string) => safeGit(repo, ['cat-file', '-e', `${sha}^{commit}`], env);
+  const tip = present(head);
+  if (tip.status !== 0) throw failed(`the clone has the head ${head.slice(0, 12)}`, tip);
+  // safeGit throws when git cannot run at all, so a non-zero exit here means the commit is missing.
+  if (present(waivedHead).status !== 0) return false;
+  const ancestor = safeGit(repo, ['merge-base', '--is-ancestor', waivedHead, head], env);
+  if (ancestor.status === 0 || ancestor.status === 1) return ancestor.status === 0;
+  throw failed(`${waivedHead.slice(0, 12)} is in the history of ${head.slice(0, 12)}`, ancestor);
 }
 
 /**

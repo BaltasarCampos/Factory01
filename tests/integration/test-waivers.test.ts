@@ -152,7 +152,7 @@ function seed(head: string, earlierWaiver?: { waives: string; head: string }) {
   });
 }
 
-async function approve(waives: string) {
+async function approve(waives: string, cwd = project.path) {
   const out: string[] = [];
   const err: string[] = [];
   const env: NodeJS.ProcessEnv = { ...process.env, HOME: home, FACTORY_SOURCE: factory.path };
@@ -160,7 +160,7 @@ async function approve(waives: string) {
   const code = await runCli(['approve', String(ITEM), 'waiver', waives], {
     stdout: { write: (s: string) => void out.push(s) },
     stderr: { write: (s: string) => void err.push(s) },
-    ...{ env, stdinIsTTY: true, cwd: project.path },
+    ...{ env, stdinIsTTY: true, cwd },
     unreadAlerts: () => Promise.resolve([]),
     now: () => new Date('2026-10-02T09:00:00Z'),
   });
@@ -326,5 +326,29 @@ describe('test: waivers (T151, AC-061)', () => {
     expect(item()?.comments).toHaveLength(2);
     expect(inbox()).toHaveLength(1);
     expect(inbox()[0]).toContain('urgency=urgent kind=tampering');
+  });
+
+  it('T178 (24b-5): from a shallow clone, an ancestor waived head re-signs and nothing alerts', async () => {
+    const head = project.revParse(`origin/${BRANCH}`);
+    // Beyond a depth-2 history: read on the shallow clone alone, it would look like a rewrite.
+    const ancestor = project.revParse(`${head}~2`);
+    const shallow = tempDir('factory-shallow-');
+    project.git([
+      'clone',
+      '-q',
+      '--depth=2',
+      '--no-single-branch',
+      `file://${project.origin}`,
+      shallow,
+    ]);
+    seed(head, { waives: 'test:tests/calc.test.ts#adds', head: ancestor });
+
+    // approve walks main's signed history first, which unshallows a clone made by factory new; a
+    // clone that stays shallow refuses with an error, never an alert (tests/contract/git-diff.test.ts).
+    const r = await approve('test:tests/calc.test.ts#adds', shallow);
+
+    expect(r.code).toBe(0);
+    expect(inbox()).toEqual([]);
+    expect(posted().head).toBe(head);
   });
 });

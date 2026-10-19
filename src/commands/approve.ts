@@ -268,7 +268,7 @@ async function resignFrom(
     }
     const waived = record.head ?? '';
     if (waived === head) return undefined;
-    fetchBranch(project, waived);
+    // No fetch: the head's own history decides, and a fetch that fails must not read as a rewrite.
     const env = project.env ?? process.env;
     if (!inHistory(project.cwd, waived, head, env)) {
       // Branches only gain commits: a waived head outside the head's history is a rewrite (T178).
