@@ -15,6 +15,7 @@ import { gatherEvidence } from '../dispatcher/evidence.js';
 import { auditMain } from '../dispatcher/history-audit.js';
 import { CloudLauncher } from '../dispatcher/launcher/cloud.js';
 import { LocalLauncher } from '../dispatcher/launcher/local.js';
+import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
 import { verifiedManifest } from '../release/tag.js';
 import { projectHere } from './pause.js';
 
@@ -56,6 +57,8 @@ export async function projectDispatch(
     }),
     launchers:
       Object.keys(ctx.launchers).length > 0 ? ctx.launchers : { local, cloud: new CloudLauncher() },
+    stationPrompt: (pin, facts) =>
+      stationPrompt(pinnedRelease(factorySource(ctx.env), pin, ctx.env), facts),
     logEvent: (issue, event) => {
       out.write(`event #${String(issue)}: ${JSON.stringify(event)}\n`);
       return Promise.resolve();

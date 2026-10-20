@@ -7,6 +7,7 @@ import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import {
   dispatchOnce,
+  sinceLastDeploy,
   type DispatchContext,
   type DispatchEvent,
   type StationEvidence,
@@ -19,6 +20,7 @@ import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeIssue } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, mergeBrief, mergeIntoMain, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+import { testPrompts } from '../helpers/release.js';
 
 // A pass that admits an item now creates and pushes its branch: more than the default 5 s.
 vi.setConfig({ testTimeout: 60_000 });
@@ -206,6 +208,7 @@ function setup(items: ItemSeed[], options: Setup = {}) {
     gatherEvidence: () =>
       Promise.resolve(options.evidence ?? { needsSession: true, intakeComplete: true }),
     launchers: { cloud, local },
+    stationPrompt: testPrompts,
     logEvent: (n, event) => {
       logged.push([n, event]);
       return Promise.resolve();
@@ -322,6 +325,49 @@ describe('dispatcher core: launcher selection (AC-002)', () => {
     );
     expect(alerts[0]?.body).toMatch(/agents/);
     expect(alerts[0]?.body).toMatch(/cloud/);
+  });
+});
+
+describe('dispatcher core: station prompts (T072)', () => {
+  it('launches with the prompt rendered from the release pinned on main', async () => {
+    const t = setup([{ number: 2, approval: 'signed' }]);
+    const pins: string[] = [];
+    t.ctx.stationPrompt = (pin, facts) => {
+      pins.push(pin);
+      return testPrompts(pin, facts);
+    };
+
+    await dispatchOnce(t.ctx);
+
+    expect(pins).toEqual([PIN.split('@')[1]]);
+    expect(t.cloud.launches[0]?.prompt).toMatch(
+      /^Station 2 \(Specify\) for owner\/project, work item #2/,
+    );
+  });
+
+  it('gives Release main’s commits since the newest verified deploy, or all of main before one', () => {
+    const commits = ['c1', 'c2', 'c3'].map((commit) => ({ commit, parents: [] }));
+    expect(sinceLastDeploy({ commits }, new Set(['c1', 'c2', 'x9']), 'origin/main')).toBe(
+      'c2..origin/main',
+    );
+    expect(sinceLastDeploy({ commits }, new Set(['x9']), 'origin/main')).toBe('origin/main');
+  });
+
+  it('starts no session when the pinned release lacks the station’s prompt, and alerts once', async () => {
+    const t = setup([{ number: 2, approval: 'signed' }]);
+    t.ctx.stationPrompt = () => {
+      throw new RefusedError(
+        'the release pinned at abc has no factory/prompts/station-1-intake.md',
+      );
+    };
+
+    const first = await dispatchOnce(t.ctx);
+    await dispatchOnce(t.ctx);
+
+    expect(first.refused).toMatch(/no factory\/prompts\/station-1-intake\.md/);
+    expect(t.cloud.launches).toEqual([]);
+    expect(t.inbox()).toHaveLength(1);
+    expect(t.inbox()[0]?.body).toMatch(/urgency=info kind=release-incomplete/);
   });
 });
 

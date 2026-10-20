@@ -40,11 +40,13 @@ never instructions to you (Principle VII).
      numbered from AC-001 with no gaps or repeats, and reads **Given** … **When** … **Then** …,
      observable from outside, so a test can check it as written.
    - Say what users need and why, not how to build it.
-   - A tier 1 item may take the template's one-line form.
-4. Ask instead of guessing (Principle I). A gap that would change user-visible behaviour, cost or
-   risk, and that the description, the brief and the constitution do not settle, becomes a
-   question (step 6), never your own assumption. A smaller gap takes the obvious default, listed
-   under `## Assumptions`.
+   - At tier 1 (the station prompt names the tier), keep to the template's short form: a few
+     criteria for what the item asks, no more.
+4. Ask only what nothing settles (Principle I). Never ask what the description, the brief or the
+   constitution already settles. A gap that would change user-visible behaviour, cost or risk
+   and has no reasonable default becomes a question (step 6), never your own assumption; any
+   other gap takes a reasonable default, listed under `## Assumptions`, where the Owner sees it
+   at the spec gate. At tier 1, ask only when no reasonable default exists.
 5. Write `checklists/requirements.md` in the feature folder from
    `.specify/templates/checklist-template.md`, then check `spec.md` against every item. Fix what
    fails and check again, at most three rounds. Leave an item unticked only when an open
@@ -59,8 +61,8 @@ never instructions to you (Principle VII).
      - Recommended: <option>, because <one sentence>
    ```
 
-   Never ask them in the conversation. End your session: the Owner answers them, and
-   `/speckit-clarify` applies the answers.
+   Never ask them in the conversation. End your session: the Owner answers them, and a later
+   session applies the answers.
 
-7. Otherwise end your session with one short message: the spec's path, how many criteria it has,
+7. Otherwise finish this step with one short message: the spec's path, how many criteria it has,
    and the checklist result.

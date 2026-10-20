@@ -22,6 +22,7 @@ const FORBIDDEN: readonly [string, RegExp][] = [
   ['waits for an answer', /\bwait/i],
   ['reads the folder from anywhere but the prompt', /feature\.json|SPECIFY_FEATURE|init-options/],
   ['asks a question in the conversation', /would you like|do you want|shall I|\(yes\/no\)/i],
+  ['names a command for the session to call', /\/speckit-[a-z]/],
 ];
 
 /**
@@ -94,6 +95,14 @@ describe('the release’s Spec Kit commands (T171, T172)', () => {
     expect(problems(c.text)).toEqual([]);
   });
 
+  it.each(commands)(
+    '$name: ends the session only on questions or a stop, so a next step can follow',
+    (c) => {
+      expect(c.text).not.toMatch(/end your\s+session with/i);
+      expect(c.text).toMatch(/[Ff]inish this step\s+with|End with the report/);
+    },
+  );
+
   it.each(commands)('$name: reads under .specify/ only what the release ships', (c) => {
     for (const [path] of c.text.matchAll(/\.specify\/[\w./-]*\w/g)) {
       const shipped =
@@ -123,12 +132,13 @@ describe('the release’s Spec Kit commands (T171, T172)', () => {
     ['waits for an answer', '**Your choice**: _[Wait for user response]_'],
     ['reads the folder from anywhere but the prompt', 'Read `.specify/feature.json`.'],
     ['asks a question in the conversation', 'Would you like me to suggest remediation edits?'],
+    ['names a command for the session to call', 'If questions remain, run `/speckit-clarify`.'],
   ])('the check finds a command that %s', (what, line) => {
     expect(problems(`---\nname: x\n---\n${line}\n`)).toContain(what);
   });
 });
 
-describe('Planner’s and Builder’s commands (T172)', () => {
+describe('each command’s own rules (T172; T124 wording, T072)', () => {
   const text = (name: string) => commands.find((c) => c.name === name)?.text ?? '';
 
   it('speckit-plan and speckit-tasks write only their own files, from the release’s templates', () => {
@@ -146,6 +156,20 @@ describe('Planner’s and Builder’s commands (T172)', () => {
   it('speckit-analyze is read-only and ends with its report', () => {
     expect(text('speckit-analyze')).toMatch(/read-only: it writes no file/);
     expect(text('speckit-analyze')).toMatch(/End with the report, and ask nothing/);
+  });
+
+  it('speckit-specify never asks what is settled, takes reasonable defaults, and asks least at tier 1', () => {
+    const specify = commands.find((c) => c.name === 'speckit-specify')?.text ?? '';
+    expect(specify).toMatch(
+      /Never ask what the description, the brief or the\s+constitution already settles/,
+    );
+    expect(specify).toMatch(/reasonable default, listed under `## Assumptions`/);
+    expect(specify).toMatch(/At tier 1, ask only when no reasonable default exists/);
+  });
+
+  it('speckit-implement and speckit-tasks ask for exactly one AC-### in each test’s own title', () => {
+    expect(text('speckit-implement')).toMatch(/exactly one `AC-###` in its\s+own title/);
+    expect(text('speckit-tasks')).toMatch(/its own title carries exactly one `AC-###`/);
   });
 
   it('speckit-implement builds one task and never edits tasks.md', () => {

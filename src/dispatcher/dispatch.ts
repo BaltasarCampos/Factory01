@@ -24,7 +24,6 @@ import { timeline } from '../github/timeline.js';
 import { configOnMain } from '../model/config.js';
 import {
   STATES,
-  STATIONS,
   type AgentsMode,
   type Event,
   type ProjectConfig,
@@ -37,11 +36,18 @@ import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/in
 import { duplicateOf } from '../stations/checks/intake.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
-import { createItemBranch, ensureDraftPr, type ItemRef } from './branch.js';
+import {
+  createItemBranch,
+  ensureDraftPr,
+  git as runGit,
+  type BranchContext,
+  type ItemRef,
+} from './branch.js';
 import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
 import { LaunchRefused, type Launchers } from './launcher/types.js';
 import { writeStationManifest } from './manifest.js';
+import type { PromptFacts } from './prompts.js';
 import { isReleased, releasedHeads } from './released.js';
 import {
   nextTransition,
@@ -88,6 +94,8 @@ export interface DispatchContext {
     main: MainMerges,
   ) => Promise<StationEvidence>;
   launchers: Launchers;
+  /** The station's prompt, rendered from the release pinned at `pin` (src/dispatcher/prompts.ts). */
+  stationPrompt: (pin: string, facts: PromptFacts) => string;
   /** Records an event for the item; where it is written is the caller's choice. */
   logEvent: (issue: number, event: DispatchEvent) => Promise<void>;
   /** The clock for `.station.json`'s `issued_at`; default the system clock. */
@@ -159,6 +167,22 @@ export function itemStatus(labels: readonly string[], events: readonly LabelEven
   const before = adds.slice(0, Math.max(blockedAt, 0)).filter((e) => e.label !== 'state:blocked');
   const from = before.at(-1)?.label.slice('state:'.length) as State | undefined;
   return from === undefined ? { state } : { state, blockedFrom: from };
+}
+
+/** The files the item's pull request changes: its branch against the merge base with main. */
+export function changedFiles(at: BranchContext, mainRef: string, branch: string): string[] {
+  const diff = runGit(at, ['diff', '--name-only', '-z', `${mainRef}...origin/${branch}`]);
+  return diff.split('\0').filter(Boolean);
+}
+
+/** Main's commits since the newest verified deploy on its history, or all of main before one. */
+export function sinceLastDeploy(
+  main: Pick<MainMerges, 'commits'>,
+  released: ReadonlySet<string>,
+  mainRef: string,
+): string {
+  const last = main.commits.findLast((c) => released.has(c.commit));
+  return last === undefined ? mainRef : `${last.commit}..${mainRef}`;
 }
 
 const isForged = (v: Verdict) => !v.ok && (v.kind === 'tampering' || v.kind === 'replay');
@@ -351,12 +375,16 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   }
   // One alert, not one per pass: info while a launcher waits (the cloud command until T125,
   // local sessions until the guards ship), urgent when guardrail files were tampered with.
-  const refuse = async (refused: string, urgent: boolean | undefined): Promise<PassResult> => {
+  const refuse = async (
+    refused: string,
+    urgent: boolean | undefined,
+    kind = 'launcher-unavailable',
+  ): Promise<PassResult> => {
     const text = `no session started for ${repo}: ${refused}`;
     await alertOnce(
       urgent === true
         ? { urgency: 'urgent', kind: 'tampering', text }
-        : { urgency: 'info', kind: 'launcher-unavailable', text },
+        : { urgency: 'info', kind, text },
     );
     return { ...result, refused };
   };
@@ -373,7 +401,21 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     await ensureDraftPr(repo, { ...ref, title: item.issue.title }, options);
     writeStationManifest(git, ref, { station, role });
   }
-  const prompt = `Station ${String(station)} (${STATIONS[station]}) for ${repo}#${String(item.issue.number)} on branch ${branch}.`;
+  let prompt: string;
+  try {
+    prompt = ctx.stationPrompt(config.factory_release.sha, {
+      ...{ station, repo, issue: item.issue.number, title: item.issue.title, branch },
+      body: item.issue.body,
+      ...(item.branch === undefined ? {} : { itemBranch: item.branch }),
+      ...(item.tier === undefined ? {} : { tier: item.tier }),
+      ...(station === 5 ? { changed: changedFiles(git, mainRef, branch) } : {}),
+      ...(station === 7 ? { range: sinceLastDeploy(history, released, mainRef) } : {}),
+    });
+  } catch (err) {
+    // A release without the station's prompt or commands: no session, until the pin moves.
+    if (!(err instanceof RefusedError)) throw err;
+    return refuse(err.message, false, 'release-incomplete');
+  }
   let sessionId: string;
   try {
     ({ sessionId } = await launcher.launch({
