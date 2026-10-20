@@ -147,8 +147,40 @@ probes are tasks in Phase 0 and their results amend this file.
   merged in.
 - **Command form**: the installed version exposes hyphenated skills (`/speckit-specify`);
   station prompts and role files use that form, and constitution v2.5.0 adopts it (FR-026).
-- **Phase 0 probe** (T124, after slice 26c): the release's commands work in a session with no
-  shell, the feature folder taken from the station prompt.
+- **How a station runs its commands** (Owner decision 2026-10-20, after T124): the station
+  prompt carries them. The dispatcher renders each prompt from the pinned release, and for each
+  command the station runs, in order, it reads `factory/skills/<command>/SKILL.md`, drops the
+  frontmatter, puts the station's input where `$ARGUMENTS` stands and adds the steps to the
+  prompt. Station 3 is plan, then tasks, then analyze, then "fix analyze's findings within your
+  own files". Each command after the first starts with "if the previous step left questions
+  open, end your session". No role has the Skill tool, nothing depends on a session finding or
+  choosing a command, and the same prompt serves the local and the cloud launcher. The
+  commands stay in `.claude/skills/`, protected, the one source the renderer reads.
+- **Phase 0 probe** (T124, run by the Owner on 2026-10-20 in claude.ai/code cloud sessions on a
+  throwaway public repository, `BaltasarCampos/t124-sample`, built from factory main `ca3bc5e`;
+  Spec's tool set stood in for by a project deny list of Bash, Edit, NotebookEdit, WebFetch,
+  WebSearch, Task, Agent and Skill; every session on Opus 5.5, the account's default):
+  1. `/speckit-specify` and `/speckit-clarify` ran with Spec's tools and no Skill tool when the
+     command opened the prompt, with the station text after it as the command's input; the
+     session still took its folder from that text. Named mid-prompt, the session found
+     `.claude/skills/speckit-specify/SKILL.md` with Glob and followed it on its own initiative;
+     it worked, but nothing relies on it.
+  2. Every run wrote only `spec.md` and `checklists/requirements.md` in the named folder. A
+     clarify run left `.factory/brief.md` alone and listed it as an affected area.
+  3. The commands created no branch. Started on an item branch, each session worked on that
+     branch; started on `main`, the session made its own, `claude/gracious-johnson-0r21st`.
+     Nothing reached GitHub in any run: output not committed lives only in the session's
+     working tree.
+  4. Open questions always ended the session; none was asked in the chat.
+  5. The project's deny rules hold in the cloud: denied tools are removed from the session, not
+     refused when called. A rule naming a tool that does not exist (`MultiEdit`) only warns.
+  6. The cloud runtime has its own Stop hook telling the model to commit and push before
+     stopping; Spec declined, having no shell.
+  7. `speckit-specify` over-asked at tier 1 (three questions on a clear item, one answered by
+     the item itself; five on another) and wrote 9–11 criteria and 105–130 lines; an answer
+     raised a follow-up question; two questions needed an Owner action outside `spec.md` (a
+     brief change, a tier raise).
+  8. Untested: starting a cloud session as a given agent; the web UI has no agent choice (T125).
 
 ## R10. Owner notification
 
