@@ -8,7 +8,7 @@ import type { CheckResult } from '../../hooks/stop.js';
 import { parseConfig } from '../../model/config.js';
 import { committed, featureFiles } from './feature.js';
 import { questionsIn } from './questions.js';
-import { checkSpec, withQuestions } from './spec.js';
+import { checkSpec, committedAnswers, withQuestions } from './spec.js';
 
 export interface PlanInput {
   spec: string;
@@ -16,6 +16,8 @@ export interface PlanInput {
   tasks: string;
   /** Main's `size_limit_lines`: the release's limit or lower. */
   sizeLimit: number;
+  /** The Owner's `answers.md`; without it no applied answer is the Owner's. */
+  answers?: ReadonlyMap<number, string>;
 }
 
 function planProblems(plan: string, sizeLimit: number): string[] {
@@ -86,7 +88,7 @@ export function checkPlan(input: PlanInput): CheckResult & { missing: string[] }
       missing.push(
         `plan.md: Q${String(q.n)} is numbered within spec.md's questions; number on from Q${String(last + 1)}`,
       );
-  const asked = withQuestions(input.plan, 'plan.md', missing);
+  const asked = withQuestions(input.plan, 'plan.md', missing, input.answers ?? new Map());
   return { ...asked, complete: asked.missing.length === 0 };
 }
 
@@ -97,5 +99,6 @@ export function planStopCheck(cwd: string): CheckResult {
   if (spec === undefined || plan === undefined || tasks === undefined)
     return { complete: false, missing: files.missing };
   const config = parseConfig(committed(cwd, '.factory/config') ?? '');
-  return checkPlan({ spec, plan, tasks, sizeLimit: config.size_limit_lines });
+  const answers = committedAnswers(cwd);
+  return checkPlan({ spec, plan, tasks, sizeLimit: config.size_limit_lines, answers });
 }

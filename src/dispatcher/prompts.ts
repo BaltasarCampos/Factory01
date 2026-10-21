@@ -67,6 +67,8 @@ export interface PromptFacts {
   range?: string;
   /** Define: the Owner's pitch; without one, Define starts from the adopted code (T159). */
   pitch?: string;
+  /** Specify and Plan: the Owner's answers to apply, as `A<n>. <answer>` lines (T180). */
+  answers?: readonly string[];
 }
 
 const ADOPTED =
@@ -105,8 +107,14 @@ function fill(template: string, vars: Readonly<Record<string, string>>, path: st
 export function stationPrompt(read: ReleaseFile, f: PromptFacts): string {
   const title = clean(f.title).replace(/\s+/g, ' ').trim();
   const item = `#${String(f.issue)} ${title}`;
-  const input = f.station === 2 ? `${item}\n\n${clean(f.body).trim()}` : item;
-  const commands = (STATION_COMMANDS[f.station] ?? []).map((name, i) => {
+  const answers = (f.answers ?? []).map((line) => clean(line).replace(/\s+/g, ' ').trim());
+  // With the Owner's answers, Specify applies them through clarify instead of writing the spec.
+  const clarify = f.station === 2 && answers.length > 0;
+  const told =
+    answers.length > 0 ? answers.join('\n') : f.station === 2 ? clean(f.body).trim() : '';
+  const input = told === '' ? item : `${item}\n\n${told}`;
+  const names = clarify ? ['speckit-clarify'] : (STATION_COMMANDS[f.station] ?? []);
+  const commands = names.map((name, i) => {
     const skill = `skills/${name}/SKILL.md`;
     const steps = commandSteps(read(skill), input, skill);
     return `## Step ${String(i + 1)}: ${name}\n\n${i === 0 ? '' : `${QUESTIONS_OPEN}\n\n`}${steps}`;

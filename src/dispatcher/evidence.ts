@@ -148,16 +148,17 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const verify = report('reports/verify.md');
     const security = report('reports/security.md');
     const integrate = report('reports/integrate.md');
-    const specComplete = spec !== undefined && checkSpec(spec).complete;
+    const answers = parseAnswers(read('answers.md'));
+    const specComplete = spec !== undefined && checkSpec(spec, answers).complete;
     const sizeLimit = config.size_limit_lines;
     const planComplete =
       spec !== undefined &&
       plan !== undefined &&
       tasks !== undefined &&
-      checkPlan({ spec, plan, tasks, sizeLimit }).complete;
+      checkPlan({ spec, plan, tasks, sizeLimit, answers }).complete;
     const tasksDone =
       tasks !== undefined && /^\s*- \[[xX]\] T\d+/m.test(tasks) && !/^\s*- \[ \] T\d+/m.test(tasks);
-    const open = openQuestions({ spec, plan }, parseAnswers(read('answers.md')));
+    const open = openQuestions({ spec, plan }, answers);
     const asked =
       open.length === 0
         ? {}

@@ -989,4 +989,17 @@ describe('the question loop (T180, AC-033)', { timeout: 60_000 }, () => {
     const back = await dispatchOnce(t.ctx);
     expect(back.moves).toEqual([expect.objectContaining({ from: 'blocked', to: 'triaged' })]);
   });
+
+  it('AC-033: back at Specify, the session runs clarify with the Owner’s answer (T180, slice 24c-2b)', async () => {
+    const t = asking();
+    await dispatchOnce(t.ctx);
+    answer(t, 'A1. B\n');
+    await dispatchOnce(t.ctx);
+    await dispatchOnce(t.ctx);
+
+    const [launch] = t.local.launches;
+    expect(launch).toMatchObject({ station: 2, role: 'spec' });
+    expect(launch?.prompt).toContain('## Step 1: speckit-clarify');
+    expect(launch?.prompt).toContain('A1. B\n```');
+  });
 });

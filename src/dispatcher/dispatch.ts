@@ -47,7 +47,9 @@ import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
 import { LaunchRefused, type Launchers } from './launcher/types.js';
 import { writeStationManifest } from './manifest.js';
+import { branchFeatureDir } from '../model/naming.js';
 import type { PromptFacts } from './prompts.js';
+import { answersToApply, parseAnswers, type QuestionFile } from '../stations/checks/questions.js';
 import { isReleased, releasedHeads } from './released.js';
 import {
   nextTransition,
@@ -173,6 +175,24 @@ export function itemStatus(labels: readonly string[], events: readonly LabelEven
 export function changedFiles(at: BranchContext, mainRef: string, branch: string): string[] {
   const diff = runGit(at, ['diff', '--name-only', '-z', `${mainRef}...origin/${branch}`]);
   return diff.split('\0').filter(Boolean);
+}
+
+/**
+ * The Owner's answers that Specify (`spec.md`) or Plan (`plan.md`) applies next, read at the item
+ * branch's tip as origin has it (T180).
+ */
+export function ownerAnswers(at: BranchContext, branch: string, file: QuestionFile): string[] {
+  const dir = branchFeatureDir(branch);
+  if (dir === undefined) return [];
+  const show = (name: string) => {
+    try {
+      return runGit(at, ['show', `origin/${branch}:${dir}/${name}`]);
+    } catch {
+      return undefined;
+    }
+  };
+  const files = { spec: show('spec.md'), plan: show('plan.md') };
+  return answersToApply(files, parseAnswers(show('answers.md')), file);
 }
 
 /** Main's commits since the newest verified deploy on its history, or all of main before one. */
@@ -401,6 +421,10 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     await ensureDraftPr(repo, { ...ref, title: item.issue.title }, options);
     writeStationManifest(git, ref, { station, role });
   }
+  const answersFor = (file: QuestionFile | undefined) => {
+    const answers = file === undefined ? [] : ownerAnswers(git, branch, file);
+    return answers.length === 0 ? {} : { answers };
+  };
   let prompt: string;
   try {
     prompt = ctx.stationPrompt(config.factory_release.sha, {
@@ -409,6 +433,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       ...(item.branch === undefined ? {} : { itemBranch: item.branch }),
       ...(item.tier === undefined ? {} : { tier: item.tier }),
       ...(station === 5 ? { changed: changedFiles(git, mainRef, branch) } : {}),
+      ...answersFor(station === 2 ? 'spec.md' : station === 3 ? 'plan.md' : undefined),
       ...(station === 7 ? { range: sinceLastDeploy(history, released, mainRef) } : {}),
     });
   } catch (err) {

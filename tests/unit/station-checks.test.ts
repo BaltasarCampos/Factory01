@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { runStop } from '../../src/hooks/stop.js';
 import { checkPlan } from '../../src/stations/checks/plan.js';
+import { parseAnswers } from '../../src/stations/checks/questions.js';
 import { checkSpec, criterionLines, specStopCheck } from '../../src/stations/checks/spec.js';
 import { makeRepo, type Files } from '../helpers/git-repo.js';
 
@@ -206,8 +207,11 @@ describe('criterion lines (AC-097)', () => {
 describe('questions in the Specify and Plan checks (T180, AC-033)', () => {
   const asking = (text: string, ...questions: string[]) =>
     text.replace(/^## Problem/m, `## Clarifications\n\n${questions.join('\n')}\n\n## Problem`);
-  const plan = (over: { spec?: string; plan?: string } = {}) =>
-    checkPlan({ spec: SPEC, plan: PLAN(), tasks: TASKS, sizeLimit: 400, ...over });
+  const plan = (over: { spec?: string; plan?: string; answers?: string } = {}) =>
+    checkPlan({
+      ...{ spec: SPEC, plan: PLAN(), tasks: TASKS, sizeLimit: 400, ...over },
+      answers: parseAnswers(over.answers ?? 'A1. B\nA2. SQLite\n'),
+    });
   const planAsking = (...questions: string[]) =>
     PLAN().replace(/^/, `## Clarifications\n\n${questions.join('\n')}\n\n`);
 
@@ -218,7 +222,31 @@ describe('questions in the Specify and Plan checks (T180, AC-033)', () => {
       missing: ["spec.md: Q1 waits for the Owner's answer"],
       acs: ['AC-001', 'AC-002', 'AC-003'],
     });
-    expect(checkSpec(asking(SPEC, '- Q1: Which sign-in? → A: B')).complete).toBe(true);
+    const answered = asking(SPEC, '- Q1: Which sign-in? → A: B');
+    expect(checkSpec(answered, parseAnswers('A1. B\n')).complete).toBe(true);
+  });
+
+  it.each([
+    ['with no A1 line in answers.md', ''],
+    ['that differs from the Owner’s A1', 'A1. C\n'],
+  ])(
+    'refuses an applied answer %s, without making the spec wait (Owner decision 2026-10-21)',
+    (_n, answers) => {
+      const result = checkSpec(asking(SPEC, '- Q1: Which sign-in? → A: B'), parseAnswers(answers));
+      expect(result).toMatchObject({
+        complete: false,
+        missing: ["spec.md: Q1 is applied with an answer that is not the Owner's A1 in answers.md"],
+      });
+      expect(result.waiting).toBeUndefined();
+    },
+  );
+
+  it('an applied option’s text matches the Owner’s letter, and the letter matches the text', () => {
+    const q = (applied: string) =>
+      asking(SPEC, `- Q1: Which sign-in? → A: ${applied}`, '  - Options: A) Email B) A magic link');
+    expect(checkSpec(q('A magic link'), parseAnswers('A1. B\n')).complete).toBe(true);
+    expect(checkSpec(q('B'), parseAnswers('A1. b) a magic link.\n')).complete).toBe(true);
+    expect(checkSpec(q('A magic link'), parseAnswers('A1. A\n')).complete).toBe(false);
   });
 
   it('AC-033: a question needing an Owner action keeps the spec waiting', () => {
@@ -253,6 +281,10 @@ describe('questions in the Specify and Plan checks (T180, AC-033)', () => {
     });
     expect(plan({ spec, plan: planAsking('- Q2: Which database? → A: SQLite') }).complete).toBe(
       true,
+    );
+    const applied = planAsking('- Q2: Which database? → A: Postgres');
+    expect(why(plan({ spec, plan: applied }).missing)).toMatch(
+      /plan.md: Q2 is applied with an answer that is not the Owner's A2/,
     );
     expect(
       why(plan({ spec, plan: planAsking('- Q1: Which database? → A: SQLite') }).missing),
