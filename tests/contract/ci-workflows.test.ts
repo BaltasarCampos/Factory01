@@ -24,6 +24,7 @@ interface Step {
   env?: Record<string, string>;
 }
 interface Job {
+  'runs-on'?: string;
   if?: string;
   needs?: string;
   permissions?: Record<string, string>;
@@ -105,6 +106,11 @@ function script(run: string, cwd: string, env: NodeJS.ProcessEnv) {
 }
 
 const stepNamed = (j: Job, pattern: RegExp) => j.steps.findIndex((s) => pattern.test(s.name ?? ''));
+/** Why a job's `runs-on` is not pinned: a `-latest` label moves to a new OS image unannounced. */
+const runnerProblem = (runsOn: string | undefined) =>
+  runsOn !== undefined && /^[a-z]+-\d+(?:\.\d+)*(?:-arm)?$/.test(runsOn)
+    ? undefined
+    : `runs-on ${String(runsOn)} is not an explicit runner version`;
 const isCheckout = (s: Step) => s.uses?.startsWith('actions/checkout@') === true;
 
 describe('project CI workflow templates (T066)', () => {
@@ -343,6 +349,24 @@ describe('project CI workflow templates (T066)', () => {
       expect(uses).toHaveLength(steps.filter((s) => s.uses !== undefined).length);
     }
     expect(ALL.length).toBeGreaterThanOrEqual(4);
+    for (const loose of [
+      '      - uses: actions/checkout@v7',
+      '      - uses: actions/checkout@3d3c42e # v7.0.1',
+      `      - uses: actions/checkout@${'a'.repeat(40)}`,
+    ])
+      expect(loose).not.toMatch(pinned);
+  });
+
+  it('(13) every job, in the rendered workflows and in the factory’s own CI, runs on an explicit runner version, never a moving label', () => {
+    const self = readFileSync(join(ROOT, 'factory', 'self', 'ci.yml'), 'utf8');
+    for (const text of [...ALL, self]) {
+      const jobs = Object.values((parse(text) as Workflow).jobs);
+      expect(jobs.length).toBeGreaterThan(0);
+      for (const j of jobs) expect(runnerProblem(j['runs-on'])).toBeUndefined();
+    }
+    expect(runnerProblem('ubuntu-24.04')).toBeUndefined();
+    for (const moving of ['ubuntu-latest', 'ubuntu-24.04-latest', '${{ matrix.os }}', undefined])
+      expect(runnerProblem(moving)).toMatch(/not an explicit runner version/);
   });
 
   it('every factory ci command parses as the CLI defines it: no usage error, no unimplemented check', async () => {
