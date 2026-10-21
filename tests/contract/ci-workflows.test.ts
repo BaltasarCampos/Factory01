@@ -111,6 +111,14 @@ const runnerProblem = (runsOn: string | undefined) =>
   runsOn !== undefined && /^[a-z]+-\d+(?:\.\d+)*(?:-arm)?$/.test(runsOn)
     ? undefined
     : `runs-on ${String(runsOn)} is not an explicit runner version`;
+/**
+ * Why a setup-node step may cache on its own: it does whenever the workspace's package.json names
+ * npm as its package manager, unless the step sets `cache:` or `package-manager-cache: false`.
+ */
+const cacheProblem = (s: Step) =>
+  s.with?.cache !== undefined || s.with?.['package-manager-cache'] === false
+    ? undefined
+    : `${s.name ?? s.uses ?? 'a setup-node step'} sets neither cache: nor package-manager-cache: false`;
 const isCheckout = (s: Step) => s.uses?.startsWith('actions/checkout@') === true;
 
 describe('project CI workflow templates (T066)', () => {
@@ -367,6 +375,21 @@ describe('project CI workflow templates (T066)', () => {
     expect(runnerProblem('ubuntu-24.04')).toBeUndefined();
     for (const moving of ['ubuntu-latest', 'ubuntu-24.04-latest', '${{ matrix.os }}', undefined])
       expect(runnerProblem(moving)).toMatch(/not an explicit runner version/);
+  });
+
+  it('(14) every setup-node step either names its cache or turns automatic caching off, in the rendered workflows and in the factory’s own CI', () => {
+    const self = readFileSync(join(ROOT, 'factory', 'self', 'ci.yml'), 'utf8');
+    const steps = [...ALL, self].flatMap((text) =>
+      Object.values((parse(text) as Workflow).jobs).flatMap((j) => j.steps),
+    );
+    const setups = steps.filter((s) => s.uses?.startsWith('actions/setup-node@') === true);
+    expect(setups.length).toBeGreaterThanOrEqual(13);
+    for (const s of setups) expect(cacheProblem(s)).toBeUndefined();
+    expect(cacheProblem({ uses: 'actions/setup-node@x', with: { cache: 'npm' } })).toBeUndefined();
+    for (const loose of [{ 'node-version': 24 }, { 'package-manager-cache': true }, undefined])
+      expect(
+        cacheProblem({ uses: 'actions/setup-node@x', ...(loose ? { with: loose } : {}) }),
+      ).toMatch(/neither cache: nor package-manager-cache: false/);
   });
 
   it('every factory ci command parses as the CLI defines it: no usage error, no unimplemented check', async () => {
