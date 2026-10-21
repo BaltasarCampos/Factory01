@@ -16,7 +16,7 @@ permissions: {}
 
 jobs:
   alert:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Fail so GitHub emails the Owner
         # The input reaches the script only through the environment, never spliced into it.

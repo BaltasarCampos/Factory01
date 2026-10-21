@@ -35,11 +35,11 @@ defaults:
 
 jobs:
   semgrep:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out the head
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: project
@@ -55,15 +55,16 @@ jobs:
           if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Check out the factory at the pinned commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.FACTORY_REPO }}
           ref: ${{ steps.pin.outputs.sha }}
           path: factory
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          package-manager-cache: false
       - name: Build the factory CLI
         working-directory: factory
         run: |
@@ -83,11 +84,11 @@ jobs:
         run: factory ci scan markers "$BASE_SHA" "$HEAD_SHA"
 
   gitleaks:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out the head
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: project
@@ -103,15 +104,16 @@ jobs:
           if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Check out the factory at the pinned commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.FACTORY_REPO }}
           ref: ${{ steps.pin.outputs.sha }}
           path: factory
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          package-manager-cache: false
       - name: Build the factory CLI
         working-directory: factory
         run: |
@@ -134,11 +136,11 @@ jobs:
         run: factory ci scan gitleaks "$BASE_SHA" "$HEAD_SHA"
 
   npm-audit:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out the head
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: project
@@ -154,15 +156,16 @@ jobs:
           if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Check out the factory at the pinned commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.FACTORY_REPO }}
           ref: ${{ steps.pin.outputs.sha }}
           path: factory
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          package-manager-cache: false
       - name: Build the factory CLI
         working-directory: factory
         run: |
@@ -181,11 +184,11 @@ jobs:
         run: factory ci scan audit "$BASE_SHA" "$HEAD_SHA"
 
   licences:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Check out the head
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           path: project
@@ -201,15 +204,16 @@ jobs:
           if [ -z "$sha" ]; then echo "no factory_release pin in $from:.factory/config" >&2; exit 1; fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
       - name: Check out the factory at the pinned commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: ${{ env.FACTORY_REPO }}
           ref: ${{ steps.pin.outputs.sha }}
           path: factory
           persist-credentials: false
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
+          package-manager-cache: false
       - name: Build the factory CLI
         working-directory: factory
         run: |
