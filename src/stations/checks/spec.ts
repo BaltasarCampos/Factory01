@@ -12,8 +12,15 @@
 // A question under `## Clarifications` that is not applied keeps the spec incomplete; when the
 // questions are all that is missing, the stop is a waiting one (T180, questions.ts).
 import type { CheckResult } from '../../hooks/stop.js';
-import { featureFiles } from './feature.js';
-import { questionProblems, questionsIn, settled, type QuestionFile } from './questions.js';
+import { committed, featureDir, featureFiles } from './feature.js';
+import {
+  parseAnswers,
+  questionProblems,
+  questionsIn,
+  sameAnswer,
+  settled,
+  type QuestionFile,
+} from './questions.js';
 
 export const SPEC_SECTIONS = ['Problem', 'Non-goals', 'Affected areas'] as const;
 
@@ -97,16 +104,28 @@ export function criterionLines(text: string): CriterionLine[] {
 }
 
 /**
- * The file's questions as problems: those the follow-up rule refuses, then those waiting for the
- * Owner. Waiting is set when the waiting questions are all that is missing.
+ * The file's questions as problems: those the follow-up rule refuses, applied answers that are
+ * not the Owner's `A<n>.` line (a session's error, Owner decision 2026-10-21), then those waiting
+ * for the Owner. Waiting is set when the waiting questions are all that is missing.
  */
 export function withQuestions(
   text: string,
   file: QuestionFile,
   missing: readonly string[],
+  answers: ReadonlyMap<number, string>,
 ): { missing: string[]; waiting?: true } {
   const questions = questionsIn(text, file);
   const { refused, missing: late } = questionProblems(questions, file);
+  const forged = questions
+    .filter((q) => {
+      const owner = answers.get(q.n);
+      return settled(q) && (owner === undefined || !sameAnswer(q, q.applied ?? '', owner));
+    })
+    .map(
+      (q) =>
+        `${file}: Q${String(q.n)} is applied with an answer that is not the Owner's A${String(q.n)} in answers.md`,
+    );
+  late.push(...forged);
   const waits = questions
     .filter((q) => !settled(q) && !refused.includes(q.n))
     .map((q) => `${file}: Q${String(q.n)} waits for the Owner's answer`);
@@ -116,7 +135,11 @@ export function withQuestions(
     : { missing: all };
 }
 
-export function checkSpec(text: string): SpecResult {
+/** `answers`: the Owner's `answers.md`; without it no applied answer is the Owner's. */
+export function checkSpec(
+  text: string,
+  answers: ReadonlyMap<number, string> = new Map(),
+): SpecResult {
   const lines = uncommented(text);
   const missing: string[] = [];
   for (const name of SPEC_SECTIONS) {
@@ -139,7 +162,7 @@ export function checkSpec(text: string): SpecResult {
   for (const [id, count] of defined)
     if (count > 1)
       missing.push(`spec.md: ${id} is defined ${count === 2 ? 'twice' : `${String(count)} times`}`);
-  const asked = withQuestions(text, 'spec.md', missing);
+  const asked = withQuestions(text, 'spec.md', missing, answers);
   return { ...asked, complete: asked.missing.length === 0, acs: [...defined.keys()] };
 }
 
@@ -147,5 +170,10 @@ export function checkSpec(text: string): SpecResult {
 export function specStopCheck(cwd: string): CheckResult {
   const files = featureFiles(cwd, ['spec.md']);
   const spec = files.text['spec.md'];
-  return spec === undefined ? { complete: false, missing: files.missing } : checkSpec(spec);
+  if (spec === undefined) return { complete: false, missing: files.missing };
+  return checkSpec(spec, committedAnswers(cwd));
 }
+
+/** The Owner's answers as committed in the feature folder at HEAD. */
+export const committedAnswers = (cwd: string) =>
+  parseAnswers(committed(cwd, `${featureDir(cwd)}/answers.md`));

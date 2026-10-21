@@ -87,6 +87,18 @@ const same = (a: string, b: string) => {
   return norm(a) === norm(b);
 };
 
+/** The answer as an option's letter when it names one, by letter or text; otherwise as written. */
+function canonical(q: Question, answer: string): string {
+  for (const [letter, option] of Object.entries(q.options))
+    if ([letter, `${letter})`, option, `${letter}) ${option}`].some((form) => same(answer, form)))
+      return letter;
+  return answer;
+}
+
+/** Whether two answers are the same, a letter and its option's text counting as equal. */
+export const sameAnswer = (q: Question, a: string, b: string) =>
+  same(canonical(q, a), canonical(q, b));
+
 /** Clarify's rule: an answer counts when it is one of the question's options or ≤ five words. */
 export function answerCounts(q: Question, answer: string): boolean {
   const words = answer
@@ -127,27 +139,50 @@ export function questionProblems(
 /** Whether the command has applied the question's answer and nothing is left to the Owner. */
 export const settled = (q: Question) => q.applied !== undefined && q.ownerAction === undefined;
 
-/** The questions still the Owner's to answer, in `spec.md`'s order and then `plan.md`'s. */
-export function openQuestions(
-  files: { spec?: string | undefined; plan?: string | undefined },
-  answers: ReadonlyMap<number, string>,
-): OpenQuestion[] {
-  const all = (['spec.md', 'plan.md'] as const).flatMap((file) => {
+type Files = { spec?: string | undefined; plan?: string | undefined };
+
+/** The questions of both files the follow-up rule does not refuse, `spec.md`'s first. */
+function asked(files: Files): Question[] {
+  return (['spec.md', 'plan.md'] as const).flatMap((file) => {
     const text = file === 'spec.md' ? files.spec : files.plan;
     const questions = text === undefined ? [] : questionsIn(text, file);
     const { refused } = questionProblems(questions, file);
     return questions.filter((q) => !refused.includes(q.n));
   });
-  return all.flatMap((q): OpenQuestion[] => {
-    if (settled(q)) return [];
-    const answer = answers.get(q.n);
-    if (q.ownerAction !== undefined) {
-      const changed = answer !== undefined && !same(answer, q.applied ?? '');
-      return changed && answerCounts(q, answer) ? [] : [{ ...q, why: 'action' }];
-    }
-    if (answer === undefined) return [{ ...q, why: 'unanswered' }];
-    return answerCounts(q, answer) ? [] : [{ ...q, why: 'answer' }];
+}
+
+/** Settled, answered for a session to apply, or why it is still the Owner's. */
+function standing(
+  q: Question,
+  answers: ReadonlyMap<number, string>,
+): 'settled' | 'apply' | OpenQuestion['why'] {
+  if (settled(q)) return 'settled';
+  const answer = answers.get(q.n);
+  if (q.ownerAction !== undefined) {
+    const changed = answer !== undefined && !sameAnswer(q, answer, q.applied ?? '');
+    return changed && answerCounts(q, answer) ? 'apply' : 'action';
+  }
+  if (answer === undefined) return 'unanswered';
+  return answerCounts(q, answer) ? 'apply' : 'answer';
+}
+
+/** The questions still the Owner's to answer, in `spec.md`'s order and then `plan.md`'s. */
+export function openQuestions(files: Files, answers: ReadonlyMap<number, string>): OpenQuestion[] {
+  return asked(files).flatMap((q): OpenQuestion[] => {
+    const why = standing(q, answers);
+    return why === 'settled' || why === 'apply' ? [] : [{ ...q, why }];
   });
+}
+
+/** The Owner's answers that `file`'s station applies next, as `A<n>. <answer>` lines. */
+export function answersToApply(
+  files: Files,
+  answers: ReadonlyMap<number, string>,
+  file: QuestionFile,
+): string[] {
+  return asked(files)
+    .filter((q) => q.file === file && standing(q, answers) === 'apply')
+    .map((q) => `A${String(q.n)}. ${answers.get(q.n) ?? ''}`);
 }
 
 /** The blocked alert: each open question quoted through `visible()`, and where to answer. */

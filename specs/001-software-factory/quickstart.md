@@ -52,6 +52,24 @@ a signed merge commit of the checked head and deletes the branch (AC-014, AC-088
 asks for the passphrase and writes a health summary (AC-015); the trail is followable both
 ways (AC-017).
 
+If Spec or Plan asks, the item moves to `blocked` and the inbox quotes the questions (AC-033).
+Until `factory answer` exists, answer on the item branch in your project clone, one
+`A<n>. <answer>` line per question (an option's letter or text, or five words or fewer):
+
+```bash
+git fetch origin
+git switch claude/<issue>-<slug>
+git merge --ff-only origin/claude/<issue>-<slug>
+$EDITOR specs/<issue>-<slug>/answers.md        # e.g. "A1. B"
+git add specs/<issue>-<slug>/answers.md
+git -c gpg.format=ssh -c user.signingkey="$HOME/.factory/keys/approve_ed25519" \
+  commit -S -m "Answers for #<issue>"
+git push origin claude/<issue>-<slug>
+git switch main
+```
+
+The next `factory run` pass returns the item to the station that asked.
+
 ## Scenario 3 — Deny rules inside a routine (US3, SC-002)
 
 Run the scripted attack suite as a scheduled routine against the sample project:

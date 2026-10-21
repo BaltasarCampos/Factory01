@@ -172,6 +172,26 @@ describe('each command’s own rules (T172; T124 wording, T072)', () => {
     expect(text('speckit-tasks')).toMatch(/its own title carries exactly one `AC-###`/);
   });
 
+  it('speckit-clarify and speckit-plan copy the Owner’s answer, keep Owner actions open and ask one follow-up round (T180)', () => {
+    for (const name of ['speckit-clarify', 'speckit-plan']) {
+      const command = text(name);
+      expect(command, name).toMatch(/` → A: <answer>`,\s+copying the Owner's\s+answer exactly/);
+      expect(command, name).toMatch(
+        /→ Owner action: brief change`[\s\S]*→ Owner action: tier raise`/,
+      );
+      expect(command, name).toMatch(/- Q<n> \(follow-up\): /);
+      expect(command, name).toMatch(/already has a follow-up question, ask nothing\s+new/);
+      expect(command, name).toMatch(
+        /numbered on from the highest\s+question in `spec\.md`\s+and `plan\.md`/,
+      );
+    }
+  });
+
+  it('speckit-plan asks under ## Clarifications at the top of plan.md and never changes spec.md', () => {
+    expect(text('speckit-plan')).toMatch(/`## Clarifications` at the top of `plan\.md`/);
+    expect(text('speckit-plan')).toMatch(/Never change `spec\.md`/);
+  });
+
   it('speckit-implement builds one task and never edits tasks.md', () => {
     expect(text('speckit-implement')).toMatch(/Build this one task, and no other/);
     expect(text('speckit-implement')).toMatch(/Never edit `tasks\.md`/);

@@ -3,6 +3,7 @@
 // factory code from the files at the branch head, never from a session's word.
 import { describe, expect, it } from 'vitest';
 import {
+  answersToApply,
   answerCounts,
   openQuestions,
   parseAnswers,
@@ -126,6 +127,32 @@ describe('open questions at the branch head (T180)', () => {
       '- Q3: And who?',
     );
     expect(openQuestions({ spec: late }, new Map()).map((q) => q.n)).toEqual([2]);
+  });
+});
+
+describe('the answers a session applies (T180, slice 24c-2b)', () => {
+  const spec = clarifications(
+    '- Q1: Which sign-in? → A: B',
+    '- Q2: How long?',
+    '- Q3: Who may invite? → A: admins → Owner action: tier raise',
+    '- Q4: Which page?',
+  );
+  const plan = clarifications('- Q5: Which database?');
+  const answers = parseAnswers(
+    'A1. B\nA2. one week\nA3. only the Owner\nA4. Both, if the link expires soon\nA5. SQLite\n',
+  );
+
+  it('gives each file’s answers that count to questions not yet applied, never another file’s', () => {
+    expect(answersToApply({ spec, plan }, answers, 'spec.md')).toEqual([
+      'A2. one week',
+      'A3. only the Owner',
+    ]);
+    expect(answersToApply({ spec, plan }, answers, 'plan.md')).toEqual(['A5. SQLite']);
+  });
+
+  it('an applied answer that is not the Owner’s blocks nothing: it is the session’s error', () => {
+    const forged = clarifications('- Q1: Which sign-in? → A: B');
+    expect(openQuestions({ spec: forged }, new Map())).toEqual([]);
   });
 });
 
