@@ -4,7 +4,7 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import { createItemBranch } from '../../src/dispatcher/branch.js';
-import { dispatchOnce, type DispatchContext } from '../../src/dispatcher/dispatch.js';
+import { changedFiles, dispatchOnce, type DispatchContext } from '../../src/dispatcher/dispatch.js';
 import { gatherEvidence } from '../../src/dispatcher/evidence.js';
 import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
 import { configOnMain } from '../../src/model/config.js';
@@ -15,6 +15,7 @@ import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeComment, type FakeIssue } from '../helpers/fake-gh.js';
 import { makeRepo, mergeBrief, mergeIntoMain, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+import { testPrompts } from '../helpers/release.js';
 
 const REPO = 'owner/project';
 const INBOX = 1;
@@ -121,6 +122,7 @@ function setup(options: Setup = {}) {
     auditHistory: () => Promise.resolve({ recreated: [] }),
     gatherEvidence: gatherEvidence({ projectDir: project.path }),
     launchers: { local, cloud: new FakeLauncher('cloud') },
+    stationPrompt: testPrompts,
     logEvent: () => Promise.resolve(),
     now: () => clock.now(),
   };
@@ -278,7 +280,21 @@ describe('work-item branch creation (AC-066, FR-016a)', { timeout: 60_000 }, () 
       branch: BRANCH,
       issued_at: '2026-10-01T10:00:00.000Z',
     });
-    expect(t.local.launches[0]?.prompt).toContain(BRANCH);
+    const prompt = t.local.launches[0]?.prompt ?? '';
+    expect(prompt).toContain(`Feature folder: ${FEATURE}/ on the branch \`${BRANCH}\``);
+    // The prompt carries speckit-specify's steps (T072): no command is left for the session.
+    expect(prompt).toContain('## Step 1: speckit-specify');
+    expect(prompt).not.toMatch(/\/speckit-/);
+  });
+
+  it('station 5’s prompt gets the files the pull request changes, against the merge base (T072)', () => {
+    const t = setup({
+      branch: { [`${FEATURE}/spec.md`]: '# Spec\n', 'src/login.ts': 'export {};\n' },
+    });
+    t.project.git(['fetch', '-q', 'origin']);
+
+    const at = { projectDir: t.project.path, now: () => new Date() };
+    expect(changedFiles(at, 'origin/main', BRANCH)).toEqual([`${FEATURE}/spec.md`, 'src/login.ts']);
   });
 
   it('gives the Builder its next task and that task’s file list in .station.json', () => {

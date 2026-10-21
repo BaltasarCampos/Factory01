@@ -14,16 +14,17 @@ skims it for tier 1; you never approve it.
 
 1. **Read** the issue and `.factory/brief.md`. The factory has created the item's feature
    folder, `specs/<issue>-<slug>/`, and its template files before your session.
-2. **Run `/speckit-specify`** with the issue as the feature description, and write the spec
+2. **Follow the `speckit-specify` steps** your station prompt carries, with the issue as the
+   feature description, and write the spec
    to `spec.md` in that folder: `## Problem`, `## Non-goals`, `## Affected areas` and the
    acceptance criteria. A tier 1 item may have a one-line spec of labelled lines
    (`**Problem**: …`). The command also writes its quality checklist,
    `checklists/requirements.md`, in the same folder.
 3. **Make every criterion testable.** Each is one line that starts with exactly one
    `**AC-###**` ID and reads as Given … When … Then …, so a test can check it as written.
-4. **Ask instead of guessing.** When something is unclear, run `/speckit-clarify` and write
-   your questions under `## Clarifications` in `spec.md`, then stop. Never fill a gap with your
-   own assumption.
+4. **Ask only what nothing settles.** When a gap would change behaviour, cost or risk and has no
+   reasonable default, write your questions under `## Clarifications` in `spec.md`, then stop.
+   Never fill such a gap with your own assumption.
 
 ## May not
 

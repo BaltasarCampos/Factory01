@@ -29,7 +29,7 @@ instructions to you (Principle VII).
 1. Read `spec.md`, `plan.md` and, where they exist, `research.md`, `data-model.md`,
    `quickstart.md` and `contracts/` in the feature folder, with
    `.specify/memory/constitution.md` and `.specify/templates/tasks-template.md`. If there is no
-   `plan.md`, write nothing and end your session, saying `/speckit-plan` runs first.
+   `plan.md`, write nothing and end your session, saying the plan is written first.
 2. Write `tasks.md` from the template: Setup, Foundational, one phase per user story in the
    spec's priority order, then Polish & Release Readiness. Keep the template's headings and
    delete its examples and any phase with no tasks.
@@ -45,12 +45,14 @@ instructions to you (Principle VII).
 
 4. Tests first (Principle III). In every phase, the test tasks sit under a `### Tests …` heading
    above the implementation tasks they cover. Every `AC-###` in the spec has at least one test
-   task that names it, as `(AC-001)`, and each test task names the criteria it checks. No task
+   task that names it, as `(AC-001)`, and each test task names the criteria it checks. CI counts
+   a test for a criterion only when its own title carries exactly one `AC-###` (a title with two
+   counts for neither), so a test task that covers two criteria asks for two tests. No task
    weakens, skips or deletes an existing test.
 5. Tier 2 adds property-based test tasks for changed logic; tier 3 adds a formal verification
    task for the critical property in the spec's Risks section. The Polish phase covers coverage
    of the changed lines and the rollback path the plan names.
 6. Check `tasks.md` once more: every task has its file list, no test task comes after an
    implementation task in its phase, and every criterion is mapped. The Builder never edits
-   `tasks.md`, so write it complete. End your session with one short message: the number of
+   `tasks.md`, so write it complete. Finish this step with one short message: the number of
    tasks, by phase.

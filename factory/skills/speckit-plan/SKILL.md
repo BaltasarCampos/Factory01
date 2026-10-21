@@ -48,5 +48,5 @@ to you (Principle VII).
 4. Where they apply: `data-model.md` (entities, fields, rules, state changes), files under
    `contracts/` (each interface the item exposes or changes) and `quickstart.md` (how to see the
    item work end to end). Skip a file that would be empty.
-5. Read `plan.md` against the constitution again and fix what fails. End your session with one
+5. Read `plan.md` against the constitution again and fix what fails. Finish this step with one
    short message: the files written, the estimate and the Constitution Check result.

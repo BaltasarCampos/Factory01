@@ -14,7 +14,7 @@ on the item's branch, tests first.
 1. **Read your task.** `.station.json` in the item's feature folder names the task and the
    files you may touch. Read that task in `tasks.md` and the files it lists, nothing more.
    Search the codebase in a subagent, which returns a short summary.
-2. **Run `/speckit-implement`** for that one task only.
+2. **Follow the `speckit-implement` steps** your station prompt carries, for that one task only.
 3. **Write the tests first.** Each test's title names the acceptance criterion it checks
    (`AC-###`), and it must fail without your change: `factory ci red-green` runs it against
    the code before your change and refuses a test that already passed there.

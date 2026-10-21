@@ -15,6 +15,7 @@ import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { seedState, type FakeIssue } from '../helpers/fake-gh.js';
 import { makeRepo, mergeIntoMain, type Files, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+import { testPrompts } from '../helpers/release.js';
 
 const REPO = 'owner/project';
 const DEFINE = 'claude/define';
@@ -358,6 +359,7 @@ describe('dispatcher waits for the Define merge (AC-006, AC-064)', { timeout: 60
       auditHistory: () => Promise.resolve({ recreated: [] }),
       gatherEvidence: () => Promise.resolve({ needsSession: true, intakeComplete: true }),
       launchers: { local, cloud: new FakeLauncher('cloud') },
+      stationPrompt: testPrompts,
       logEvent: () => Promise.resolve(),
     };
     return { ctx, local };

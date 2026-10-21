@@ -13,6 +13,7 @@ import { readState, seedState } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, mergeBrief } from '../helpers/git-repo.js';
 import { HOOKED_SETTINGS, manifestOf } from '../helpers/guardrails.js';
 import { makeKeys, makeOtherKeys, tempDir, type TestKeys } from '../helpers/keys.js';
+import { promptFiles } from '../helpers/release.js';
 
 const REPO = 'owner/project';
 const BRANCH = 'claude/2-add-login';
@@ -47,6 +48,7 @@ function setup(options: Setup = {}) {
     files: {
       allowed_signers: signers.map((k) => `${k.allowedSignersLine}\n`).join(''),
       revoked_keys: '',
+      ...promptFiles(),
     },
   });
   const config = [
