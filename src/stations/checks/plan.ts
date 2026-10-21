@@ -3,10 +3,12 @@
 // failing row; in `tasks.md` every task lists the files it may touch, every acceptance criterion
 // of the spec maps to a test task, and in every phase the test tasks come before the
 // implementation tasks. A test task is one under a `### Tests …` heading, as in the template.
+// Plan's own questions wait for the Owner as the spec's do (T180).
 import type { CheckResult } from '../../hooks/stop.js';
 import { parseConfig } from '../../model/config.js';
 import { committed, featureFiles } from './feature.js';
-import { checkSpec } from './spec.js';
+import { questionsIn } from './questions.js';
+import { checkSpec, withQuestions } from './spec.js';
 
 export interface PlanInput {
   spec: string;
@@ -77,7 +79,15 @@ export function checkPlan(input: PlanInput): CheckResult & { missing: string[] }
   }
   for (const ac of checkSpec(input.spec).acs)
     if (!tested.has(ac)) missing.push(`tasks.md: ${ac} has no test task`);
-  return { complete: missing.length === 0, missing };
+  // Plan's questions are numbered on from the spec's, so one answers.md serves both (T180).
+  const last = Math.max(0, ...questionsIn(input.spec, 'spec.md').map((q) => q.n));
+  for (const q of questionsIn(input.plan, 'plan.md'))
+    if (q.n <= last)
+      missing.push(
+        `plan.md: Q${String(q.n)} is numbered within spec.md's questions; number on from Q${String(last + 1)}`,
+      );
+  const asked = withQuestions(input.plan, 'plan.md', missing);
+  return { ...asked, complete: asked.missing.length === 0 };
 }
 
 /** The stop hook's check for Plan, against the size limit in the committed project config. */

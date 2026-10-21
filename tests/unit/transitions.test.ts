@@ -376,6 +376,14 @@ describe('blocked', () => {
     expect(next('blocked', gated, RUNNING).ok).toBe(false);
   });
 
+  it('AC-033: tells the Owner what the question is, on blocking and while it stays open (T180)', () => {
+    const asked = { ...gated, questionOpen: true, questionAlert: 'waits for your answers: Q1' };
+    const alert = { urgency: 'info', kind: 'question', text: 'waits for your answers: Q1' };
+    expect(next('triaged', asked)).toMatchObject({ ok: true, to: 'blocked', alert });
+    expect(next('blocked', asked, RUNNING, 'triaged')).toMatchObject({ ok: false, alert });
+    expect(next('blocked', gated, RUNNING, 'triaged').alert).toBeUndefined();
+  });
+
   it('waits to resume into a paused station', () => {
     expect(next('blocked', gated, paused(4), 'building').ok).toBe(false);
   });

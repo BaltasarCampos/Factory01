@@ -52,6 +52,10 @@ describe('report currency (T178)', { timeout: 60_000 }, () => {
       (r) => r.commit({ [`${DIR}/tasks.md`]: TASKS.replace('[ ] T002', '[X] T002') }, 't'),
     ],
     ['a clean merge of main', () => (onMain({ 'src/other.ts': 'x\n' }), mergeMain())],
+    [
+      'the Owner’s answers.md alone (T180)',
+      (r) => r.commit({ [`${DIR}/answers.md`]: 'A1. B\n' }, 'Answers'),
+    ],
   ])('stays current after %s', (_name, later) => {
     later(repo);
     expect(current()).toBe(true);
@@ -59,6 +63,10 @@ describe('report currency (T178)', { timeout: 60_000 }, () => {
 
   it.each<[string, (r: TestRepo) => void]>([
     ['a code commit', (r) => r.commit({ 'src/login.ts': 'export const login = 2;\n' }, 'fix')],
+    [
+      'answers.md and code together',
+      (r) => r.commit({ [`${DIR}/answers.md`]: 'A1. B\n', 'src/x.ts': 'x\n' }, 'both'),
+    ],
     [
       'a report and code together',
       (r) => r.commit({ [`${DIR}/reports/verify.md`]: 'x\n', 'src/x.ts': 'x\n' }, 'both'),

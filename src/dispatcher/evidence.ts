@@ -13,8 +13,9 @@
 // report sends nothing back and stale Verify reports start Verify again.
 //
 // Release evidence, the signed deploy records on the inbox issue, is read once per pass by the
-// dispatcher (released.ts, T160). Not yet gathered: open questions, and what Release and Ops
-// would work on, so Release, Ops and blocked items start no session.
+// dispatcher (released.ts, T160). Open questions are read from `spec.md`, `plan.md` and the
+// Owner's `answers.md` at the branch head (T180). Not yet gathered: what Release and Ops would
+// work on, so Release, Ops and blocked items start no session.
 import { EnvironmentError, RefusedError } from '../cli/env.js';
 import { GhError, gh, repoArg, type GhOptions } from '../github/gh.js';
 import { listPrs } from '../github/prs.js';
@@ -23,6 +24,7 @@ import type { MainMerges } from '../git/merges.js';
 import type { ProjectConfig, State } from '../model/types.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
 import { checkPlan } from '../stations/checks/plan.js';
+import { openQuestions, parseAnswers, questionAlert } from '../stations/checks/questions.js';
 import { checkSecurityReport } from '../stations/checks/security.js';
 import { checkSpec } from '../stations/checks/spec.js';
 import { checkVerifyReport } from '../stations/checks/verify.js';
@@ -155,6 +157,14 @@ export function gatherEvidence(ctx: EvidenceContext) {
       checkPlan({ spec, plan, tasks, sizeLimit }).complete;
     const tasksDone =
       tasks !== undefined && /^\s*- \[[xX]\] T\d+/m.test(tasks) && !/^\s*- \[ \] T\d+/m.test(tasks);
+    const open = openQuestions({ spec, plan }, parseAnswers(read('answers.md')));
+    const asked =
+      open.length === 0
+        ? {}
+        : {
+            questionOpen: true,
+            questionAlert: questionAlert(open, `${dir}/answers.md`, item.branch),
+          };
     const review = verify === undefined ? undefined : checkVerifyReport(verify);
     const failure = integrate === undefined ? undefined : conflictFailure(integrate);
     const [pr] = await listPrs(config.repo, { state: 'open', head: item.branch }, options);
@@ -183,6 +193,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
       tasksDone,
       ...(spec === undefined ? {} : { specSha: git(at, ['rev-parse', `${ref}:${dir}/spec.md`]) }),
       ...(tip === undefined ? {} : { branchHead: tip }),
+      ...asked,
       ...(rg === undefined ? {} : { redGreen: rg }),
       ...(review === undefined ? {} : { verifyReport: review.checksPass }),
       ...(review === undefined ? {} : { findingsResolved: review.findingsResolved }),

@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { runStop } from '../../src/hooks/stop.js';
 import { checkPlan } from '../../src/stations/checks/plan.js';
-import { checkSpec, criterionLines } from '../../src/stations/checks/spec.js';
+import { checkSpec, criterionLines, specStopCheck } from '../../src/stations/checks/spec.js';
 import { makeRepo, type Files } from '../helpers/git-repo.js';
 
 const SPEC = `# Feature Specification: Add login
@@ -200,6 +200,71 @@ describe('criterion lines (AC-097)', () => {
     expect(criterionLines('# S\n\n**Given** x, **When** y, **Then** z.\n')).toEqual([
       { line: 3, problem: 'criterion line without a leading **AC-###** ID' },
     ]);
+  });
+});
+
+describe('questions in the Specify and Plan checks (T180, AC-033)', () => {
+  const asking = (text: string, ...questions: string[]) =>
+    text.replace(/^## Problem/m, `## Clarifications\n\n${questions.join('\n')}\n\n## Problem`);
+  const plan = (over: { spec?: string; plan?: string } = {}) =>
+    checkPlan({ spec: SPEC, plan: PLAN(), tasks: TASKS, sizeLimit: 400, ...over });
+  const planAsking = (...questions: string[]) =>
+    PLAN().replace(/^/, `## Clarifications\n\n${questions.join('\n')}\n\n`);
+
+  it('AC-033: an open question is a waiting stop when nothing else is missing', () => {
+    expect(checkSpec(asking(SPEC, '- Q1: Which sign-in?'))).toEqual({
+      complete: false,
+      waiting: true,
+      missing: ["spec.md: Q1 waits for the Owner's answer"],
+      acs: ['AC-001', 'AC-002', 'AC-003'],
+    });
+    expect(checkSpec(asking(SPEC, '- Q1: Which sign-in? → A: B')).complete).toBe(true);
+  });
+
+  it('AC-033: a question needing an Owner action keeps the spec waiting', () => {
+    const text = asking(SPEC, '- Q1: Who may invite? → A: admins → Owner action: tier raise');
+    expect(checkSpec(text)).toMatchObject({ complete: false, waiting: true });
+  });
+
+  it('AC-033: open questions and another gap are not a waiting stop', () => {
+    const result = checkSpec(asking(drop(SPEC, 'Problem'), '- Q1: Which sign-in?'));
+    expect(result.waiting).toBeUndefined();
+    expect(result.complete).toBe(false);
+  });
+
+  it('refuses a new question once a follow-up exists, and the refusal is not a waiting stop', () => {
+    const text = asking(
+      SPEC,
+      '- Q1: Which? → A: B',
+      '- Q2 (follow-up): Then? → A: C',
+      '- Q3: And?',
+    );
+    const result = checkSpec(text);
+    expect(result.waiting).toBeUndefined();
+    expect(why(result.missing)).toMatch(/Q3 is asked after the follow-up round/);
+  });
+
+  it('AC-033: Plan’s questions wait the same way, numbered on from spec.md’s', () => {
+    const spec = asking(SPEC, '- Q1: Which sign-in? → A: B');
+    expect(plan({ spec, plan: planAsking('- Q2: Which database?') })).toEqual({
+      complete: false,
+      waiting: true,
+      missing: ["plan.md: Q2 waits for the Owner's answer"],
+    });
+    expect(plan({ spec, plan: planAsking('- Q2: Which database? → A: SQLite') }).complete).toBe(
+      true,
+    );
+    expect(
+      why(plan({ spec, plan: planAsking('- Q1: Which database? → A: SQLite') }).missing),
+    ).toMatch(/plan.md: Q1 is numbered within spec.md's questions; number on from Q2/);
+  });
+
+  it('the stop checks read the committed files: a waiting spec', () => {
+    const repo = makeRepo({
+      files: { 'specs/42-add-login/spec.md': asking(SPEC, '- Q1: Which?') },
+    });
+    repo.checkout('claude/42-add-login', { create: true });
+    expect(specStopCheck(repo.path)).toMatchObject({ complete: false, waiting: true });
   });
 });
 
