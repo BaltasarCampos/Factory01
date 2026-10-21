@@ -28,6 +28,8 @@ export interface CheckResult {
   complete: boolean;
   /** What is missing or incomplete, for the session to fix. */
   missing?: string[];
+  /** Only the Owner's answers are missing: a valid stop, waiting for them (T180). */
+  waiting?: boolean;
 }
 
 export type StationChecker = (

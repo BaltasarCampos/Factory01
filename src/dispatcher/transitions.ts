@@ -40,8 +40,10 @@ export interface Evidence {
   duplicateOf?: number;
   /** The highest `tier:` label on the issue; above the confirmed tier, it holds `new`. */
   proposedTier?: Tier;
-  /** An agent's question to the Owner is open on the issue. */
+  /** A question to the Owner is open in the item's files at the branch head (T180). */
   questionOpen?: boolean;
+  /** What the Owner is told while it is open: the questions, quoted, and where to answer. */
+  questionAlert?: string;
   /** A failed gate's report, naming the earliest station able to fix it. */
   failure?: { station: Station; reason: string };
   /** `spec.md` has problem, ACs, non-goals and affected areas. */
@@ -253,15 +255,19 @@ function checksWait(e: Evidence): Decision | undefined {
   return undefined;
 }
 
+const question = (text: string): DecisionAlert => ({ urgency: 'info', kind: 'question', text });
+
 function decide(item: ItemStatus, e: Evidence): Decision {
+  // Sent once per text: again only when the open questions or their answers change.
+  const asked = e.questionAlert === undefined ? {} : { alert: question(e.questionAlert) };
   if (item.state === 'blocked') {
-    if (e.questionOpen) return stay("waits for the Owner's answer");
+    if (e.questionOpen) return { ...stay("waits for the Owner's answer"), ...asked };
     const back = item.blockedFrom;
     if (back === undefined || at(back) === -1 || back === 'done')
       return stay('blocked without the state it left');
     return move(back, 'question answered');
   }
-  if (e.questionOpen) return move('blocked', 'question to the Owner');
+  if (e.questionOpen) return { ...move('blocked', 'question to the Owner'), ...asked };
   if (e.failure !== undefined && e.ownerMerge) {
     // Main is the item now (AC-058, FR-012): a later problem is new work, never a route back.
     const text = `failed a gate after the Owner's merge: ${e.failure.reason}; file a follow-up issue`;

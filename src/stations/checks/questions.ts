@@ -1,0 +1,172 @@
+// The question loop's factory side (T180, AC-033; Owner decisions 2026-10-19 to 2026-10-21).
+// Spec and Plan ask the Owner under `## Clarifications` at the top of `spec.md` and `plan.md`,
+// numbered on across both files:
+//
+//   - Q<n>: <question>                 open
+//   - Q<n> (follow-up): <question>     the one follow-up round of that file
+//   - Q<n>: <question> → A: <answer>   applied by the station's command
+//   - Q<n>: … → A: <answer> → Owner action: <brief change | tier raise>   stays open
+//
+// The Owner answers in the feature's `answers.md` with `A<n>. <answer>` lines. Which questions are
+// open is read by factory code from the files at the branch head, never from a session's word: an
+// answer counts only when it is one of the question's options or five words or fewer, clarify's
+// own rule. A question needing an Owner action stays open until the Owner answers it differently,
+// so the item stays blocked and nothing relaunches (no done path before Gate A).
+import { visible } from '../../notify/summary.js';
+import { section } from './spec.js';
+
+export type QuestionFile = 'spec.md' | 'plan.md';
+
+export interface Question {
+  file: QuestionFile;
+  n: number;
+  followUp: boolean;
+  /** The question as written, without its marker or answer. */
+  text: string;
+  /** Option texts by letter, from its `- Options:` line. */
+  options: Record<string, string>;
+  /** The answer the command applied (`→ A: …`). */
+  applied?: string;
+  /** The Owner action the applied answer needs (`→ Owner action: …`). */
+  ownerAction?: string;
+}
+
+export interface OpenQuestion extends Question {
+  /** No answer yet, an answer that does not count, or an Owner action to take. */
+  why: 'unanswered' | 'answer' | 'action';
+}
+
+const QUESTION = /^\s*- Q(\d+)( \(follow-up\))?:\s*(.*)$/;
+
+/** The questions under `## Clarifications` in `text`, in order. */
+export function questionsIn(text: string, file: QuestionFile): Question[] {
+  const lines = section(text.split('\n'), 'Clarifications') ?? [];
+  const found: Question[] = [];
+  for (const line of lines) {
+    const m = QUESTION.exec(line);
+    if (m !== null) {
+      const [question = '', applied, ownerAction] = (m[3] ?? '').split(
+        /\s*→ (?:A|Owner action):\s*/,
+      );
+      found.push({
+        ...{ file, n: Number(m[1]), followUp: m[2] !== undefined, text: question.trim() },
+        options: {},
+        ...(applied === undefined ? {} : { applied: applied.trim() }),
+        ...(ownerAction === undefined ? {} : { ownerAction: ownerAction.trim() }),
+      });
+      continue;
+    }
+    const options = /^\s+- Options:\s*(.*)$/.exec(line)?.[1];
+    const last = found.at(-1);
+    if (options === undefined || last === undefined) continue;
+    for (const [, letter = '', option = ''] of options.matchAll(
+      /\b([A-Z])\)\s*(.*?)\s*(?=\b[A-Z]\)|$)/g,
+    ))
+      last.options[letter] = option;
+  }
+  return found;
+}
+
+/** The Owner's answers by question number; a later `A<n>.` line replaces an earlier one. */
+export function parseAnswers(text: string | undefined): Map<number, string> {
+  const answers = new Map<number, string>();
+  for (const line of (text ?? '').split('\n')) {
+    const m = /^A(\d+)[.:]\s+(.*\S)\s*$/.exec(line);
+    if (m !== null) answers.set(Number(m[1]), m[2] ?? '');
+  }
+  return answers;
+}
+
+const same = (a: string, b: string) => {
+  const norm = (s: string) =>
+    s
+      .replace(/\s+/g, ' ')
+      .replace(/[.\s]+$/, '')
+      .trim()
+      .toLowerCase();
+  return norm(a) === norm(b);
+};
+
+/** Clarify's rule: an answer counts when it is one of the question's options or ≤ five words. */
+export function answerCounts(q: Question, answer: string): boolean {
+  const words = answer
+    .trim()
+    .split(/\s+/)
+    .filter((w) => w !== '');
+  if (words.length === 0) return false;
+  if (words.length <= 5) return true;
+  return Object.entries(q.options).some(
+    ([letter, option]) => same(answer, option) || same(answer, `${letter}) ${option}`),
+  );
+}
+
+/**
+ * The one follow-up round per file: a question not marked as a follow-up after a follow-up, or a
+ * follow-up still unanswered once another follow-up is applied (a third round), is refused.
+ */
+export function questionProblems(
+  questions: readonly Question[],
+  file: QuestionFile,
+): { refused: number[]; missing: string[] } {
+  const first = questions.findIndex((q) => q.followUp);
+  const followUps = questions.filter((q) => q.followUp);
+  const refused = questions
+    .filter(
+      (q, i) =>
+        (first !== -1 && i > first && !q.followUp) ||
+        (q.followUp && q.applied === undefined && followUps.some((f) => f.applied !== undefined)),
+    )
+    .map((q) => q.n);
+  const missing = refused.map(
+    (n) =>
+      `${file}: Q${String(n)} is asked after the follow-up round; take its recommended default under ## Assumptions`,
+  );
+  return { refused, missing };
+}
+
+/** Whether the command has applied the question's answer and nothing is left to the Owner. */
+export const settled = (q: Question) => q.applied !== undefined && q.ownerAction === undefined;
+
+/** The questions still the Owner's to answer, in `spec.md`'s order and then `plan.md`'s. */
+export function openQuestions(
+  files: { spec?: string | undefined; plan?: string | undefined },
+  answers: ReadonlyMap<number, string>,
+): OpenQuestion[] {
+  const all = (['spec.md', 'plan.md'] as const).flatMap((file) => {
+    const text = file === 'spec.md' ? files.spec : files.plan;
+    const questions = text === undefined ? [] : questionsIn(text, file);
+    const { refused } = questionProblems(questions, file);
+    return questions.filter((q) => !refused.includes(q.n));
+  });
+  return all.flatMap((q): OpenQuestion[] => {
+    if (settled(q)) return [];
+    const answer = answers.get(q.n);
+    if (q.ownerAction !== undefined) {
+      const changed = answer !== undefined && !same(answer, q.applied ?? '');
+      return changed && answerCounts(q, answer) ? [] : [{ ...q, why: 'action' }];
+    }
+    if (answer === undefined) return [{ ...q, why: 'unanswered' }];
+    return answerCounts(q, answer) ? [] : [{ ...q, why: 'answer' }];
+  });
+}
+
+/** The blocked alert: each open question quoted through `visible()`, and where to answer. */
+export function questionAlert(
+  open: readonly OpenQuestion[],
+  answersPath: string,
+  branch: string,
+): string {
+  const lines = open.map((q) => {
+    const n = String(q.n);
+    const head = `- Q${n} (${q.file}): ${visible(q.text)}`;
+    if (q.why === 'action')
+      return `${head} It needs an Owner action, ${visible(q.ownerAction ?? '')}: answer differently, or do the action, then close this item and file it again`;
+    if (q.why === 'answer')
+      return `${head} A${n} does not count: it is neither one of the options nor five words or fewer`;
+    return head;
+  });
+  return [
+    `waits for the Owner's answers in ${answersPath} on ${branch}, one \`A<n>. <answer>\` line per question: an option, or five words or fewer.`,
+    ...lines,
+  ].join('\n');
+}

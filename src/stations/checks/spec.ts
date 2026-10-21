@@ -8,8 +8,12 @@
 // Edge Cases, whatever its wording, and, anywhere else, a line with two or more of a capitalised
 // Given, When or Then, or one of them in bold, plus any line that starts with an ID. Each must
 // start with exactly one `**AC-###**`. Lowercase "when … then" prose is not a criterion line.
+//
+// A question under `## Clarifications` that is not applied keeps the spec incomplete; when the
+// questions are all that is missing, the stop is a waiting one (T180, questions.ts).
 import type { CheckResult } from '../../hooks/stop.js';
 import { featureFiles } from './feature.js';
+import { questionProblems, questionsIn, settled, type QuestionFile } from './questions.js';
 
 export const SPEC_SECTIONS = ['Problem', 'Non-goals', 'Affected areas'] as const;
 
@@ -92,6 +96,26 @@ export function criterionLines(text: string): CriterionLine[] {
   });
 }
 
+/**
+ * The file's questions as problems: those the follow-up rule refuses, then those waiting for the
+ * Owner. Waiting is set when the waiting questions are all that is missing.
+ */
+export function withQuestions(
+  text: string,
+  file: QuestionFile,
+  missing: readonly string[],
+): { missing: string[]; waiting?: true } {
+  const questions = questionsIn(text, file);
+  const { refused, missing: late } = questionProblems(questions, file);
+  const waits = questions
+    .filter((q) => !settled(q) && !refused.includes(q.n))
+    .map((q) => `${file}: Q${String(q.n)} waits for the Owner's answer`);
+  const all = [...missing, ...late, ...waits];
+  return all.length === waits.length && waits.length > 0
+    ? { missing: all, waiting: true }
+    : { missing: all };
+}
+
 export function checkSpec(text: string): SpecResult {
   const lines = uncommented(text);
   const missing: string[] = [];
@@ -115,7 +139,8 @@ export function checkSpec(text: string): SpecResult {
   for (const [id, count] of defined)
     if (count > 1)
       missing.push(`spec.md: ${id} is defined ${count === 2 ? 'twice' : `${String(count)} times`}`);
-  return { complete: missing.length === 0, missing, acs: [...defined.keys()] };
+  const asked = withQuestions(text, 'spec.md', missing);
+  return { ...asked, complete: asked.missing.length === 0, acs: [...defined.keys()] };
 }
 
 /** The stop hook's check for Specify: the committed `spec.md` of the feature folder. */

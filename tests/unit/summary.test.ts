@@ -458,6 +458,24 @@ describe('item trace (AC-017)', () => {
     ]);
   });
 
+  it('AC-017 (T180): accepts a commit without trailers that changes only the Owner’s answers.md', () => {
+    const dir = `specs/${FEATURE}`;
+    const commit = (sha: string, paths: string[]) => ({
+      ...{ sha: sha.repeat(20), message: `Answers ${sha}\n`, parents: 1, paths },
+    });
+    const commits = [
+      commit('a1', [`${dir}/answers.md`]),
+      commit('b2', [`${dir}/answers.md`, `${dir}/spec.md`]),
+      commit('c3', ['specs/9-other/answers.md']),
+    ];
+    expect(untrailered(commits, FEATURE).map((p) => p.slice(0, 12))).toEqual([
+      'b2b2b2b2b2b2',
+      'b2b2b2b2b2b2',
+      'c3c3c3c3c3c3',
+      'c3c3c3c3c3c3',
+    ]);
+  });
+
   it('AC-017 (T178): a merge needs the trailers unless it is a clean merge of main', () => {
     const merge = (sha: string, over: { cleanMerge?: boolean; message?: string } = {}) => ({
       ...{

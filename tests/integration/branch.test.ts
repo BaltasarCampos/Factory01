@@ -942,3 +942,51 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     ).toThrow(/does not exist/);
   });
 });
+
+describe('the question loop (T180, AC-033)', { timeout: 60_000 }, () => {
+  const ASKING = SPEC.replace(
+    '## Problem',
+    [
+      '## Clarifications',
+      '- Q1: Which sign-in should visitors use?',
+      '  - Options: A) Email and password B) A magic link C) Both',
+      '',
+      '## Problem',
+    ].join('\n'),
+  );
+  const answer = (t: ReturnType<typeof setup>, text: string) => {
+    t.project.checkout(BRANCH);
+    t.project.commit({ [`${FEATURE}/answers.md`]: text }, 'Owner answers');
+    t.project.push(BRANCH);
+    t.project.checkout('main');
+  };
+  const asking = () =>
+    setup({ states: ['state:triaged'], branch: { ...CREATED, [`${FEATURE}/spec.md`]: ASKING } });
+
+  it('AC-033: an open question in spec.md blocks the item and the Owner is told what it is', async () => {
+    const t = asking();
+
+    const result = await dispatchOnce(t.ctx);
+
+    expect(result.moves).toEqual([expect.objectContaining({ from: 'triaged', to: 'blocked' })]);
+    expect(t.local.launches).toEqual([]);
+    const [alert] = t.inbox().slice(-1);
+    expect(alert?.body).toMatch(/urgency=info kind=question/);
+    expect(alert?.body).toContain('- Q1 (spec.md): Which sign-in should visitors use?');
+    expect(alert?.body).toContain(`${FEATURE}/answers.md on ${BRANCH}`);
+  });
+
+  it('AC-033: an answer that does not count keeps it blocked; one that counts returns it to the state it left', async () => {
+    const t = asking();
+    await dispatchOnce(t.ctx);
+
+    answer(t, 'A1. Both, but only once the link expires\n');
+    expect((await dispatchOnce(t.ctx)).moves).toEqual([]);
+    expect(t.labels()).toContain('state:blocked');
+    expect(t.inbox().at(-1)?.body).toContain('A1 does not count');
+
+    answer(t, 'A1. B\n');
+    const back = await dispatchOnce(t.ctx);
+    expect(back.moves).toEqual([expect.objectContaining({ from: 'blocked', to: 'triaged' })]);
+  });
+});

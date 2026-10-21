@@ -5,6 +5,7 @@
 // - a commit that changes only files under the feature's `reports/`;
 // - a commit that changes only the feature's `.station.json`, or exactly one `tasks.md` checkbox
 //   from `[ ]` to `[X]`, as the dispatcher writes them;
+// - a commit that changes only the feature's `answers.md`, the Owner's answers (T180);
 // - a clean merge of main: its second parent is on main's verified first-parent history, and its
 //   tree is exactly what `git merge-tree --write-tree` makes of its two parents.
 //
@@ -74,7 +75,7 @@ function keepsReport(
   if (names.length === 0) return true;
   if (names.every((p) => p.startsWith(`${dir}/reports/`))) return true;
   if (names.length !== 1) return false;
-  if (names[0] === `${dir}/.station.json`) return true;
+  if (names[0] === `${dir}/.station.json` || names[0] === `${dir}/answers.md`) return true;
   return names[0] === `${dir}/tasks.md` && oneTick(run, parent, commit, `${dir}/tasks.md`);
 }
 

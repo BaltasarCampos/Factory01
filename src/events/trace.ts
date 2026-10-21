@@ -91,6 +91,9 @@ const names = (value: string, feature: string) =>
 
 function commitProblems(commit: TraceCommit, feature: string): string[] {
   if (commit.parents > 1 && commit.cleanMerge === true) return [];
+  // The Owner's answers to Spec's and Plan's questions carry no trailers (T180).
+  const answers = `specs/${feature}/answers.md`;
+  if (commit.parents === 1 && commit.paths?.length === 1 && commit.paths[0] === answers) return [];
   const t = trailers(commit.message);
   const problems: string[] = [];
   const roles = t.get('Factory-Role') ?? [];
