@@ -16,10 +16,15 @@ import {
 } from '../install/project.js';
 import { parseConfig } from '../model/config.js';
 import { formatReleasePin } from '../model/naming.js';
-import { askConsent, commitAndPush, git, ownerHome, startDefine, verifiedRelease } from './new.js';
-
-const ADOPTED_INPUT =
-  'This repository was adopted: the existing code on main is your input. Read it before asking.';
+import {
+  askConsent,
+  commitAndPush,
+  git,
+  ownerHome,
+  PITCH_PATH,
+  startDefine,
+  verifiedRelease,
+} from './new.js';
 
 export async function adopt(ctx: CommandContext): Promise<number> {
   const repo = ctx.positionals[0] ?? '';
@@ -49,7 +54,9 @@ export async function adopt(ctx: CommandContext): Promise<number> {
       if (!git(workdir, push, ctx.env).ok)
         throw new RefusedError(`could not push ${DEFINE_BRANCH}`);
     }
-    return startDefine(ctx, config, ADOPTED_INPUT);
+    // A project made by `factory new` keeps its pitch on main.
+    const pitch = git(workdir, ['show', `origin/main:${PITCH_PATH}`], ctx.env);
+    return startDefine(ctx, config, workdir, pitch.ok ? pitch.out : undefined);
   }
   if (!fresh)
     throw new RefusedError(`${workdir} already exists; adopt ${repo} from another directory`);
@@ -77,7 +84,7 @@ export async function adopt(ctx: CommandContext): Promise<number> {
     pushed = true;
     createDefineBranch(workdir, ctx.env);
     ctx.io.stdout.write(`Adopted ${repo} in ${workdir}, pinned to ${pin}.\n`);
-    return await startDefine(ctx, { repo, agents }, ADOPTED_INPUT);
+    return await startDefine(ctx, { repo, agents, factory_release: release.pin }, workdir);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
     // Nothing reached main: leave no clone behind.

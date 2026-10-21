@@ -35,6 +35,7 @@ import { ITEM_TYPES, STATES, STATIONS, type GuardrailManifest } from '../../src/
 import { calls, readState, seedState } from '../helpers/fake-gh.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { gitEnv, makeRepo, runGit } from '../helpers/git-repo.js';
+import { workingRelease } from '../helpers/release.js';
 import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
 const FACTORY = 'owner/factory';
@@ -60,6 +61,7 @@ const SOURCES: Record<string, string> = {
   'skills/speckit-plan/SKILL.md': 'release copy of speckit-plan\n',
   'specify/templates/spec-template.md': '# Spec for {{repo}}\n',
   'specify/templates/checklist-template.md': '# Checklist\n',
+  'prompts/station-0-define.md': workingRelease('prompts/station-0-define.md'),
 };
 
 /** Where each source lands in the project; `.mcp.json` is generated. */
@@ -335,14 +337,19 @@ exit 1
 `;
 
 /**
- * The Owner's laptop: a factory clone whose release v1.0.0 is tagged with `tagKey` (`null`: an
- * unsigned annotated tag), the Owner key and key list in `~/.factory`, a `specify` that must not run, and the
- * public factory repo on the fake GitHub serving the same tag.
+ * The Owner's laptop: a factory clone whose release v1.0.0 of `sources` is tagged with `tagKey`
+ * (`null`: an unsigned annotated tag), the Owner key and key list in `~/.factory`, a `specify`
+ * that must not run, and the public factory repo on the fake GitHub serving the same tag.
+ * Sessions start through fake launchers, or with `realLaunchers` through the default ones.
  */
-function laptop({ tagKey }: { tagKey?: TestKeys | null } = {}) {
+function laptop({
+  tagKey,
+  sources = SOURCES,
+  realLaunchers = false,
+}: { tagKey?: TestKeys | null; sources?: Record<string, string>; realLaunchers?: boolean } = {}) {
   const factory = makeRepo({
     files: {
-      ...Object.fromEntries(Object.entries(SOURCES).map(([p, text]) => [`factory/${p}`, text])),
+      ...Object.fromEntries(Object.entries(sources).map(([p, text]) => [`factory/${p}`, text])),
       allowed_signers: `${ownerKeys.allowedSignersLine}\n`,
       revoked_keys: '',
     },
@@ -414,7 +421,7 @@ function laptop({ tagKey }: { tagKey?: TestKeys | null } = {}) {
       env,
       stdinIsTTY: true,
       cwd,
-      launchers,
+      ...(realLaunchers ? {} : { launchers }),
       unreadAlerts: () => Promise.resolve([]),
       ask: (question) => {
         asked.push({ question, printed: out.join(''), ghCalls: calls() });
@@ -492,14 +499,60 @@ describe('factory new (AC-001, AC-003)', { timeout: 120_000 }, () => {
     expect(runGit(work, ['show', `${head}:.factory/define/pitch.md`])).toContain('bookmark list');
   });
 
-  it('AC-003: starts Station 0 (Define) on claude/define with the chosen launcher', () => {
+  it('AC-003: starts Station 0 (Define) on claude/define with the chosen launcher, in the new clone', () => {
     expect(made.launchers.cloud.launches).toEqual([]);
+    expect(made.launchers.local.asked).toEqual([work]);
     expect(made.launchers.local.launches).toMatchObject([
-      { role: 'define', station: 0, branch: 'claude/define' },
+      { project: work, role: 'define', station: 0, branch: 'claude/define' },
     ]);
-    expect(made.launchers.local.launches[0]?.prompt).toContain('.factory/define/pitch.md');
+  });
+
+  it('AC-003: Define gets the release’s Station 0 prompt, with the pitch in its fence (T159)', () => {
+    const prompt = made.launchers.local.launches[0]?.prompt ?? '';
+    expect(prompt).toMatch(/^Station 0 \(Define\) for owner\/sample\. Work only on the branch/);
+    expect(prompt).toContain(
+      '`.factory/define/pitch.md`:\n\n```text\nA tiny bookmark list I use from my laptop browser.\n```',
+    );
+    expect(prompt).toContain('5 to 10 seed issues listed in `.factory/define/backlog.md`');
+  });
+
+  it('AC-064: re-running Define on a project made by factory new keeps its pitch (T159)', async () => {
+    const again = await made.cli(['adopt', 'owner/sample']);
+    expect(again.stderr).toBe('');
+    expect(made.launchers.local.launches).toHaveLength(2);
+    expect(made.launchers.local.launches[1]?.prompt).toContain('```text\nA tiny bookmark list');
   });
 });
+
+describe(
+  'factory new: Define through the release and the default launchers (T159)',
+  { timeout: 120_000 },
+  () => {
+    it('a release without the Station 0 prompt installs the project but starts no Define', async () => {
+      const sources = { ...SOURCES };
+      delete sources['prompts/station-0-define.md'];
+      const { cli, cwd, launchers } = laptop({ sources });
+      const r = await cli(['new', 'A pitch', '--name', 'sample']);
+      expect(r.code).toBe(1);
+      expect(r.stdout).toMatch(/Created owner\/sample/);
+      expect(r.stderr).toMatch(
+        /Define was not started: the release pinned at [0-9a-f]{12} has no factory\/prompts\/station-0-define\.md/,
+      );
+      expect(r.stderr).toContain('factory adopt owner/sample');
+      expect(existsSync(join(cwd, 'sample', '.factory', 'config'))).toBe(true);
+      expect(launchers.local.launches).toEqual([]);
+    });
+
+    it('without launchers from the caller, the local launcher checks the new clone and waits for the guards', async () => {
+      const { cli } = laptop({ realLaunchers: true });
+      const r = await cli(['new', 'A pitch', '--name', 'sample']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toMatch(
+        /Define was not started: the local launcher is not available: release v1\.0\.0 installs no factory hooks/,
+      );
+    });
+  },
+);
 
 describe('factory new refusals (AC-001, AC-083)', { timeout: 60_000 }, () => {
   it('AC-001: any answer but cloud or local creates nothing', async () => {
@@ -573,9 +626,11 @@ describe('factory adopt (AC-007, AC-064)', { timeout: 120_000 }, () => {
     expect(made.ranSpecify()).toBe(false);
     expect(made.launchers.local.launches).toEqual([]);
     expect(made.launchers.cloud.launches).toMatchObject([
-      { role: 'define', station: 0, branch: 'claude/define' },
+      { project: work, role: 'define', station: 0, branch: 'claude/define' },
     ]);
-    expect(made.launchers.cloud.launches[0]?.prompt).toMatch(/existing code/);
+    expect(made.launchers.cloud.launches[0]?.prompt).toMatch(
+      /^Station 0 \(Define\) for owner\/legacy\.[\s\S]*This repository was adopted: the existing code/,
+    );
   });
 
   it('AC-064: adopting an adopted repo re-runs Define without reinstalling or asking', async () => {

@@ -9,7 +9,7 @@ import {
   localInvocation,
   type Runner,
 } from '../../src/dispatcher/launcher/local.js';
-import { LaunchRefused } from '../../src/dispatcher/launcher/types.js';
+import { LaunchRefused, type LaunchRequest } from '../../src/dispatcher/launcher/types.js';
 import { resolveSession } from '../../src/hooks/log.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
 import type { GuardrailManifest } from '../../src/model/types.js';
@@ -69,7 +69,7 @@ function setup(
   const home = tempDir('factory-home-');
   const runner = fakeRunner();
   const launcher = new LocalLauncher({
-    ...{ project: repo.path, home, env: gitEnv },
+    ...{ home, env: gitEnv },
     release: options.release ?? (() => manifestOf(GUARDED)),
     run: options.run ?? runner.run,
   });
@@ -79,7 +79,10 @@ function setup(
     repo.git(['for-each-ref', 'refs/heads']),
   ];
   const sessions = () => runner.calls.filter((c) => c.args[0] === '-p');
-  return { repo, home, launcher, sessions, owner };
+  const launch = (request: Omit<LaunchRequest, 'project'>) =>
+    launcher.launch({ project: repo.path, ...request });
+  const available = () => launcher.available(repo.path);
+  return { repo, home, launch, available, sessions, owner };
 }
 const work = (home: string, name: string) =>
   join(home, '.factory', 'work', 'owner', 'project', name);
@@ -89,13 +92,13 @@ describe('LocalLauncher (research R8, R9)', () => {
     const t = setup();
     const before = t.owner();
 
-    const { sessionId } = await t.launcher.launch(REQUEST);
+    const { sessionId } = await t.launch(REQUEST);
 
     expect(sessionId).toBe('s-123');
     const [launch] = t.sessions();
     const clone = work(t.home, '42-add-login');
     expect(launch?.cwd).toBe(clone);
-    expect(launch?.args).toEqual(localInvocation(REQUEST));
+    expect(launch?.args).toEqual(localInvocation({ ...REQUEST, project: t.repo.path }));
     expect(launch?.env).toMatchObject({ FACTORY_ITEM: '42', FACTORY_STATION: '2' });
     // The release's commands take the feature folder from the prompt (T171, T172).
     expect(launch?.env).not.toHaveProperty('SPECIFY_FEATURE');
@@ -113,7 +116,7 @@ describe('LocalLauncher (research R8, R9)', () => {
   it('runs Intake in a detached clone of main, with its item and station', async () => {
     const t = setup();
 
-    await t.launcher.launch({ ...REQUEST, role: 'intake', station: 1, branch: 'main' });
+    await t.launch({ ...REQUEST, role: 'intake', station: 1, branch: 'main' });
 
     const launch = t.sessions().at(-1);
     expect(launch?.cwd).toBe(work(t.home, 'main'));
@@ -125,7 +128,7 @@ describe('LocalLauncher (research R8, R9)', () => {
 
   it('starts every launch from a fresh clone: files, config and hooks a session left are gone', async () => {
     const t = setup();
-    await t.launcher.launch(REQUEST);
+    await t.launch(REQUEST);
     const clone = work(t.home, '42-add-login');
     writeFileSync(join(clone, 'left-behind.txt'), 'x\n');
     writeFileSync(join(clone, '.git', 'hooks', 'post-checkout'), '#!/bin/sh\ntouch /tmp/pwned\n');
@@ -135,7 +138,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     runGit(other, ['commit', '-q', '--allow-empty', '--no-gpg-sign', '-m', 'more']);
     runGit(other, ['push', '-q', 'origin', BRANCH]);
 
-    await t.launcher.launch(REQUEST);
+    await t.launch(REQUEST);
 
     expect(existsSync(join(clone, 'left-behind.txt'))).toBe(false);
     expect(existsSync(join(clone, '.git', 'hooks', 'post-checkout'))).toBe(false);
@@ -151,7 +154,7 @@ describe('LocalLauncher (research R8, R9)', () => {
   ])('refuses the launch, urgent, when the branch has %s', async (_name, branchFiles) => {
     const t = setup({ branchFiles });
 
-    const launch = t.launcher.launch(REQUEST);
+    const launch = t.launch(REQUEST);
 
     await expect(launch).rejects.toThrow(LaunchRefused);
     await expect(launch).rejects.toMatchObject({ urgent: true });
@@ -172,7 +175,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     t.repo.push(BRANCH);
     t.repo.checkout('main');
 
-    const launch = t.launcher.launch(REQUEST);
+    const launch = t.launch(REQUEST);
 
     await expect(launch).rejects.toThrow(/\.claude is not a regular file/);
     await expect(launch).rejects.toMatchObject({ urgent: true });
@@ -183,9 +186,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     'refuses the branch %s before building any path',
     async (branch) => {
       const t = setup();
-      await expect(t.launcher.launch({ ...REQUEST, branch })).rejects.toThrow(
-        /not a session branch/,
-      );
+      await expect(t.launch({ ...REQUEST, branch })).rejects.toThrow(/not a session branch/);
       expect(existsSync(join(t.home, '.factory'))).toBe(false);
     },
   );
@@ -205,7 +206,7 @@ describe('LocalLauncher (research R8, R9)', () => {
       }
       const define = { role: 'define', station: 0, item: 0, branch: DEFINE_BRANCH } as const;
 
-      await t.launcher.launch({ ...define, prompt: 'Station 0 (define).' });
+      await t.launch({ ...define, prompt: 'Station 0 (define).' });
 
       const launch = t.sessions().at(-1);
       const clone = work(t.home, 'define');
@@ -233,8 +234,8 @@ describe('LocalLauncher (research R8, R9)', () => {
           });
     const t = setup({ run });
 
-    const first = t.launcher.launch(REQUEST);
-    await expect(t.launcher.launch(REQUEST)).rejects.toThrow(/already running/);
+    const first = t.launch(REQUEST);
+    await expect(t.launch(REQUEST)).rejects.toThrow(/already running/);
     await vi.waitFor(() => {
       expect(existsSync(work(t.home, '42-add-login'))).toBe(true);
     });
@@ -243,10 +244,8 @@ describe('LocalLauncher (research R8, R9)', () => {
   });
 
   it('a failed session, or one without a session_id, is an error', async () => {
-    await expect(setup({ run: fakeRunner(1).run }).launcher.launch(REQUEST)).rejects.toThrow(
-      /boom/,
-    );
-    await expect(setup({ run: fakeRunner(0, '{}').run }).launcher.launch(REQUEST)).rejects.toThrow(
+    await expect(setup({ run: fakeRunner(1).run }).launch(REQUEST)).rejects.toThrow(/boom/);
+    await expect(setup({ run: fakeRunner(0, '{}').run }).launch(REQUEST)).rejects.toThrow(
       /session_id/,
     );
   });
@@ -254,7 +253,7 @@ describe('LocalLauncher (research R8, R9)', () => {
 
 describe('LocalLauncher availability: main against the pinned release', () => {
   it('is available when main’s protected files equal the manifest, with the factory hooks', async () => {
-    expect(await setup().launcher.available()).toEqual({ ok: true });
+    expect(await setup().available()).toEqual({ ok: true });
   });
 
   it.each([
@@ -270,7 +269,7 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       /define\.md does not match/,
     ],
   ] as const)('is unavailable, urgent, with %s on main', async (_name, mainFiles, why) => {
-    const result = await setup({ mainFiles }).launcher.available();
+    const result = await setup({ mainFiles }).available();
     expect(result).toMatchObject({ ok: false, urgent: true, reason: why });
   });
 
@@ -280,25 +279,25 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     t.repo.commit({}, 'link');
     t.repo.push('main');
     t.repo.git(['fetch', '-q', 'origin']);
-    expect(await t.launcher.available()).toMatchObject({ ok: false, urgent: true });
+    expect(await t.available()).toMatchObject({ ok: false, urgent: true });
   });
 
   it('waits, without alarm, while the release ships no hooks, the tag is not fetched or claude is missing', async () => {
     const bare = { ...GUARDED, '.claude/settings.json': '{}\n' };
     const noHooks = setup({ mainFiles: bare, release: () => manifestOf(bare) });
-    const waiting = await noHooks.launcher.available();
+    const waiting = await noHooks.available();
     expect(waiting).toMatchObject({ ok: false, reason: /installs no factory hooks/ });
     expect(waiting).not.toHaveProperty('urgent');
     const missing = () => {
       throw new ReleaseTagError('release tag v1.0.0 does not exist');
     };
-    expect(await setup({ release: missing }).launcher.available()).toMatchObject({
+    expect(await setup({ release: missing }).available()).toMatchObject({
       ok: false,
       urgent: false,
       reason: /does not exist/,
     });
     const noClaude: Runner = () => Promise.reject(new Error('spawn claude ENOENT'));
-    expect(await setup({ run: noClaude }).launcher.available()).toEqual({
+    expect(await setup({ run: noClaude }).available()).toEqual({
       ok: false,
       reason: 'claude is not installed',
     });
@@ -309,9 +308,10 @@ describe('CloudLauncher until the Phase 0 probe (T125)', () => {
   it('is unavailable and starts nothing: the cloud command is not confirmed', async () => {
     const launcher = new CloudLauncher();
     expect(launcher.mode).toBe('cloud');
-    expect(cloudInvocation(REQUEST)).toBeUndefined();
+    const request = { ...REQUEST, project: '/nowhere' };
+    expect(cloudInvocation(request)).toBeUndefined();
     expect(await launcher.available()).toMatchObject({ ok: false, reason: /T125/ });
-    await expect(launcher.launch(REQUEST)).rejects.toThrow(/T125/);
+    await expect(launcher.launch(request)).rejects.toThrow(/T125/);
   });
 });
 

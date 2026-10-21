@@ -1,4 +1,6 @@
-Station 1 (Intake) for {{repo}}, work item #{{issue}}: {{title}}
+Station 1 (Intake) for {{repo}}, work item #{{issue}}:
+
+{{item}}
 
 You work in a detached checkout of `main`. Push nothing and write no file: your output is the
 issue's labels and comments, through `gh issue`.

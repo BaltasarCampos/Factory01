@@ -11,6 +11,7 @@ import { assertPassphraseTerminal, ownerKeyPath } from '../approvals/sign.js';
 import type { CommandContext } from '../cli/commands.js';
 import { EnvironmentError, ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { selectLauncher } from '../dispatcher/launcher/select.js';
+import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
 import { signedCommit } from '../git/sign.js';
 import { Fields, gh } from '../github/gh.js';
 import { cloneRepo, createRepo } from '../github/repo.js';
@@ -104,6 +105,8 @@ export async function askConsent(ctx: CommandContext): Promise<AgentsMode | unde
   return answer === 'cloud' || answer === 'local' ? answer : undefined;
 }
 
+export const PITCH_PATH = '.factory/define/pitch.md';
+
 const GUARDED = ['.claude', '.github/workflows', '.specify', '.mcp.json', '.factory'];
 
 /** Commit the work tree as an Owner-signed commit on main and push it. */
@@ -123,30 +126,31 @@ export function commitAndPush(
 }
 
 /**
- * Start Station 0 on `claude/define` with the launcher of the project's `agents:` choice. Until
- * the release ships its Station 0 prompt (T046), the prompt is written here.
+ * Start Station 0 on `claude/define` in the project cloned at `workdir`, with the launcher of
+ * the project's `agents:` choice and the Station 0 prompt of the pinned release (T159). Without
+ * a pitch, Define starts from the adopted code.
  */
 export async function startDefine(
   ctx: CommandContext,
-  config: Pick<ProjectConfig, 'repo' | 'agents'>,
-  input: string,
+  config: Pick<ProjectConfig, 'repo' | 'agents' | 'factory_release'>,
+  workdir: string,
+  pitch?: string,
 ): Promise<number> {
-  const prompt = [
-    `Station 0 (Define) for ${config.repo}. Work only on branch ${DEFINE_BRANCH}; open one ` +
-      'draft pull request for the Owner.',
-    input,
-    'First ask the Owner up to 5 questions in one batch in .factory/define/questions.md.',
-  ].join('\n\n');
   try {
+    const release = pinnedRelease(factorySource(ctx.env), config.factory_release.sha, ctx.env);
+    // Define works for the project, not for a work item.
+    const prompt = stationPrompt(release, {
+      ...{ station: 0, repo: config.repo, issue: 0, title: '', body: '', branch: DEFINE_BRANCH },
+      ...(pitch === undefined ? {} : { pitch }),
+    });
     const launcher = selectLauncher(config, ctx.launchers);
-    const availability = await launcher.available();
+    const availability = await launcher.available(workdir);
     if (!availability.ok)
       throw new RefusedError(
         `the ${launcher.mode} launcher is not available: ${availability.reason}`,
       );
-    // Define works for the project, not for a work item.
-    const request = { role: 'define', station: 0, item: 0, branch: DEFINE_BRANCH, prompt } as const;
-    const { sessionId } = await launcher.launch(request);
+    const request = { project: workdir, role: 'define', station: 0, item: 0 } as const;
+    const { sessionId } = await launcher.launch({ ...request, branch: DEFINE_BRANCH, prompt });
     ctx.io.stdout.write(`Define started on ${DEFINE_BRANCH} (${launcher.mode}, ${sessionId}).\n`);
     return ExitCode.Ok;
   } catch (err) {
@@ -185,16 +189,12 @@ export async function newProject(ctx: CommandContext): Promise<number> {
     mustGit(workdir, ['symbolic-ref', 'HEAD', 'refs/heads/main'], ctx.env);
     await installProject({ repo, workdir, ...release, agents, ...options });
     mkdirSync(join(workdir, '.factory', 'define'), { recursive: true });
-    writeFileSync(join(workdir, '.factory', 'define', 'pitch.md'), `${pitch}\n`);
+    writeFileSync(join(workdir, PITCH_PATH), `${pitch}\n`);
     const pin = formatReleasePin(release.pin);
     commitAndPush(ctx, home, workdir, `factory new: ${repo}\n\nFactory release ${pin}.`);
     createDefineBranch(workdir, ctx.env);
     ctx.io.stdout.write(`Created ${repo} (private) in ${workdir}, pinned to ${pin}.\n`);
-    return await startDefine(
-      ctx,
-      { repo, agents },
-      "The Owner's pitch is in .factory/define/pitch.md.",
-    );
+    return await startDefine(ctx, { repo, agents, factory_release: release.pin }, workdir, pitch);
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }

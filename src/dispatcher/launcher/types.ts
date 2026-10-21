@@ -4,6 +4,8 @@ import { RefusedError } from '../../cli/env.js';
 import type { AgentsMode, RoleName, Station } from '../../model/types.js';
 
 export interface LaunchRequest {
+  /** The Owner's clone of the project the session works for; the session never runs in it. */
+  project: string;
   role: RoleName;
   station: Station;
   /** Issue number of the work item. */
@@ -19,8 +21,11 @@ export type Availability = { ok: true } | { ok: false; reason: string; urgent?: 
 export interface SessionLauncher {
   readonly mode: AgentsMode;
   launch(request: LaunchRequest): Promise<{ sessionId: string }>;
-  /** Not ok during a cloud outage, without the `claude` binary, or before the guards exist. */
-  available(): Promise<Availability>;
+  /**
+   * Whether a session for the project cloned at `project` can start. Not ok during a cloud
+   * outage, without the `claude` binary, or before the guards exist.
+   */
+  available(project: string): Promise<Availability>;
 }
 
 export type Launchers = Partial<Record<AgentsMode, SessionLauncher>>;

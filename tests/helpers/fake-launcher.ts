@@ -2,6 +2,7 @@
 // Mirrors the `SessionLauncher` interface of src/dispatcher/launcher/types.ts (T037).
 
 export interface LaunchRequest {
+  project: string;
   role: string;
   station: number;
   item: number;
@@ -28,7 +29,11 @@ export class FakeLauncher {
     this.isAvailable = !unavailable;
   }
 
-  available(): Promise<{ ok: true } | { ok: false; reason: string }> {
+  /** The projects whose availability was asked. */
+  readonly asked: string[] = [];
+
+  available(project: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+    this.asked.push(project);
     return Promise.resolve(
       this.isAvailable ? { ok: true } : { ok: false, reason: `${this.mode} launcher unavailable` },
     );

@@ -10,4 +10,5 @@ pull request from it to `main` for the Owner.
    not answered.
 3. Otherwise write `.factory/brief.md`, the walking skeleton from the TypeScript profile, and
    5 to 10 seed issues listed in `.factory/define/backlog.md`, as your role file says. Commit,
-   push `claude/define`, and stop. Write your result before waiting on the Owner.
+   push `claude/define`, and stop. Write your result before you end your session or wait on
+   the Owner.

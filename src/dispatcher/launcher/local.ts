@@ -111,8 +111,6 @@ export function guardrailCheck(
 }
 
 export interface LocalOptions {
-  /** The Owner's project clone; sessions never run in it. */
-  project: string;
   /** Holds `.factory/work/`. */
   home: string;
   env: NodeJS.ProcessEnv;
@@ -144,8 +142,8 @@ export class LocalLauncher implements SessionLauncher {
   }
 
   /** The verified manifest of the release pinned on main, or why there is none. */
-  private manifest(): GuardrailManifest | Unavailable {
-    const { project, mainRef } = this.options;
+  private manifest(project: string): GuardrailManifest | Unavailable {
+    const { mainRef } = this.options;
     try {
       return this.options.release(configOnMain(project, mainRef).factory_release);
     } catch (err) {
@@ -183,10 +181,10 @@ export class LocalLauncher implements SessionLauncher {
     return settings === undefined ? { found } : { found, settings };
   }
 
-  async available(): Promise<Availability> {
-    const manifest = this.manifest();
+  async available(project: string): Promise<Availability> {
+    const manifest = this.manifest(project);
     if ('ok' in manifest) return manifest;
-    const { project, mainRef = 'origin/main' } = this.options;
+    const { mainRef = 'origin/main' } = this.options;
     const main = this.treeFiles(project, mainRef, 'main');
     if ('ok' in main) return main;
     const guardrails = guardrailCheck(main.found, main.settings, manifest, 'main');
@@ -203,8 +201,8 @@ export class LocalLauncher implements SessionLauncher {
   }
 
   /** A fresh clone for the session at the branch's tip on origin, cleaned of every other file. */
-  private clone(branch: string): string {
-    const { project, home } = this.options;
+  private clone(project: string, branch: string): string {
+    const { home } = this.options;
     const repo = configOnMain(project, this.options.mainRef).repo;
     const name = branch === 'main' ? 'main' : branch.slice('claude/'.length);
     const dir = join(home, '.factory', 'work', ...repo.split('/'), name);
@@ -242,9 +240,9 @@ export class LocalLauncher implements SessionLauncher {
     if (this.running) throw new LaunchRefused('a local session is already running');
     this.running = true;
     try {
-      const manifest = this.manifest();
+      const manifest = this.manifest(request.project);
       if ('ok' in manifest) throw new LaunchRefused(manifest.reason, manifest.urgent);
-      const cwd = this.clone(request.branch);
+      const cwd = this.clone(request.project, request.branch);
       // The tree first: a symlinked `.claude` would pass a walk of the files it points at.
       const tree = this.treeFiles(cwd, 'HEAD', request.branch);
       const committed =

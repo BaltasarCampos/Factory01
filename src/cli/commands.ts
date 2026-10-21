@@ -18,6 +18,7 @@ import { pause } from '../commands/pause.js';
 import { release } from '../commands/release.js';
 import { resume } from '../commands/resume.js';
 import { run } from '../commands/run.js';
+import { defaultLaunchers } from '../dispatcher/launcher/select.js';
 import type { Launchers } from '../dispatcher/launcher/types.js';
 import { alertLines } from '../notify/inbox.js';
 import type { Alert } from '../model/types.js';
@@ -95,7 +96,7 @@ export interface CliDeps {
   now?: () => Date;
   /** Default: a prompt on the process's terminal. */
   ask?: (question: string) => Promise<string>;
-  /** Default: none; `dispatch` and `run` then use the local and cloud launchers (T061). */
+  /** Default: the local and cloud launchers (T061, T159), for every command. */
   launchers?: Launchers;
   /** Default: 30 s. Tests only; main.ts never sets it. */
   healthMs?: number;
@@ -390,7 +391,7 @@ export async function runCli(argv: readonly string[], deps: CliDeps): Promise<nu
       readStdin: deps.readStdin ?? readProcessStdin,
       now: deps.now ?? (() => new Date()),
       ask: deps.ask ?? askTerminal,
-      launchers: deps.launchers ?? {},
+      launchers: deps.launchers ?? defaultLaunchers(deps.env),
       ...(deps.healthMs === undefined ? {} : { healthMs: deps.healthMs }),
       ...(deps.startMs === undefined ? {} : { startMs: deps.startMs }),
       ...(deps.steadyMs === undefined ? {} : { steadyMs: deps.steadyMs }),
