@@ -114,7 +114,7 @@ function setup(options: Setup = {}) {
   const sessions: { args: readonly string[]; cwd: string }[] = [];
   const realLocal = (manifest: GuardrailManifest) =>
     new LocalLauncher({
-      ...{ project: project.path, home, env: gitEnv },
+      ...{ home, env: gitEnv },
       release: () => manifest,
       run: (_program, args, { cwd }) => {
         sessions.push({ args, cwd });

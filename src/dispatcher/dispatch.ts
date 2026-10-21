@@ -388,7 +388,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     );
     return { ...result, refused };
   };
-  const availability = await launcher.available();
+  const availability = await launcher.available(ctx.projectDir);
   if (!availability.ok)
     return refuse(
       `the ${launcher.mode} launcher is unavailable: ${availability.reason}`,
@@ -419,6 +419,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   let sessionId: string;
   try {
     ({ sessionId } = await launcher.launch({
+      project: ctx.projectDir,
       role,
       station,
       item: item.issue.number,

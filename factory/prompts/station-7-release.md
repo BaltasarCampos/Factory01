@@ -1,4 +1,6 @@
-Station 7 (Release) for {{repo}}, work item #{{issue}}: {{title}}
+Station 7 (Release) for {{repo}}, work item #{{issue}}:
+
+{{item}}
 
 You work on the branch `claude/factory-log`, which is checked out, and nowhere else.
 

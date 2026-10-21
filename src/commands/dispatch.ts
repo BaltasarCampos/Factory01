@@ -1,22 +1,18 @@
 // `factory dispatch` (contracts/cli.md, FR-016, FR-016f): one dispatcher pass over the project
 // clone the command runs in. Main is fetched first; records are checked against the key lists
-// of the release pinned on main, and main's history against the same lists. Without launchers
-// from the caller, sessions run locally (once the release ships the guards, slice 28) or in the
-// cloud (once T125 confirms the command).
+// of the release pinned on main, and main's history against the same lists. Sessions start
+// through the command's launchers, by default the local and cloud ones (T159).
 import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { factorySource, laptopKeys, releaseKeysFor, secondCopy } from '../approvals/keys.js';
+import { factorySource, releaseKeysFor, secondCopy } from '../approvals/keys.js';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { dispatchOnce, type DispatchContext, type PassResult } from '../dispatcher/dispatch.js';
 import { gatherEvidence } from '../dispatcher/evidence.js';
 import { auditMain } from '../dispatcher/history-audit.js';
-import { CloudLauncher } from '../dispatcher/launcher/cloud.js';
-import { LocalLauncher } from '../dispatcher/launcher/local.js';
 import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
-import { verifiedManifest } from '../release/tag.js';
 import { projectHere } from './pause.js';
 
 /**
@@ -36,15 +32,6 @@ export async function projectDispatch(
   const dir = mkdtempSync(join(tmpdir(), 'factory-keys-'));
   const keysFor = releaseKeysFor(ctx.env, dir);
   const out = ctx.io.stdout;
-  const local = new LocalLauncher({
-    project: ctx.cwd,
-    home: project.home,
-    env: ctx.env,
-    // The release's own tag, verified with the laptop's own key lists before its hashes are
-    // used; the launcher runs only on the laptop, and the release's own lists would vouch for
-    // themselves.
-    release: (pin) => verifiedManifest(factorySource(ctx.env), pin, laptopKeys(project.home)),
-  });
   const context: DispatchContext = {
     projectDir: ctx.cwd,
     keysFor,
@@ -55,8 +42,7 @@ export async function projectDispatch(
       ...{ projectDir: ctx.cwd, gh: { env: ctx.env } },
       factory: factorySource(ctx.env),
     }),
-    launchers:
-      Object.keys(ctx.launchers).length > 0 ? ctx.launchers : { local, cloud: new CloudLauncher() },
+    launchers: ctx.launchers,
     stationPrompt: (pin, facts) =>
       stationPrompt(pinnedRelease(factorySource(ctx.env), pin, ctx.env), facts),
     logEvent: (issue, event) => {

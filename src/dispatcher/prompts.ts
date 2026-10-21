@@ -4,7 +4,7 @@
 // dropped and the station's input where `$ARGUMENTS` stands. No role has the Skill tool, so
 // nothing depends on a session finding or choosing a command, and the local and cloud launchers
 // send the same text. Placeholders are filled in one pass, so text from the issue is never
-// expanded again.
+// expanded again, and every untrusted value goes in a code fence it cannot close.
 import { spawnSync } from 'node:child_process';
 import { RefusedError } from '../cli/env.js';
 import { branchFeatureDir } from '../model/naming.js';
@@ -65,12 +65,33 @@ export interface PromptFacts {
   changed?: readonly string[];
   /** Release: main's commits since the last deploy, as a git range. */
   range?: string;
+  /** Define: the Owner's pitch; without one, Define starts from the adopted code (T159). */
+  pitch?: string;
 }
 
-/** A command's steps: no frontmatter, headings one level down, `input` for `$ARGUMENTS`. */
-function commandSteps(text: string, input: string): string {
+const ADOPTED =
+  'This repository was adopted: the existing code on main is your input. Read it before asking.';
+
+/**
+ * Untrusted `text` in a code fence longer than any backtick run inside it, so no line of the
+ * text can close the fence (CommonMark) and pass for the prompt's own words.
+ */
+export function fenced(text: string): string {
+  const longest = (text.match(/`+/g) ?? []).reduce((most, run) => Math.max(most, run.length), 0);
+  const fence = '`'.repeat(Math.max(3, longest + 1));
+  return `${fence}text\n${text}\n${fence}`;
+}
+
+/** Where a command takes its input; a `$ARGUMENTS` anywhere else is refused. */
+const INPUT_BLOCK = '```text\n$ARGUMENTS\n```';
+
+/** A command's steps: no frontmatter, headings one level down, `input` fenced for `$ARGUMENTS`. */
+function commandSteps(text: string, input: string, path: string): string {
   const body = text.replace(/^---\n[\s\S]*?\n---\n/, '').replace(/^(#+) /gm, '#$1 ');
-  return body.split('$ARGUMENTS').join(input).trim();
+  const parts = body.split(INPUT_BLOCK);
+  if (parts.some((part) => part.includes('$ARGUMENTS')))
+    throw new RefusedError(`factory/${path}: $ARGUMENTS outside its input block`);
+  return parts.join(fenced(input)).trim();
 }
 
 function fill(template: string, vars: Readonly<Record<string, string>>, path: string): string {
@@ -86,20 +107,27 @@ export function stationPrompt(read: ReleaseFile, f: PromptFacts): string {
   const item = `#${String(f.issue)} ${title}`;
   const input = f.station === 2 ? `${item}\n\n${clean(f.body).trim()}` : item;
   const commands = (STATION_COMMANDS[f.station] ?? []).map((name, i) => {
-    const steps = commandSteps(read(`skills/${name}/SKILL.md`), input);
+    const skill = `skills/${name}/SKILL.md`;
+    const steps = commandSteps(read(skill), input, skill);
     return `## Step ${String(i + 1)}: ${name}\n\n${i === 0 ? '' : `${QUESTIONS_OPEN}\n\n`}${steps}`;
   });
   const feature = branchFeatureDir(f.itemBranch ?? f.branch) ?? '';
-  const changed = (f.changed ?? []).map((path) => `- ${visible(path)}`);
+  const changed = (f.changed ?? []).map(visible);
+  const pitch =
+    f.pitch === undefined
+      ? ADOPTED
+      : `The Owner's pitch, also in \`.factory/define/pitch.md\`:\n\n${fenced(clean(f.pitch).trim())}`;
   const path = `prompts/${PROMPT_FILES[f.station]}`;
+  // No unfenced title or body: a template has only `{{item}}` and `{{input}}` for them.
   const vars = {
     repo: f.repo,
     issue: String(f.issue),
-    title,
+    item: fenced(item),
+    input: pitch,
     tier: f.tier === undefined ? 'not confirmed' : String(f.tier),
     branch: f.branch,
     feature,
-    changed: changed.length > 0 ? changed.join('\n') : '- none',
+    changed: changed.length > 0 ? fenced(changed.join('\n')) : 'None.',
     range: f.range ?? 'origin/main',
     note: `.factory/releases/${feature.slice('specs/'.length)}.md`,
     commands: commands.join('\n\n'),
