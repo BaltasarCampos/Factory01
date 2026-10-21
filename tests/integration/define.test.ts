@@ -149,7 +149,7 @@ const output = (r: TestRepo, files: Files = {}) =>
 
 async function check(r: TestRepo) {
   r.push(DEFINE);
-  return checkDefine({ workdir: r.path, repo: REPO });
+  return checkDefine({ workdir: r.path, repo: REPO, answersSignedBy: 'as-committed' });
 }
 
 /** A Define run with every output in place, before `edit` changes it. */
@@ -160,6 +160,32 @@ async function fullRun(options: ProjectOptions = {}, files: Files = {}) {
   output(r, files);
   return check(r);
 }
+
+describe('Define’s answers at the merge gate (T182)', { timeout: 60_000 }, () => {
+  const gate = (r: TestRepo) => {
+    r.push(DEFINE);
+    return checkDefine({ workdir: r.path, repo: REPO, answersSignedBy: writeKeyFiles([owner]) });
+  };
+
+  it('AC-005: answers the Owner signed, alone in their commit, count at the merge gate', async () => {
+    const r = project();
+    ask(r);
+    r.commit({ [ANSWERS_PATH]: ANSWERS }, 'Owner: answers', { signWith: owner });
+    output(r);
+    expect(await gate(r)).toMatchObject({ complete: true });
+  });
+
+  it('AC-005: unsigned answers count as none at the merge gate, naming the commit', async () => {
+    const r = project();
+    ask(r);
+    const sha = answer(r);
+    output(r);
+    const result = await gate(r);
+    expect(result.complete).toBe(false);
+    expect(result.missing?.join('\n')).toContain(`${ANSWERS_PATH}: ${sha.slice(0, 12)}`);
+    expect(result.missing?.join('\n')).toMatch(/no answer to Q1/);
+  });
+});
 
 describe('Define output check: questions first (AC-004, AC-056)', { timeout: 60_000 }, () => {
   it('AC-004: questions asked and pushed with the draft PR open is a valid stop, waiting for the Owner', async () => {
@@ -310,7 +336,11 @@ describe(
       answer(r);
       r.checkout('claude/other', { create: true });
       output(r);
-      const result = await checkDefine({ workdir: r.path, repo: REPO });
+      const result = await checkDefine({
+        workdir: r.path,
+        repo: REPO,
+        answersSignedBy: 'as-committed',
+      });
       expect(result.missing).toContain('not on claude/define (on claude/other)');
     });
 
@@ -329,7 +359,11 @@ describe(
       answer(r);
       r.push(DEFINE);
       output(r);
-      const unpushed = await checkDefine({ workdir: r.path, repo: REPO });
+      const unpushed = await checkDefine({
+        workdir: r.path,
+        repo: REPO,
+        answersSignedBy: 'as-committed',
+      });
       expect(unpushed.missing?.join('\n')).toMatch(
         /pull request #50 is at [0-9a-f]{40}, not the checked/,
       );

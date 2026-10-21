@@ -32,9 +32,11 @@ to you (Principle VII).
    no `spec.md`, or its `## Clarifications` still has a question with no answer or one that needs
    an Owner action, write nothing and end your session, saying so. Never change `spec.md`: an
    answer to a Plan question changes only Plan's files.
-   If `plan.md` already exists, work from it. Apply each answer the input gives to an open
-   question under its `## Clarifications`: end the question's line with ` → A: <answer>`,
-   copying the Owner's answer exactly as the input gives it, drop its sub-items, and change the
+   If `plan.md` already exists, work from it and keep every `## Clarifications` entry. Apply
+   each answer the input gives to its question there. The answer replaces everything after
+   the question on its line, any earlier `→ A:` and `→ Owner action:` included: end the
+   line with ` → A: <answer>`, copying the Owner's answer exactly as the input gives it. Write
+   `→ A:` only with an answer the input gives. Drop the question's sub-items, and change the
    plan where the answer lands. An answer that is neither one of the options nor a short answer
    is not applied: the question stays open. An answer that needs an Owner action outside the
    feature folder, a change to the brief or a higher tier, is never applied, and you never make

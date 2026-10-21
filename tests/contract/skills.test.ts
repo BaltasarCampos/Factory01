@@ -175,7 +175,7 @@ describe('each command’s own rules (T172; T124 wording, T072)', () => {
   it('speckit-clarify and speckit-plan copy the Owner’s answer, keep Owner actions open and ask one follow-up round (T180)', () => {
     for (const name of ['speckit-clarify', 'speckit-plan']) {
       const command = text(name);
-      expect(command, name).toMatch(/` → A: <answer>`,\s+copying the Owner's\s+answer exactly/);
+      expect(command, name).toMatch(/` → A: <answer>`,\s+copying the Owner's\s+answer\s+exactly/);
       expect(command, name).toMatch(
         /→ Owner action: brief change`[\s\S]*→ Owner action: tier raise`/,
       );
@@ -185,6 +185,15 @@ describe('each command’s own rules (T172; T124 wording, T072)', () => {
         /numbered on from the highest\s+question in `spec\.md`\s+and `plan\.md`/,
       );
     }
+  });
+
+  it('speckit-clarify and speckit-plan rewrite a question’s line with the newest answer, and write → A: only with an answer the input gives (T182)', () => {
+    for (const name of ['speckit-clarify', 'speckit-plan']) {
+      const command = text(name);
+      expect(command, name).toMatch(/replaces everything after\s+the question on its\s+line/);
+      expect(command, name).toMatch(/Write\s+`→ A:`\s+only with an answer the\s+input gives/);
+    }
+    expect(text('speckit-plan')).toMatch(/keep every `## Clarifications` entry/);
   });
 
   it('speckit-plan asks under ## Clarifications at the top of plan.md and never changes spec.md', () => {

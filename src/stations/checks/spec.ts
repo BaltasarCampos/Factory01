@@ -9,16 +9,17 @@
 // Given, When or Then, or one of them in bold, plus any line that starts with an ID. Each must
 // start with exactly one `**AC-###**`. Lowercase "when … then" prose is not a criterion line.
 //
-// A question under `## Clarifications` that is not applied keeps the spec incomplete; when the
-// questions are all that is missing, the stop is a waiting one (T180, questions.ts).
+// A question under `## Clarifications` that is not settled keeps the spec incomplete; when the
+// questions waiting for the Owner are all that is missing, the stop is a waiting one (T180, T182,
+// questions.ts).
 import type { CheckResult } from '../../hooks/stop.js';
 import { committed, featureDir, featureFiles } from './feature.js';
 import {
   parseAnswers,
   questionProblems,
   questionsIn,
-  sameAnswer,
-  settled,
+  standing,
+  type Question,
   type QuestionFile,
 } from './questions.js';
 
@@ -104,9 +105,9 @@ export function criterionLines(text: string): CriterionLine[] {
 }
 
 /**
- * The file's questions as problems: those the follow-up rule refuses, applied answers that are
- * not the Owner's `A<n>.` line (a session's error, Owner decision 2026-10-21), then those waiting
- * for the Owner. Waiting is set when the waiting questions are all that is missing.
+ * The file's questions as problems: those the follow-up rule refuses and lines with two `→ A:`,
+ * those with the Owner's answer for the command to apply, then those waiting for the Owner.
+ * Waiting is set when the waiting questions are all that is missing.
  */
 export function withQuestions(
   text: string,
@@ -116,20 +117,15 @@ export function withQuestions(
 ): { missing: string[]; waiting?: true } {
   const questions = questionsIn(text, file);
   const { refused, missing: late } = questionProblems(questions, file);
-  const forged = questions
-    .filter((q) => {
-      const owner = answers.get(q.n);
-      return settled(q) && (owner === undefined || !sameAnswer(q, q.applied ?? '', owner));
-    })
-    .map(
-      (q) =>
-        `${file}: Q${String(q.n)} is applied with an answer that is not the Owner's A${String(q.n)} in answers.md`,
-    );
-  late.push(...forged);
-  const waits = questions
-    .filter((q) => !settled(q) && !refused.includes(q.n))
+  const asked = questions.filter((q) => !refused.includes(q.n));
+  const at = (q: Question) => standing(q, answers);
+  const apply = asked
+    .filter((q) => at(q) === 'apply')
+    .map((q) => `${file}: Q${String(q.n)} has the Owner's answer to apply`);
+  const waits = asked
+    .filter((q) => !['settled', 'apply'].includes(at(q)))
     .map((q) => `${file}: Q${String(q.n)} waits for the Owner's answer`);
-  const all = [...missing, ...late, ...waits];
+  const all = [...missing, ...late, ...apply, ...waits];
   return all.length === waits.length && waits.length > 0
     ? { missing: all, waiting: true }
     : { missing: all };

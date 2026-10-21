@@ -226,20 +226,30 @@ describe('questions in the Specify and Plan checks (T180, AC-033)', () => {
     expect(checkSpec(answered, parseAnswers('A1. B\n')).complete).toBe(true);
   });
 
-  it.each([
-    ['with no A1 line in answers.md', ''],
-    ['that differs from the Owner’s A1', 'A1. C\n'],
-  ])(
-    'refuses an applied answer %s, without making the spec wait (Owner decision 2026-10-21)',
-    (_n, answers) => {
-      const result = checkSpec(asking(SPEC, '- Q1: Which sign-in? → A: B'), parseAnswers(answers));
-      expect(result).toMatchObject({
-        complete: false,
-        missing: ["spec.md: Q1 is applied with an answer that is not the Owner's A1 in answers.md"],
-      });
-      expect(result.waiting).toBeUndefined();
-    },
-  );
+  it('AC-033 (T182): an applied answer with no A1 line from the Owner waits for the Owner', () => {
+    const result = checkSpec(asking(SPEC, '- Q1: Which sign-in? → A: B'), new Map());
+    expect(result).toMatchObject({
+      complete: false,
+      waiting: true,
+      missing: ["spec.md: Q1 waits for the Owner's answer"],
+    });
+  });
+
+  it('AC-033 (T182): an applied answer that differs from the Owner’s A1 waits for the command to apply it', () => {
+    const result = checkSpec(asking(SPEC, '- Q1: Which sign-in? → A: B'), parseAnswers('A1. C\n'));
+    expect(result).toMatchObject({
+      complete: false,
+      missing: ["spec.md: Q1 has the Owner's answer to apply"],
+    });
+    expect(result.waiting).toBeUndefined();
+  });
+
+  it('T182: refuses a question line with two → A:', () => {
+    const text = asking(SPEC, '- Q1: Which sign-in? → A: A → A: B');
+    expect(why(checkSpec(text, parseAnswers('A1. B\n')).missing)).toMatch(
+      /spec.md: Q1 has more than one → A:/,
+    );
+  });
 
   it('an applied option’s text matches the Owner’s letter, and the letter matches the text', () => {
     const q = (applied: string) =>
@@ -267,14 +277,14 @@ describe('questions in the Specify and Plan checks (T180, AC-033)', () => {
       '- Q2 (follow-up): Then? → A: C',
       '- Q3: And?',
     );
-    const result = checkSpec(text);
+    const result = checkSpec(text, parseAnswers('A1. B\nA2. C\n'));
     expect(result.waiting).toBeUndefined();
     expect(why(result.missing)).toMatch(/Q3 is asked after the follow-up round/);
   });
 
   it('AC-033: Plan’s questions wait the same way, numbered on from spec.md’s', () => {
     const spec = asking(SPEC, '- Q1: Which sign-in? → A: B');
-    expect(plan({ spec, plan: planAsking('- Q2: Which database?') })).toEqual({
+    expect(plan({ spec, plan: planAsking('- Q2: Which database?'), answers: 'A1. B\n' })).toEqual({
       complete: false,
       waiting: true,
       missing: ["plan.md: Q2 waits for the Owner's answer"],
@@ -284,7 +294,7 @@ describe('questions in the Specify and Plan checks (T180, AC-033)', () => {
     );
     const applied = planAsking('- Q2: Which database? → A: Postgres');
     expect(why(plan({ spec, plan: applied }).missing)).toMatch(
-      /plan.md: Q2 is applied with an answer that is not the Owner's A2/,
+      /plan.md: Q2 has the Owner's answer to apply/,
     );
     expect(
       why(plan({ spec, plan: planAsking('- Q1: Which database? → A: SQLite') }).missing),

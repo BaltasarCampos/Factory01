@@ -47,6 +47,7 @@ import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
 import { LaunchRefused, type Launchers } from './launcher/types.js';
 import { writeStationManifest } from './manifest.js';
+import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
 import type { PromptFacts } from './prompts.js';
 import { answersToApply, parseAnswers, type QuestionFile } from '../stations/checks/questions.js';
@@ -66,6 +67,8 @@ export type StationEvidence = Omit<Evidence, 'owner' | 'rotationPending' | 'hist
   specSha?: string;
   /** The station working on the item's state has work left and no session running. */
   needsSession?: boolean;
+  /** A commit that makes the branch's `answers.md` not the Owner's: its answers count as none (T182). */
+  answersTampered?: { commit: string; reason: string };
 };
 
 export interface Candidate {
@@ -94,6 +97,8 @@ export interface DispatchContext {
     item: Candidate,
     config: ProjectConfig,
     main: MainMerges,
+    /** Main's verified key lists, which the Owner's answers must be signed under (T182). */
+    keys: ReleaseKeys,
   ) => Promise<StationEvidence>;
   launchers: Launchers;
   /** The station's prompt, rendered from the release pinned at `pin` (src/dispatcher/prompts.ts). */
@@ -181,18 +186,31 @@ export function changedFiles(at: BranchContext, mainRef: string, branch: string)
  * The Owner's answers that Specify (`spec.md`) or Plan (`plan.md`) applies next, read at the item
  * branch's tip as origin has it (T180).
  */
-export function ownerAnswers(at: BranchContext, branch: string, file: QuestionFile): string[] {
+export function ownerAnswers(
+  at: BranchContext,
+  branch: string,
+  file: QuestionFile,
+  keys: ReleaseKeys,
+  mainRef = 'origin/main',
+): string[] {
   const dir = branchFeatureDir(branch);
   if (dir === undefined) return [];
-  const show = (name: string) => {
-    try {
-      return runGit(at, ['show', `origin/${branch}:${dir}/${name}`]);
-    } catch {
-      return undefined;
-    }
-  };
+  const tip = runGit(at, ['rev-parse', '--verify', `refs/remotes/origin/${branch}^{commit}`]);
+  const base = runGit(at, ['merge-base', mainRef, tip]);
+  const env = at.env ?? process.env;
+  const signed = signedAnswers({
+    repo: at.projectDir,
+    tip,
+    base,
+    path: `${dir}/answers.md`,
+    keys,
+    env,
+  });
+  // Answers that are not the Owner's count as none; the evidence has alerted the Owner.
+  if ('tampered' in signed) return [];
+  const show = (name: string) => fileAt(at.projectDir, tip, `${dir}/${name}`, env);
   const files = { spec: show('spec.md'), plan: show('plan.md') };
-  return answersToApply(files, parseAnswers(show('answers.md')), file);
+  return answersToApply(files, parseAnswers(signed.text), file);
 }
 
 /** Main's commits since the newest verified deploy on its history, or all of main before one. */
@@ -311,9 +329,14 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     };
     const gather = async (): Promise<StationEvidence> =>
       why === undefined && !FINAL.includes(item.state)
-        ? ctx.gatherEvidence(item, config, history)
+        ? ctx.gatherEvidence(item, config, history, keys)
         : {};
     let found = await gather();
+    if (found.answersTampered !== undefined) {
+      const { commit, reason } = found.answersTampered;
+      const text = `#${String(issue.number)}: answers.md on ${item.branch ?? 'its branch'} is not the Owner's: ${commit.slice(0, 12)} ${reason}; its answers count as none`;
+      await alertOnce({ urgency: 'urgent', kind: 'tampering', text });
+    }
     const verdicts = {
       approved,
       'spec-approved': verdict('spec-approved', found.specSha),
@@ -422,7 +445,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     writeStationManifest(git, ref, { station, role });
   }
   const answersFor = (file: QuestionFile | undefined) => {
-    const answers = file === undefined ? [] : ownerAnswers(git, branch, file);
+    const answers = file === undefined ? [] : ownerAnswers(git, branch, file, keys, mainRef);
     return answers.length === 0 ? {} : { answers };
   };
   let prompt: string;

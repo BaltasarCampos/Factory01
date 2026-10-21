@@ -157,6 +157,8 @@ async function defineOutputs(c: MergeContext): Promise<string[]> {
   const result = await checkDefine({
     ...{ workdir: c.cwd, repo: c.config.repo, ref: c.head, mainRef: c.main },
     gh: { env: c.env },
+    // Main's verified key lists: the Owner's answers must be signed under them (T182).
+    answersSignedBy: c.keys,
   });
   if (result.waiting)
     throw new RefusedError(
