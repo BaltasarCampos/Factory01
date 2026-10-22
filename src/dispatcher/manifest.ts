@@ -7,10 +7,10 @@
 // session can neither see nor rewrite; it ticks a task only on history that holds it (T174).
 import { EnvironmentError } from '../cli/env.js';
 import { fileAt } from '../git/answers.js';
-import { conflictFiles } from '../stations/edges.js';
 import type { RoleName, Station, StationManifest } from '../model/types.js';
 import {
   commitAndPush,
+  conflictedPaths,
   dispatcherMessage,
   featureOf,
   fetchBranch,
@@ -126,6 +126,7 @@ export function writeStationManifest(
   ctx: BranchContext,
   item: ItemRef,
   session: { station: Station; role: RoleName },
+  mainRef = 'origin/main',
 ): StationManifest {
   const feature = featureOf(item);
   const tip = fetchBranch(ctx, item.branch);
@@ -133,15 +134,12 @@ export function writeStationManifest(
   let task: ReturnType<typeof nextTask>;
   let conflicts: string[] | undefined;
   if (session.station === 4) {
-    try {
-      task = nextTask(git(ctx, ['show', `${tip}:specs/${feature}/tasks.md`]));
-    } catch {
-      task = undefined;
-    }
-    // Every task ticked: the conflict session, with the files Integrate's report lists (T174).
-    const report = `specs/${feature}/reports/integrate.md`;
-    if (task === undefined)
-      conflicts = conflictFiles(fileAt(ctx.projectDir, tip, report, ctx.env) ?? '');
+    // A git failure throws: only a missing tasks.md reads as no open task.
+    const tasks = fileAt(ctx.projectDir, tip, `specs/${feature}/tasks.md`, ctx.env);
+    task = tasks === undefined ? undefined : nextTask(tasks);
+    // Every task ticked: the conflict session, with the files git finds conflicted when merging
+    // main in, never the ones Integrate's report lists (T174).
+    if (task === undefined) conflicts = conflictedPaths(ctx, tip, mainRef);
   }
   const manifest: StationManifest = {
     item: item.issue,

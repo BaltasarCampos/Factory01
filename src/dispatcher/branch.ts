@@ -80,6 +80,23 @@ export function gitAnswer(ctx: BranchContext, args: readonly string[]): string |
   return result.stdout.trim();
 }
 
+/**
+ * The files git reports as conflicted when merging `theirs` into `ours`, none when it merges
+ * cleanly. Exit 1 means conflicts only with a merge result on stdout: git 2.39 also exits 1 on a
+ * commit it cannot read, which, like any other failure, throws.
+ */
+export function conflictedPaths(ctx: BranchContext, ours: string, theirs: string): string[] {
+  const args = ['merge-tree', '--write-tree', '--name-only', '-z', ours, theirs];
+  const result = run(ctx, args);
+  const [tree = '', ...rest] = result.stdout.split('\0');
+  const merged = result.status === 0 || result.status === 1;
+  if (result.error !== undefined || !merged || !/^[0-9a-f]{40,64}$/.test(tree))
+    throw failed(args, result);
+  if (result.status === 0) return [];
+  const end = rest.indexOf('');
+  return rest.slice(0, end === -1 ? rest.length : end);
+}
+
 /** The branch's head on origin, fetched into `origin/<branch>`; undefined when it is absent. */
 export function fetchBranch(ctx: BranchContext, branch: string): string | undefined {
   const line = git(ctx, ['ls-remote', '--heads', 'origin', `refs/heads/${branch}`]);

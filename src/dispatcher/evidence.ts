@@ -36,7 +36,14 @@ import { checkSecurityReport } from '../stations/checks/security.js';
 import { checkSpec } from '../stations/checks/spec.js';
 import { checkVerifyReport } from '../stations/checks/verify.js';
 import { conflictFailure } from '../stations/edges.js';
-import { featureOf, fetchBranch, git, gitAnswer, type BranchContext } from './branch.js';
+import {
+  conflictedPaths,
+  featureOf,
+  fetchBranch,
+  git,
+  gitAnswer,
+  type BranchContext,
+} from './branch.js';
 import { branchGit, reportCurrent } from './currency.js';
 import type { Candidate, StationEvidence } from './dispatch.js';
 import {
@@ -150,6 +157,13 @@ function pastCap(
   if (issues <= config.retry_limit) return undefined;
   const text = `${task ?? 'the conflict with main'} is still open at ${tip.slice(0, 12)} after ${String(issues)} Build sessions with retry_limit ${String(config.retry_limit)}; nothing sends it on before T096: close this item and file it again`;
   return { hold: { urgency: 'info', kind: 'build-failed', text } };
+}
+
+/** A current conflict report that git, merging main in, finds no conflict for: Build holds. */
+function unconfirmedConflict(branch: string, tip: string, mainRef: string) {
+  const text = `reports/integrate.md lists conflicts with main, but git merges ${mainRef} into ${branch} at ${tip.slice(0, 12)} with none, so no conflict session is issued; nothing sends it on before T096: close this item and file it again`;
+  const hold: DecisionAlert = { urgency: 'info', kind: 'build-failed', text };
+  return { hold };
 }
 
 /** What the Builder is told in a conflict session, which has no task. */
@@ -313,21 +327,30 @@ export function gatherEvidence(ctx: EvidenceContext) {
       !pending
         ? await buildRound(ctx, at, config, item.branch, dir, tip, tasks)
         : undefined;
-    // Every task ticked and a current conflict report: the conflict session, within the cap.
+    // Every task ticked and a current conflict report: the conflict session, within the cap, but
+    // only for conflicts git itself finds merging main in; the report is an agent's.
     const conflict =
       item.state === 'building' &&
       tip !== undefined &&
       tasksDone &&
       !pending &&
       failure !== undefined;
-    const capped = conflict ? pastCap(ctx, at, config, dir, tip, undefined) : undefined;
-    const held = round !== undefined && 'hold' in round ? round.hold : capped?.hold;
+    const mainRef = ctx.mainRef ?? 'origin/main';
+    const unconfirmed =
+      conflict && conflictedPaths(at, tip, mainRef).length === 0
+        ? unconfirmedConflict(item.branch, tip, mainRef)
+        : undefined;
+    const capped =
+      conflict && unconfirmed === undefined
+        ? pastCap(ctx, at, config, dir, tip, undefined)
+        : undefined;
+    const issueConflict = conflict && unconfirmed === undefined && capped === undefined;
+    const held =
+      round !== undefined && 'hold' in round ? round.hold : (unconfirmed ?? capped)?.hold;
     const work: Partial<Record<State, boolean>> = {
       triaged: !specComplete,
       'spec-approved': !planComplete,
-      building:
-        (!tasksDone && (round === undefined || 'failure' in round)) ||
-        (conflict && capped === undefined),
+      building: (!tasksDone && (round === undefined || 'failure' in round)) || issueConflict,
       verifying: verifyRole !== undefined,
       integrating: integrate === undefined,
     };
@@ -358,7 +381,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
         ? { tick: { task: round.tick, head: round.head } }
         : {}),
       ...(round !== undefined && 'failure' in round ? { buildFailure: round.failure } : {}),
-      ...(conflict && capped === undefined ? { buildFailure: CONFLICT } : {}),
+      ...(issueConflict ? { buildFailure: CONFLICT } : {}),
       ...(held === undefined || typeof held === 'string' ? {} : { buildAlert: held }),
       needsSession: (work[item.state] ?? false) && !pending,
     };
