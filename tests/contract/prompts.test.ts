@@ -158,6 +158,12 @@ describe('station prompts (T072)', () => {
     expect(render(0, define)).toMatch(/This repository was adopted: the existing code on main/);
   });
 
+  it('station 4 tells a Builder given its task again why, and a first attempt nothing (T174)', () => {
+    const failure = 'Your last attempt at T002 left CI red at 0123456789ab: build-test (failure).';
+    expect(render(4, { failure })).toContain(`\n\n${failure}\n\n`);
+    expect(render(4)).not.toMatch(/last attempt/);
+  });
+
   it('station 6 names reports/integrate.md and sends a conflict back to Build', () => {
     expect(render(6)).toContain('specs/42-add-login/reports/integrate.md');
     expect(render(6)).toMatch(/A conflict goes back to Build/);

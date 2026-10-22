@@ -44,6 +44,8 @@ export interface Evidence {
   questionOpen?: boolean;
   /** What the Owner is told while it is open: the questions, quoted, and where to answer. */
   questionAlert?: string;
+  /** Build holds and the Owner is told: the retry limit is reached, or the branch was rewritten (T174). */
+  buildAlert?: DecisionAlert;
   /** A failed gate's report, naming the earliest station able to fix it. */
   failure?: { station: Station; reason: string };
   /** `spec.md` has problem, ACs, non-goals and affected areas. */
@@ -202,7 +204,10 @@ function forward(state: State, e: Evidence): Decision {
     case 'planned':
       return move('building', 'next task assigned');
     case 'building': {
-      if (!e.tasksDone) return stay('tasks not done');
+      if (!e.tasksDone)
+        return e.buildAlert
+          ? { ...stay(e.buildAlert.text), alert: e.buildAlert }
+          : stay('tasks not done');
       const rg = e.redGreen;
       if (rg === undefined || e.branchHead === undefined || rg.head !== e.branchHead)
         return stay('no ci / red-green result for the branch head');

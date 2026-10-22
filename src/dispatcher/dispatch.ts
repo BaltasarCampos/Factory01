@@ -46,7 +46,7 @@ import {
 import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
 import { LaunchRefused, type Launchers } from './launcher/types.js';
-import { writeStationManifest } from './manifest.js';
+import { tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
 import type { PromptFacts } from './prompts.js';
@@ -69,6 +69,10 @@ export type StationEvidence = Omit<Evidence, 'owner' | 'rotationPending' | 'hist
   needsSession?: boolean;
   /** Verify's next role by the Owner's tier (T181). */
   verifyRole?: RoleName;
+  /** Build's task passed CI's build-test at the Builder's head: the factory ticks it (T174). */
+  tick?: { task: string; head: string };
+  /** Why the Builder gets its task again: CI's build-test red at its head (T174). */
+  buildFailure?: string;
   /** A commit that makes the branch's `answers.md` not the Owner's: its answers count as none (T182). */
   answersTampered?: { commit: string; reason: string };
 };
@@ -303,6 +307,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     role: RoleName;
     branch: string;
     comments: PostedComment[];
+    failure?: string;
   };
   let target: Target | undefined;
   for (const issue of await listOpenIssues(repo, options)) {
@@ -340,6 +345,11 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
         ? ctx.gatherEvidence(item, config, history, keys)
         : {};
     let found = await gather();
+    if (found.tick !== undefined && item.branch !== undefined) {
+      const { task, head } = found.tick;
+      tickTask(git, { issue: issue.number, branch: item.branch }, task, head);
+      found = await gather();
+    }
     if (found.answersTampered !== undefined) {
       const { commit, reason } = found.answersTampered;
       const text = `#${String(issue.number)}: answers.md on ${item.branch ?? 'its branch'} is not the Owner's: ${commit.slice(0, 12)} ${reason}; its answers count as none. If the commit is yours, close this item and file it again; if it is not, look into it before anything else.`;
@@ -413,11 +423,14 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     // Verify runs the role its evidence names (T181); every other station has one role.
     const role = at === 5 ? found.verifyRole : ROLE_AT[at];
     if (branch !== undefined && role !== undefined)
-      target = { item, station: at, role, branch, comments };
+      target = {
+        ...{ item, station: at, role, branch, comments },
+        ...(found.buildFailure === undefined ? {} : { failure: found.buildFailure }),
+      };
   }
 
   if (target === undefined) return result;
-  const { item, station, role, branch, comments } = target;
+  const { item, station, role, branch, comments, failure } = target;
   let launcher;
   try {
     launcher = selectLauncher(config, ctx.launchers);
@@ -468,6 +481,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       ...(station === 5 ? { changed: changedFiles(git, mainRef, branch) } : {}),
       ...answersFor(station === 2 ? 'spec.md' : station === 3 ? 'plan.md' : undefined),
       ...(station === 7 ? { range: sinceLastDeploy(history, released, mainRef) } : {}),
+      ...(failure === undefined ? {} : { failure }),
     });
   } catch (err) {
     // A release without the station's prompt or commands: no session, until the pin moves.
