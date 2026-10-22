@@ -1,6 +1,8 @@
 // The protected set at merge time (T173): all of `.specify/`, every `CLAUDE.md` and
 // `CLAUDE.local.md` at any depth, and `.factory/brief.md`, which only a Define pull request may
 // change. Real git repositories, with the inputs `factory merge` passes to src/merge/rules.ts.
+import { mkdirSync, rmSync, symlinkSync } from 'node:fs';
+import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { mergeRules, type MergeRulesInput } from '../../src/merge/rules.js';
 import { makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
@@ -16,13 +18,17 @@ beforeAll(() => {
   owner = makeKeys();
 });
 
-/** A project with a signed main holding a brief; or, without `.factory/config`, the factory. */
+/**
+ * A project with a signed main holding a brief, a `CLAUDE.md` and the constitution; or, without
+ * `.factory/config`, the factory.
+ */
 function project(factory = false): { repo: TestRepo; main: string } {
   const files: Files = factory
     ? { 'src/a.ts': 'a\n' }
     : {
         '.factory/config': `factory_release: ${PIN}\nrepo: ${REPO}\ninbox_issue: 1\nagents: local\n`,
         [BRIEF]: '# Brief\n',
+        ...{ 'CLAUDE.md': '# Notes\n', '.specify/memory/constitution.md': '# Constitution\n' },
         'src/a.ts': 'a\n',
       };
   const repo = makeRepo({ files, signWith: owner });
@@ -30,11 +36,12 @@ function project(factory = false): { repo: TestRepo; main: string } {
   return { repo, main: repo.revParse('main') };
 }
 
-/** `name` off main with `files` committed, checked as `factory merge` checks it. */
-function merge(name: string, files: Files, factory = false) {
+/** `name` off main with `files` committed, or `change` made, checked as `factory merge` does. */
+function merge(name: string, change: Files | ((repo: TestRepo) => void), factory = false) {
   const { repo, main } = project(factory);
   repo.checkout(name, { create: true });
-  const head = repo.commit(files, `work on ${name}`);
+  if (typeof change === 'function') change(repo);
+  const head = repo.commit(typeof change === 'function' ? {} : change, `work on ${name}`);
   repo.checkout('main');
   const keys = writeKeyFiles([owner]);
   const input: MergeRulesInput = {
@@ -78,6 +85,45 @@ describe('merge rules: the protected set of T173', { timeout: 60_000 }, () => {
       expect.stringMatching(/^\.specify\/templates\/spec-template\.md: a protected path/) as string,
       expect.stringMatching(/^CLAUDE\.md: a protected path/) as string,
     ]);
+  });
+
+  const at = (repo: TestRepo, path: string) => join(repo.path, path);
+  it.each<[string, (repo: TestRepo) => void, string[]]>([
+    ['deleting CLAUDE.md', (r) => r.git(['rm', '-q', 'CLAUDE.md']), ['CLAUDE.md']],
+    ['renaming CLAUDE.md out', (r) => r.git(['mv', 'CLAUDE.md', 'NOTES.md']), ['CLAUDE.md']],
+    [
+      'renaming a file in as docs/CLAUDE.md',
+      (r) => {
+        mkdirSync(at(r, 'docs'));
+        r.git(['mv', 'src/a.ts', 'docs/CLAUDE.md']);
+      },
+      ['docs/CLAUDE.md'],
+    ],
+    [
+      'replacing CLAUDE.md with a symlink',
+      (r) => {
+        rmSync(at(r, 'CLAUDE.md'));
+        symlinkSync('AGENTS.md', at(r, 'CLAUDE.md'));
+      },
+      ['CLAUDE.md'],
+    ],
+    ['deleting the brief', (r) => r.git(['rm', '-q', BRIEF]), [BRIEF]],
+  ])('an item pull request %s is refused', (_name, change, paths) => {
+    const result = merge('claude/12-add-login', change);
+
+    expect(result.problems).toEqual(paths.map((p) => expect.stringContaining(`${p}: `) as string));
+  });
+
+  it('a Define pull request touching the constitution, or making the brief a symlink, is refused', () => {
+    const constitution = '.specify/memory/constitution.md';
+    expect(merge('claude/define', { [constitution]: '# Mine\n' }).problems).toEqual([
+      `${constitution}: a protected path, which no item or Define pull request may change`,
+    ]);
+    const linked = merge('claude/define', (r) => {
+      rmSync(at(r, BRIEF));
+      symlinkSync('../README.md', at(r, BRIEF));
+    });
+    expect(linked.problems).toEqual([`${BRIEF}: not a regular file (mode 120000)`]);
   });
 
   it('a log pull request touching the brief is refused', () => {

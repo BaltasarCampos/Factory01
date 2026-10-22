@@ -123,13 +123,18 @@ export function mergeRules(input: MergeRulesInput): RuleResult {
 }
 
 function pathRule(changes: ReturnType<typeof safeDiff>, define: boolean): string[] {
-  return changes
+  const problems = changes
     .filter((c) => guarded(c.path, define))
     .map((c) =>
       c.path === BRIEF_PATH
         ? `${c.path}: the project brief, which only a Define pull request may change`
         : `${c.path}: a protected path, which no item or Define pull request may change`,
     );
+  // Define may change the brief, but only as a regular file (T173).
+  const brief = changes.find((c) => c.path === BRIEF_PATH && c.newMode !== undefined);
+  if (define && brief !== undefined && !['100644', '100755'].includes(brief.newMode ?? ''))
+    problems.push(`${BRIEF_PATH}: not a regular file (mode ${brief.newMode ?? ''})`);
+  return problems;
 }
 
 function factoryRule(changes: ReturnType<typeof safeDiff>): RuleResult {

@@ -122,6 +122,7 @@ describe('the role files (T070, T071)', () => {
       expect(prose).not.toContain('`.specify/memory/constitution.md`,');
       const guardrails =
         /Never touch guardrail files:.*?`CLAUDE\.local\.md`/.exec(prose)?.[0] ?? '';
+      expect(guardrails).not.toBe('');
       expect(guardrails.includes(BRIEF)).toBe(name !== 'define');
       if (COMMITS.includes(name)) {
         expect(prose).toContain(`\`Factory-Role: ${name}\``);

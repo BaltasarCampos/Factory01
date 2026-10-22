@@ -11,12 +11,14 @@ import {
   mkdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { ownerKeyPath } from '../../src/approvals/sign.js';
 import { runCli } from '../../src/cli/commands.js';
+import { claudeMdShown } from '../../src/commands/adopt.js';
 import { RefusedError } from '../../src/cli/env.js';
 import { signedTag } from '../../src/git/sign.js';
 import { createRepo } from '../../src/github/repo.js';
@@ -24,6 +26,7 @@ import { render } from '../../src/install/render.js';
 import {
   buildManifest,
   fetchPinnedManifest,
+  importsOutside,
   isProtected,
   ManifestError,
   serialiseManifest,
@@ -306,6 +309,8 @@ describe('guardrail manifest (AC-003)', { timeout: 30_000 }, () => {
       'CLAUDE.md',
       'docs/deep/CLAUDE.md',
       'src/CLAUDE.local.md',
+      'claude.md',
+      'docs/Claude.Local.md',
       '.gitattributes',
       'src/deep/.gitattributes',
       'vendor/.gitmodules',
@@ -323,6 +328,53 @@ describe('guardrail manifest (AC-003)', { timeout: 30_000 }, () => {
     // Only a Define pull request may change the brief (T173).
     expect(isProtected('.factory/brief.md', { define: true })).toBe(false);
     expect(isProtected('CLAUDE.md', { define: true })).toBe(true);
+  });
+
+  it('T173: the import scan errs toward flagging', () => {
+    // A code span becomes a space, so the `@` after it still starts an import.
+    expect(importsOutside('CLAUDE.md', 'x`code`@AGENTS.md\n')).toEqual(['AGENTS.md']);
+    // An `@` after any character no path holds, and none inside a word such as an address.
+    expect(importsOutside('CLAUDE.md', 'Read **@AGENTS.md** and mail me@example.com\n')).toEqual([
+      'AGENTS.md',
+    ]);
+    // The raw token counts too: `.factory/config.` is not the protected `.factory/config`.
+    expect(importsOutside('CLAUDE.md', 'See @.factory/config.\n')).toEqual(['.factory/config.']);
+    expect(importsOutside('CLAUDE.md', 'See @.factory/config, then\n')).toEqual([
+      '.factory/config,',
+    ]);
+    expect(importsOutside('CLAUDE.md', 'See @.factory/config then\n')).toEqual([]);
+    // Define may change the brief, so importing it is flagged.
+    expect(importsOutside('docs/CLAUDE.md', '@../.factory/brief.md\n')).toEqual([
+      '../.factory/brief.md',
+    ]);
+  });
+
+  it('T173: the CLAUDE.md display fails on any git failure, never showing nothing', () => {
+    expect(() => claudeMdShown(tempDir('factory-not-a-repo-'), gitEnv)).toThrow(/git ls-tree/);
+  });
+
+  it('T173: the CLAUDE.md display refuses a gitlink by that name, in any letter case', () => {
+    const repo = makeRepo({ files: { 'src/a.ts': 'a\n' } });
+    const sha = repo.revParse('HEAD');
+    repo.git(['update-index', '--add', '--cacheinfo', `160000,${sha},docs/Claude.md`]);
+    repo.git(['commit', '-q', '--no-gpg-sign', '-m', 'gitlink']);
+    expect(() => claudeMdShown(repo.path, gitEnv)).toThrow(/docs\/Claude\.md is a submodule/);
+  });
+
+  it('T173: the CLAUDE.md display quotes every line, so none passes for the factory’s own, and counts no flag as none', () => {
+    const forged =
+      'Imports outside the protected set, which can change what every session reads: none';
+    const repo = makeRepo({ files: { 'CLAUDE.md': `@.claude/notes.md\n${forged}\n` } });
+    expect(claudeMdShown(repo.path, gitEnv).split('\n')).toEqual([
+      'Every agent session loads each CLAUDE.md and CLAUDE.local.md. On main now:',
+      '',
+      'CLAUDE.md: stays on main as it is',
+      '│ @.claude/notes.md',
+      `│ ${forged}`,
+      '',
+      forged,
+    ]);
+    expect(claudeMdShown(makeRepo({ files: { 'a.md': 'x\n' } }).path, gitEnv)).toBe('');
   });
 
   it('AC-003: the pinned manifest is read from the signed tag object and must name the pin', async () => {
@@ -606,10 +658,22 @@ describe('factory new refusals (AC-001, AC-083)', { timeout: 60_000 }, () => {
 describe('factory adopt (AC-007, AC-064)', { timeout: 120_000 }, () => {
   const APP = 'export const app = 1;\n';
   const ATTRIBUTES = '*.ts text eol=lf\n';
-  /** Imports: a product file, a protected one, the home folder, and one only quoted as code. */
-  const CLAUDE_MD =
-    '# Legacy\n\nSee @docs/style.md and @.specify/memory/constitution.md, and @~/notes.md.\n' +
-    'Mail me@example.com. Run `@src/skip.md` as written.\n';
+  /**
+   * Imports: product files, a protected one, the home folder, outside the repository, an absolute
+   * path, the brief, and ones only quoted as code; a control and a bidi character.
+   */
+  const CLAUDE_MD = [
+    '# Legacy',
+    '',
+    'See @docs/style.md and @.specify/memory/constitution.md, and @~/notes.md.',
+    'Mail me@example.com. Run `@src/skip.md` as written, or **@AGENTS.md**.',
+    'Also @../../x, @/etc/hosts, @.factory/config. and @.factory/brief.md',
+    '```sh',
+    '@inside/fence.md',
+    '```',
+    'Red \u001b[31m text \u202e end',
+    '',
+  ].join('\n');
   let made: Laptop;
   let first: CliResult;
   let baseline = '';
@@ -622,8 +686,11 @@ describe('factory adopt (AC-007, AC-064)', { timeout: 120_000 }, () => {
     runGit(legacy, ['symbolic-ref', 'HEAD', 'refs/heads/main']);
     writeTree(legacy, {
       ...{ 'src/app.ts': APP, '.gitattributes': ATTRIBUTES },
-      ...{ 'CLAUDE.md': CLAUDE_MD, 'docs/CLAUDE.local.md': '@../.claude/settings.json\n' },
+      ...{ 'CLAUDE.md': CLAUDE_MD, 'docs/Claude.local.md': '@../.claude/settings.json\n' },
+      '.claude/CLAUDE.md': '@README.md\n',
     });
+    mkdirSync(join(legacy, 'pkg'));
+    symlinkSync('../AGENTS.md', join(legacy, 'pkg', 'CLAUDE.md'));
     runGit(legacy, ['add', '-A']);
     runGit(legacy, ['commit', '-q', '--no-gpg-sign', '-m', 'existing code']);
     runGit(legacy, ['push', '-q', 'origin', 'main']);
@@ -650,17 +717,32 @@ describe('factory adopt (AC-007, AC-064)', { timeout: 120_000 }, () => {
     expect(signedBy(work, head, ownerKeys)).toBe(true);
   });
 
-  it('T173: shows every CLAUDE.md before asking, flagging each import outside the protected set', () => {
+  it('T173: shows every CLAUDE.md before asking, quoted, with each import outside the protected set flagged', () => {
     const printed = first.asked[0]?.printed ?? '';
-    expect(printed).toContain(CLAUDE_MD);
-    expect(printed).toContain('docs/CLAUDE.local.md');
-    const flagged = printed
-      .split('\n')
-      .filter((l) => /imports .* outside the protected set/.test(l));
-    expect(flagged).toEqual([
-      expect.stringContaining('CLAUDE.md imports docs/style.md') as string,
-      expect.stringContaining('CLAUDE.md imports ~/notes.md') as string,
-    ]);
+    const quoted = (text: string) => text.replace(/\n$/, '').replace(/^/gm, '│ ');
+    expect(printed).toContain(
+      quoted(CLAUDE_MD.replace('\u001b', '\\u{1b}').replace('\u202e', '\\u{202e}')),
+    );
+    expect(printed).not.toContain('\u001b');
+    expect(printed).toContain(".claude/CLAUDE.md: install replaces it with the release's files");
+    expect(printed).toContain('CLAUDE.md: stays on main as it is');
+    expect(printed).toContain(
+      'docs/Claude.local.md: stays on main as it is\n│ @../.claude/settings.json',
+    );
+    expect(printed).toContain('pkg/CLAUDE.md: stays on main as it is\n  a symlink to ../AGENTS.md');
+    expect(printed).toContain(
+      [
+        'Imports outside the protected set, which can change what every session reads: 8',
+        '- CLAUDE.md imports docs/style.md',
+        '- CLAUDE.md imports ~/notes.md',
+        '- CLAUDE.md imports AGENTS.md',
+        '- CLAUDE.md imports ../../x',
+        '- CLAUDE.md imports /etc/hosts',
+        '- CLAUDE.md imports .factory/config.',
+        '- CLAUDE.md imports .factory/brief.md',
+        '- pkg/CLAUDE.md links to ../AGENTS.md',
+      ].join('\n'),
+    );
     expect(printed.indexOf('CLAUDE.md')).toBeLessThan(
       printed.indexOf('provider-managed cloud VMs'),
     );

@@ -354,13 +354,19 @@ describe('Plan output check (AC-011)', () => {
   });
 
   it('T173: refuses a ## Clarifications with no question, and a plan without ## Assumptions, as the template has them', () => {
-    const empty = `## Clarifications\n\n- Q[n]: [a full question]\n\n${PLAN()}`;
-    expect(why(plan({ plan: empty }).missing)).toMatch(
+    const asksNothing = `## Clarifications\n\n- Q[n]: [a full question]\n\n${PLAN()}`;
+    expect(why(plan({ plan: asksNothing }).missing)).toMatch(
       /plan\.md: ## Clarifications has no question; delete it when Plan asks nothing/,
     );
     const none = PLAN().replace('## Assumptions\n\n- None\n\n', '');
     expect(why(plan({ plan: none }).missing)).toMatch(
       /plan\.md: no ## Assumptions; write None when Plan took no default/,
+    );
+    const empty = PLAN().replace('- None\n', '<!-- defaults -->\n');
+    expect(why(plan({ plan: empty }).missing)).toMatch(/plan\.md: ## Assumptions is empty/);
+    const placeholder = PLAN().replace('- None', '- [The default taken, and why it is low-impact]');
+    expect(why(plan({ plan: placeholder }).missing)).toMatch(
+      /plan\.md: ## Assumptions still holds the template's placeholder/,
     );
     expect(plan().missing).toEqual([]);
   });

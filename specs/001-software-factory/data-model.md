@@ -436,7 +436,8 @@ write it.
 `guardrails.manifest.json` in each factory release, built and signed into the tag by
 `factory release`: `{ "release": "v1.0.0", "commit": "<sha>", "files": { "<path>": "<sha256>" } }`.
 
-Protected paths (refused in any item or Define pull request):
+Protected paths (refused in any item pull request, and in a Define pull request all but the
+brief):
 
 - hashed against the manifest: `.claude/**`, `.mcp.json`, `.claude/hooks/**`,
   `.github/workflows/**`, `.specify/**` (the constitution included), `.factory/lockfile-policy`;

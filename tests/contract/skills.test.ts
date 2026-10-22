@@ -5,11 +5,11 @@
 // honours keys that would break the rules (Owner decision 2026-10-19). The release's `.specify/`
 // holds only what the commands read.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, join, relative } from 'node:path';
+import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
-import { importsOutside } from '../../src/install/manifest.js';
+import { isClaudeMd } from '../../src/install/manifest.js';
 
 const FACTORY = fileURLToPath(new URL('../../factory', import.meta.url));
 const SKILLS = join(FACTORY, 'skills');
@@ -243,14 +243,10 @@ describe('the release’s templates and this repository’s overrides (T173)', (
     },
   );
 
-  it('a CLAUDE.md or CLAUDE.local.md the release ships imports nothing outside the protected set', () => {
-    const shipped = files(FACTORY).filter((path) =>
-      ['CLAUDE.md', 'CLAUDE.local.md'].includes(basename(path)),
-    );
-    for (const path of shipped)
-      expect(importsOutside(relative(FACTORY, path), readFileSync(path, 'utf8')), path).toEqual([]);
-    expect(importsOutside('CLAUDE.md', '@.specify/memory/constitution.md\n')).toEqual([]);
-    expect(importsOutside('CLAUDE.md', '@README.md\n')).toEqual(['README.md']);
+  it('the release ships no CLAUDE.md or CLAUDE.local.md: the first ships as the hashed .claude/CLAUDE.md', () => {
+    // Owner decision 2026-10-22: with that first file come its mapping and a check of its imports
+    // through the installed layout.
+    expect(files(FACTORY).filter((path) => isClaudeMd(relative(FACTORY, path)))).toEqual([]);
   });
 });
 

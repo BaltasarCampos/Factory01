@@ -40,8 +40,15 @@ function planProblems(plan: string, sizeLimit: number): string[] {
   const lines = plan.split('\n');
   if (section(lines, 'Clarifications') !== undefined && questionsIn(plan, 'plan.md').length === 0)
     missing.push('plan.md: ## Clarifications has no question; delete it when Plan asks nothing');
-  if (section(lines, 'Assumptions') === undefined)
+  const assumptions = section(lines, 'Assumptions')
+    ?.join('\n')
+    .replace(/<!--[\s\S]*?-->/g, '');
+  if (assumptions === undefined)
     missing.push('plan.md: no ## Assumptions; write None when Plan took no default');
+  else if (assumptions.trim() === '')
+    missing.push('plan.md: ## Assumptions is empty; write None when Plan took no default');
+  else if (/^\s*-\s*\[.*\]\s*$/m.test(assumptions))
+    missing.push("plan.md: ## Assumptions still holds the template's placeholder");
   return missing;
 }
 
