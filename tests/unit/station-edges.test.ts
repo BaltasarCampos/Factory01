@@ -8,6 +8,7 @@ import { runStop } from '../../src/hooks/stop.js';
 import {
   checkSplit,
   conflictFailure,
+  conflictFiles,
   isTestCode,
   isTestFile,
   loadTestConfig,
@@ -136,6 +137,11 @@ describe('Integrate conflicts (AC-058)', () => {
     expect(conflictFailure('# Integrate report\n\n## Merge\n\n- clean\n')).toBeUndefined();
     expect(conflictFailure('## Conflicts\n\n- none\n')).toBeUndefined();
     expect(conflictFailure('## Conflicts\n\n<!-- - [path]: [why] -->\n')).toBeUndefined();
+  });
+
+  it('T174: the conflict Build session takes the files the report lists, with or without a reason', () => {
+    expect(conflictFiles(REPORT)).toEqual(['src/auth/login.ts', 'tests/unit/login.test.ts']);
+    expect(conflictFiles('## Conflicts\n\n- `src/a.ts`\n- none\n')).toEqual(['src/a.ts']);
   });
 });
 

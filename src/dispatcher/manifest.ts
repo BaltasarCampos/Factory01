@@ -7,6 +7,7 @@
 // session can neither see nor rewrite; it ticks a task only on history that holds it (T174).
 import { EnvironmentError } from '../cli/env.js';
 import { fileAt } from '../git/answers.js';
+import { conflictFiles } from '../stations/edges.js';
 import type { RoleName, Station, StationManifest } from '../model/types.js';
 import {
   commitAndPush,
@@ -52,14 +53,15 @@ export function manifestTask(ctx: BranchContext, commit: string, path: string) {
 }
 
 /**
- * How many Build manifests on the branch since main name `task`: the times it was issued. A
- * session can only add commits, so a forged one, even one that cannot be read, only adds to it.
+ * How many Build manifests on the branch since main name `task`, or no task when it is undefined,
+ * as the conflict session's do: the times it was issued. A session can only add commits, so a
+ * forged one, even one that cannot be read, only adds to it.
  */
 export function buildIssues(
   ctx: BranchContext,
   tip: string,
   dir: string,
-  task: string,
+  task: string | undefined,
   mainRef = 'origin/main',
 ): number {
   const path = `${dir}/.station.json`;
@@ -129,12 +131,17 @@ export function writeStationManifest(
   const tip = fetchBranch(ctx, item.branch);
   if (tip === undefined) throw new Error(`${item.branch} does not exist on origin`);
   let task: ReturnType<typeof nextTask>;
+  let conflicts: string[] | undefined;
   if (session.station === 4) {
     try {
       task = nextTask(git(ctx, ['show', `${tip}:specs/${feature}/tasks.md`]));
     } catch {
       task = undefined;
     }
+    // Every task ticked: the conflict session, with the files Integrate's report lists (T174).
+    const report = `specs/${feature}/reports/integrate.md`;
+    if (task === undefined)
+      conflicts = conflictFiles(fileAt(ctx.projectDir, tip, report, ctx.env) ?? '');
   }
   const manifest: StationManifest = {
     item: item.issue,
@@ -142,6 +149,7 @@ export function writeStationManifest(
     role: session.role,
     branch: item.branch,
     ...(task === undefined ? {} : task),
+    ...(conflicts === undefined ? {} : { files: conflicts }),
     issued_at: ctx.now().toISOString(),
   };
   const path = `specs/${feature}/.station.json`;

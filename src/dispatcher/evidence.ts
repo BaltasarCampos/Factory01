@@ -134,6 +134,28 @@ async function buildTestAt(ctx: EvidenceContext, config: ProjectConfig, tip: str
   }
 }
 
+/**
+ * Before any Build session (T174): held with an alert once the Build manifests for `task`, or for
+ * the conflict session when it is undefined, are past the retry limit.
+ */
+function pastCap(
+  ctx: EvidenceContext,
+  at: BranchContext,
+  config: ProjectConfig,
+  dir: string,
+  tip: string,
+  task: string | undefined,
+): { hold: DecisionAlert } | undefined {
+  const issues = buildIssues(at, tip, dir, task, ctx.mainRef);
+  if (issues <= config.retry_limit) return undefined;
+  const text = `${task ?? 'the conflict with main'} is still open at ${tip.slice(0, 12)} after ${String(issues)} Build sessions with retry_limit ${String(config.retry_limit)}; nothing sends it on before T096: close this item and file it again`;
+  return { hold: { urgency: 'info', kind: 'build-failed', text } };
+}
+
+/** What the Builder is told in a conflict session, which has no task. */
+const CONFLICT =
+  'Integrate sent this item back: its merge of main conflicts in the files `.station.json` lists. This session has no task: merge `origin/main`, resolve only those files, run the tests, and commit the merge with your trailers.';
+
 /** Build's round once the Builder has pushed: tick, issue the task again, or hold (T174). */
 export type BuildRound =
   { tick: string; head: string } | { failure: string } | { hold: DecisionAlert | string };
@@ -152,14 +174,7 @@ async function buildRound(
   tip: string,
   tasks: string,
 ): Promise<BuildRound | undefined> {
-  // Before any Build session, the open task must not be past the retry limit (T174).
-  const issue = (): BuildRound | undefined => {
-    const open = nextTask(tasks)?.task;
-    const issues = open === undefined ? 0 : buildIssues(at, tip, dir, open, ctx.mainRef);
-    if (issues <= config.retry_limit) return undefined;
-    const text = `${String(open)} is still open at ${tip.slice(0, 12)} after ${String(issues)} Build sessions with retry_limit ${String(config.retry_limit)}; nothing sends it on before T096: close this item and file it again`;
-    return { hold: { urgency: 'info', kind: 'build-failed', text } };
-  };
+  const issue = () => pastCap(ctx, at, config, dir, tip, nextTask(tasks)?.task);
   const issued = gitAnswer(at, ['rev-parse', '--verify', '-q', `${issuedRef(branch)}^{commit}`]);
   if (issued === undefined) return issue();
   const task = manifestTask(at, issued, `${dir}/.station.json`);
@@ -298,11 +313,21 @@ export function gatherEvidence(ctx: EvidenceContext) {
       !pending
         ? await buildRound(ctx, at, config, item.branch, dir, tip, tasks)
         : undefined;
-    const held = round !== undefined && 'hold' in round ? round.hold : undefined;
+    // Every task ticked and a current conflict report: the conflict session, within the cap.
+    const conflict =
+      item.state === 'building' &&
+      tip !== undefined &&
+      tasksDone &&
+      !pending &&
+      failure !== undefined;
+    const capped = conflict ? pastCap(ctx, at, config, dir, tip, undefined) : undefined;
+    const held = round !== undefined && 'hold' in round ? round.hold : capped?.hold;
     const work: Partial<Record<State, boolean>> = {
       triaged: !specComplete,
       'spec-approved': !planComplete,
-      building: !tasksDone && (round === undefined || 'failure' in round),
+      building:
+        (!tasksDone && (round === undefined || 'failure' in round)) ||
+        (conflict && capped === undefined),
       verifying: verifyRole !== undefined,
       integrating: integrate === undefined,
     };
@@ -333,6 +358,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
         ? { tick: { task: round.tick, head: round.head } }
         : {}),
       ...(round !== undefined && 'failure' in round ? { buildFailure: round.failure } : {}),
+      ...(conflict && capped === undefined ? { buildFailure: CONFLICT } : {}),
       ...(held === undefined || typeof held === 'string' ? {} : { buildAlert: held }),
       needsSession: (work[item.state] ?? false) && !pending,
     };

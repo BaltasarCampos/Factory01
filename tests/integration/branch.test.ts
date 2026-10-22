@@ -1220,6 +1220,53 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       ]);
     });
 
+    /** An item in Build with every task ticked and a current conflict report from Integrate. */
+    const conflicted = (config?: string) =>
+      setup({
+        ...{ tier: 1, states: ['state:building'] },
+        ...(config === undefined ? {} : { config }),
+        branch: {
+          ...{ ...SPECIFIED, [TASKS_MD]: TASKS.replace(/- \[ \]/g, '- [X]') },
+          [`${FEATURE}/reports/integrate.md`]: '## Conflicts\n\n- `src/login.ts`\n',
+        },
+      });
+
+    it('T174: a current conflict report starts a Build session with no task and the listed files, which the Builder’s merge ends', async () => {
+      const t = conflicted();
+      await dispatchOnce(t.ctx);
+
+      const manifest = JSON.parse(t.show(`${FEATURE}/.station.json`)) as Record<string, unknown>;
+      expect(manifest).toMatchObject({ station: 4, role: 'builder', files: ['src/login.ts'] });
+      expect(manifest).not.toHaveProperty('task');
+      expect(t.local.launches[0]?.prompt).toContain('Integrate sent this item back');
+      // Any commit but a clean merge of main makes the report stale.
+      work(t, { 'src/login.ts': 'resolved\n' });
+      await dispatchOnce(t.ctx);
+      expect(t.local.launches).toHaveLength(1);
+    });
+
+    it('T174: past retry_limit conflict sessions, Build holds with one alert', async () => {
+      const t = conflicted('retry_limit: 1\n');
+      t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+      for (const at of ['09', '10'])
+        t.project.commit(
+          {
+            [`${FEATURE}/.station.json`]: `{"item":2,"station":4,"files":[],"issued_at":"${at}"}\n`,
+          },
+          dispatcherMessage('station 4 (builder) manifest', '2-add-login'),
+        );
+      t.project.commit({ [`${FEATURE}/reports/verify.md`]: 'x\n' }, 'Review');
+      t.project.push(BRANCH);
+      t.project.checkout('main');
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toEqual([]);
+      expect(alerts(t, 'build-failed')).toEqual([
+        `info #2: the conflict with main is still open at ${tipOf(t).slice(0, 12)} after 2 Build sessions with retry_limit 1; nothing sends it on before T096: close this item and file it again`,
+      ]);
+    });
+
     it('T174: a rewritten branch with a forged manifest commit is never ticked, and the Owner gets one urgent alert', async () => {
       const t = await issued();
       const pushed = tipOf(t);
