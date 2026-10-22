@@ -5,6 +5,7 @@
 //
 // The dispatcher's clone records the Build manifest commit it last pushed to a branch, which a
 // session can neither see nor rewrite; it ticks a task only on history that holds it (T174).
+import { EnvironmentError } from '../cli/env.js';
 import { fileAt } from '../git/answers.js';
 import type { RoleName, Station, StationManifest } from '../model/types.js';
 import {
@@ -22,19 +23,37 @@ const BUILD_SUBJECT = 'Dispatcher: station 4 (builder) manifest';
 /** Where the dispatcher's clone records the Build manifest commit it last pushed to `branch`. */
 export const issuedRef = (branch: string) => `refs/factory/build/${branch}`;
 
-/** The task the manifest at `commit` names, if it names one. */
-export function manifestTask(ctx: BranchContext, commit: string, path: string) {
+/** The manifest at `commit`: undefined when it is missing or not a JSON object; git failing throws. */
+function manifestAt(ctx: BranchContext, commit: string, path: string) {
+  const text = fileAt(ctx.projectDir, commit, path, ctx.env);
+  if (text === undefined) return undefined;
   try {
-    const { task } = JSON.parse(git(ctx, ['show', `${commit}:${path}`])) as { task?: unknown };
-    return typeof task === 'string' && /^T\d+$/.test(task) ? task : undefined;
+    const value = JSON.parse(text) as unknown;
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
   } catch {
     return undefined;
   }
 }
 
 /**
+ * The task the dispatcher's own manifest at `commit` names, undefined when it names none; one it
+ * could not have written is an error.
+ */
+export function manifestTask(ctx: BranchContext, commit: string, path: string) {
+  const manifest = manifestAt(ctx, commit, path);
+  if (manifest !== undefined && manifest.task === undefined) return undefined;
+  const task = manifest?.task;
+  if (typeof task === 'string' && /^T\d+$/.test(task)) return task;
+  throw new EnvironmentError(
+    `${commit.slice(0, 12)}:${path} is not a Build manifest the dispatcher wrote`,
+  );
+}
+
+/**
  * How many Build manifests on the branch since main name `task`: the times it was issued. A
- * session can only add commits, so a forged one only makes the count higher.
+ * session can only add commits, so a forged one, even one that cannot be read, only adds to it.
  */
 export function buildIssues(
   ctx: BranchContext,
@@ -48,7 +67,8 @@ export function buildIssues(
   return log
     .split('\n')
     .filter((line) => line.endsWith(` ${BUILD_SUBJECT}`))
-    .filter((line) => manifestTask(ctx, line.slice(0, line.indexOf(' ')), path) === task).length;
+    .map((line) => manifestAt(ctx, line.slice(0, line.indexOf(' ')), path))
+    .filter((manifest) => manifest === undefined || manifest.task === task).length;
 }
 
 /** Tick `task` in `tasks.md` on `head`, the branch's head, in the dispatcher's own commit. */

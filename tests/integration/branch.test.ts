@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
@@ -25,7 +27,7 @@ import {
   type Files,
   type TestRepo,
 } from '../helpers/git-repo.js';
-import { makeKeys, makeOtherKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
 
 const REPO = 'owner/project';
@@ -1170,6 +1172,51 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(t.show(TASKS_MD)).toBe(TASKS);
       expect(alerts(t, 'build-failed')).toEqual([
         `info #2: T001 left CI red at ${second.slice(0, 12)}: build-test (failure), after 2 Build sessions with retry_limit 1; nothing sends it on before T096: close this item and file it again`,
+      ]);
+    });
+
+    /** Runs `pass` with a `git` first on PATH that fails, exit 128, on any `arg` it is given. */
+    const failingGit = async (arg: string, pass: () => Promise<unknown>) => {
+      const dir = tempDir();
+      const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      const script = `#!/bin/sh\nfor a in "$@"; do [ "$a" = "${arg}" ] && { echo 'fatal: injected' >&2; exit 128; }; done\nexec ${real} "$@"\n`;
+      writeFileSync(join(dir, 'git'), script, { mode: 0o755 });
+      const path = process.env.PATH;
+      process.env.PATH = [dir, path ?? ''].join(delimiter);
+      try {
+        await pass();
+      } finally {
+        process.env.PATH = path;
+      }
+    };
+
+    it('T174: an ancestry check that fails with a git error stops the pass and alerts nothing', async () => {
+      const t = await issued();
+      buildTest(work(t), 'success');
+
+      await failingGit('--is-ancestor', async () => {
+        await expect(dispatchOnce(t.ctx)).rejects.toThrow(/git merge-base failed: fatal: injected/);
+      });
+      expect(alerts(t, 'tampering')).toEqual([]);
+      expect(t.show(TASKS_MD)).toBe(TASKS);
+    });
+
+    it('T174: with no record in the clone the open task is issued again, then holds at the cap', async () => {
+      const t = await issued('retry_limit: 1\n');
+      const forget = () => t.project.git(['update-ref', '-d', `refs/factory/build/${BRANCH}`]);
+      forget();
+      work(t);
+      await dispatchOnce(t.ctx);
+      expect(t.local.launches).toHaveLength(2);
+
+      forget();
+      const head = work(t, { 'tests/login.test.ts': 't2\n' });
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toHaveLength(2);
+      expect(alerts(t, 'build-failed')).toEqual([
+        `info #2: T001 is still open at ${head.slice(0, 12)} after 2 Build sessions with retry_limit 1; nothing sends it on before T096: close this item and file it again`,
       ]);
     });
 

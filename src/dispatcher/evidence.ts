@@ -36,10 +36,17 @@ import { checkSecurityReport } from '../stations/checks/security.js';
 import { checkSpec } from '../stations/checks/spec.js';
 import { checkVerifyReport } from '../stations/checks/verify.js';
 import { conflictFailure } from '../stations/edges.js';
-import { featureOf, fetchBranch, git, type BranchContext } from './branch.js';
+import { featureOf, fetchBranch, git, gitAnswer, type BranchContext } from './branch.js';
 import { branchGit, reportCurrent } from './currency.js';
 import type { Candidate, StationEvidence } from './dispatch.js';
-import { buildIssues, issuedRef, manifestTask, pendingManifest, testEnded } from './manifest.js';
+import {
+  buildIssues,
+  issuedRef,
+  manifestTask,
+  nextTask,
+  pendingManifest,
+  testEnded,
+} from './manifest.js';
 import { STATION_OF, type DecisionAlert, type Evidence } from './transitions.js';
 
 export interface EvidenceContext {
@@ -133,7 +140,8 @@ export type BuildRound =
 
 /**
  * Build's round at `tip` for the task of the Build manifest the dispatcher last pushed; undefined
- * when it pushed none, or that task is ticked, so the open task needs a session.
+ * when it pushed none, or that task is ticked, so the open task needs a session. Exit 1 of git is
+ * an answer here; any other git failure stops the pass, never reads as a rewritten branch.
  */
 async function buildRound(
   ctx: EvidenceContext,
@@ -144,21 +152,23 @@ async function buildRound(
   tip: string,
   tasks: string,
 ): Promise<BuildRound | undefined> {
-  let issued: string;
-  try {
-    issued = git(at, ['rev-parse', '--verify', '-q', `${issuedRef(branch)}^{commit}`]);
-  } catch {
-    return undefined;
-  }
+  // Before any Build session, the open task must not be past the retry limit (T174).
+  const issue = (): BuildRound | undefined => {
+    const open = nextTask(tasks)?.task;
+    const issues = open === undefined ? 0 : buildIssues(at, tip, dir, open, ctx.mainRef);
+    if (issues <= config.retry_limit) return undefined;
+    const text = `${String(open)} is still open at ${tip.slice(0, 12)} after ${String(issues)} Build sessions with retry_limit ${String(config.retry_limit)}; nothing sends it on before T096: close this item and file it again`;
+    return { hold: { urgency: 'info', kind: 'build-failed', text } };
+  };
+  const issued = gitAnswer(at, ['rev-parse', '--verify', '-q', `${issuedRef(branch)}^{commit}`]);
+  if (issued === undefined) return issue();
   const task = manifestTask(at, issued, `${dir}/.station.json`);
-  if (task === undefined) return undefined;
-  try {
-    git(at, ['merge-base', '--is-ancestor', issued, tip]);
-  } catch {
+  if (task === undefined) return issue();
+  if (gitAnswer(at, ['merge-base', '--is-ancestor', issued, tip]) === undefined) {
     const text = `the Build manifest the dispatcher pushed, ${issued.slice(0, 12)}, is not in the history of ${branch} at ${tip.slice(0, 12)}: the branch was rewritten, so nothing more is ticked or issued for this item; close it and file it again`;
     return { hold: { urgency: 'urgent', kind: 'tampering', text } };
   }
-  if (!new RegExp(`^\\s*- \\[ \\] ${task}\\b`, 'm').test(tasks)) return undefined;
+  if (!new RegExp(`^\\s*- \\[ \\] ${task}\\b`, 'm').test(tasks)) return issue();
   const state = await buildTestAt(ctx, config, tip);
   if (state === 'success') return { tick: task, head: tip };
   if (['pending', 'missing'].includes(state) || state.startsWith('unreadable'))
