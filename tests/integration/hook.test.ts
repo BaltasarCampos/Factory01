@@ -32,7 +32,9 @@ function git(dir: string, ...args: string[]): void {
 }
 
 /** A project working copy on an item branch with a Builder station manifest. */
-function workingCopy(opts: { manifestRole?: string; model?: string } = {}): string {
+function workingCopy(
+  opts: { manifestRole?: string; model?: string; station?: number } = {},
+): string {
   const dir = tempDir();
   git(dir, 'init', '-q', '-b', 'claude/42-add-login');
   const write = (path: string, text: string) => {
@@ -43,13 +45,13 @@ function workingCopy(opts: { manifestRole?: string; model?: string } = {}): stri
     '.factory/config',
     `factory_release: v1.0.0@${SHA40}\nagents: local\nprofile: typescript\nrepo: owner/project\ninbox_issue: 1\n`,
   );
-  for (const role of ['builder', 'ops', 'define', 'intake', 'spec'])
+  for (const role of ['builder', 'ops', 'define', 'intake', 'spec', 'integrator'])
     write(`.claude/agents/${role}.md`, roleFile(role, opts.model));
   write(
     `${FEATURE}/.station.json`,
     JSON.stringify({
       item: 42,
-      station: 4,
+      station: opts.station ?? 4,
       role: opts.manifestRole ?? 'builder',
       branch: 'claude/42-add-login',
       task: 'T007',
@@ -268,10 +270,11 @@ describe('factory hook entry: fail closed (contracts/hooks.md)', () => {
 
 describe('factory hook stop (AC-063)', () => {
   it('blocks a stop when no output checker exists for the station, and logs the block', async () => {
-    const dir = workingCopy();
-    const r = await hook('stop', input(dir, { hook_event_name: 'Stop', stop_hook_active: false }));
+    const dir = workingCopy({ station: 6, manifestRole: 'integrator' });
+    const stop = { hook_event_name: 'Stop', stop_hook_active: false, agent_type: 'integrator' };
+    const r = await hook('stop', input(dir, stop));
     expect(r.code).toBe(2);
-    expect(r.stderr).toMatch(/no output checker for station 4/);
+    expect(r.stderr).toMatch(/no output checker for station 6/);
     expect(events(join(dir, FEATURE, 'events.jsonl'))[0]).toMatchObject({
       kind: 'blocked',
       tool: 'Stop',

@@ -77,7 +77,7 @@ export interface Trace {
 }
 
 /** Trailers of the message's last paragraph, by key. */
-function trailers(message: string): Map<string, string[]> {
+export function trailers(message: string): Map<string, string[]> {
   const found = new Map<string, string[]>();
   const last =
     message

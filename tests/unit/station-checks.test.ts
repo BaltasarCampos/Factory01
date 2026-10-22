@@ -2,11 +2,13 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
+import { dispatcherMessage } from '../../src/dispatcher/branch.js';
 import { runStop } from '../../src/hooks/stop.js';
+import { buildStopCheck } from '../../src/stations/checks/build.js';
 import { checkPlan } from '../../src/stations/checks/plan.js';
 import { parseAnswers } from '../../src/stations/checks/questions.js';
 import { checkSpec, criterionLines, specStopCheck } from '../../src/stations/checks/spec.js';
-import { makeRepo, type Files } from '../helpers/git-repo.js';
+import { makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
 
 const SPEC = `# Feature Specification: Add login
 
@@ -478,5 +480,118 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
     });
     expect((await open.stop()).reason).toMatch(/unresolved blocking finding: eval at src\/a.ts:1/);
     expect((await stationRun(5, 'reviewer', { [security]: SECURITY }).stop()).block).toBe(true);
+  });
+});
+
+describe("Build's stop check for a task session (T174)", () => {
+  const FEATURE = 'specs/42-add-login';
+  const BRANCH = 'claude/42-add-login';
+  const MANIFEST = `${FEATURE}/.station.json`;
+  const TRAILERS = { 'Factory-Role': 'builder', 'Factory-Item': '42-add-login' };
+  const TASK = { task: 'T007', files: ['src/login.ts', 'tests/login.test.ts'] };
+  const WORK = { 'src/login.ts': 'b\n', 'tests/login.test.ts': 't\n' };
+  const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nagents: local\nprofile: typescript\nrepo: owner/project\ninbox_issue: 1\n`;
+  const ROLE = '---\nname: builder\nmodel: sonnet\ntools: Read, Write\nversion: 1\n---\nBuild.\n';
+
+  /** The item branch on origin, its tip the dispatcher's Build manifest commit. */
+  function issued(task: Record<string, unknown> = TASK): TestRepo {
+    const r = makeRepo({
+      files: {
+        ...{ '.factory/config': CONFIG, '.claude/agents/builder.md': ROLE, 'src/login.ts': 'a\n' },
+        [`${FEATURE}/tasks.md`]: '- [ ] T007 Login · Files: src/login.ts, tests/login.test.ts\n',
+      },
+    });
+    r.checkout(BRANCH, { create: true });
+    const manifest = { item: 42, station: 4, role: 'builder', branch: BRANCH, ...task };
+    r.commit(
+      { [MANIFEST]: JSON.stringify({ ...manifest, issued_at: '2026-10-22T09:00:00Z' }) },
+      dispatcherMessage('station 4 (builder) manifest', '42-add-login'),
+    );
+    r.push();
+    return r;
+  }
+  /** The Builder's commit of `files`, pushed; returns it. */
+  const build = (r: TestRepo, files: Files = WORK, trailers: Record<string, string> = TRAILERS) => {
+    const sha = r.commit(files, 'Add login', { trailers });
+    r.push();
+    return sha;
+  };
+
+  it('T174: the Builder may stop once its commits on the manifest commit are pushed', async () => {
+    const r = issued();
+    build(r);
+    build(r, { 'tests/login.test.ts': 't2\n' });
+    const input = { session_id: 's1', cwd: r.path, hook_event_name: 'Stop', agent_type: 'builder' };
+
+    expect(await runStop(input, { cwd: r.path, now: () => new Date() })).toEqual({ block: false });
+  });
+
+  it.each<[string, (r: TestRepo) => void, RegExp]>([
+    ['no commit after the manifest', () => undefined, /no commit after the dispatcher's manifest/],
+    ['work not pushed', (r) => r.commit(WORK, 'Add login', { trailers: TRAILERS }), /not pushed/],
+    [
+      'origin unreadable',
+      (r) => {
+        build(r);
+        return r.git(['remote', 'set-url', 'origin', join(r.path, 'gone.git')]);
+      },
+      /not pushed: origin's claude\/42-add-login is unreadable \(git ls-remote failed/,
+    ],
+    ['no trailers', (r) => build(r, WORK, {}), /no Factory-Role: builder.*no Factory-Item/],
+    [
+      "another item's trailer",
+      (r) => build(r, WORK, { ...TRAILERS, 'Factory-Item': '7-other' }),
+      /Factory-Item: 7-other is not 42-add-login/,
+    ],
+    [
+      'a file outside the task',
+      (r) => build(r, { ...WORK, 'src/admin.ts': 'x\n' }),
+      /src\/admin\.ts: not in T007's files/,
+    ],
+    [
+      'tasks.md ticked',
+      (r) => build(r, { [`${FEATURE}/tasks.md`]: '- [X] T007 Login\n' }),
+      /tasks\.md: the factory ticks your task/,
+    ],
+    [
+      'a .station.json the Builder wrote',
+      (r) => build(r, { ...WORK, [MANIFEST]: '{}\n' }),
+      /the last commit to change specs\/42-add-login\/\.station\.json is not the dispatcher's/,
+    ],
+    [
+      'the manifest commit rewritten away',
+      (r) => {
+        r.git(['reset', '-q', '--hard', 'HEAD~1']);
+        r.commit(WORK, 'Add login', { trailers: TRAILERS });
+        r.push(undefined, { force: true });
+      },
+      /no dispatcher manifest commit/,
+    ],
+    [
+      'a merge',
+      (r) => {
+        r.git(['checkout', '-q', '-b', 'side', 'main']);
+        r.commit({ 'src/login.ts': 'side\n' }, 'Side', { trailers: TRAILERS });
+        r.checkout(BRANCH);
+        const message = 'Merge side\n\nFactory-Role: builder\nFactory-Item: 42-add-login';
+        r.git(['merge', '-q', '--no-ff', '--no-gpg-sign', '-m', message, 'side']);
+        r.push();
+      },
+      /is a merge; a task session only adds commits/,
+    ],
+  ])('T174: the Builder may not stop with %s', (_name, act, reason) => {
+    const r = issued();
+    act(r);
+    const result = buildStopCheck(r.path);
+
+    expect(result.complete).toBe(false);
+    expect(result.missing?.join('\n')).toMatch(reason);
+  });
+
+  it('T174: a Build manifest naming no task fails closed until the conflict session ships', () => {
+    const r = issued({ files: ['src/login.ts'] });
+    build(r, { 'src/login.ts': 'merged\n' });
+
+    expect(buildStopCheck(r.path).missing?.join('\n')).toMatch(/names no task/);
   });
 });
