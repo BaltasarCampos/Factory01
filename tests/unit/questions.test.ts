@@ -105,7 +105,8 @@ describe('open questions at the branch head (T180)', () => {
       '- Q1: Which sign-in? → A: B',
       '- Q2: Who may invite others? → A: admins → Owner action: brief change',
     );
-    const open = (answers: string) => openQuestions({ spec: applied }, parseAnswers(answers));
+    const open = (answers: string) =>
+      openQuestions({ spec: applied }, parseAnswers(`A1. B\n${answers}`));
     expect(open('A2. admins\n').map((q) => [q.n, q.why, q.ownerAction])).toEqual([
       [2, 'action', 'brief change'],
     ]);
@@ -126,7 +127,7 @@ describe('open questions at the branch head (T180)', () => {
       '- Q2 (follow-up): How long?',
       '- Q3: And who?',
     );
-    expect(openQuestions({ spec: late }, new Map()).map((q) => q.n)).toEqual([2]);
+    expect(openQuestions({ spec: late }, parseAnswers('A1. B\n')).map((q) => q.n)).toEqual([2]);
   });
 });
 
@@ -150,9 +151,31 @@ describe('the answers a session applies (T180, slice 24c-2b)', () => {
     expect(answersToApply({ spec, plan }, answers, 'plan.md')).toEqual(['A5. SQLite']);
   });
 
-  it('an applied answer that is not the Owner’s blocks nothing: it is the session’s error', () => {
+  it('AC-033 (T182): an applied answer is settled only by the Owner’s matching line; with none it is open', () => {
     const forged = clarifications('- Q1: Which sign-in? → A: B');
-    expect(openQuestions({ spec: forged }, new Map())).toEqual([]);
+    expect(openQuestions({ spec: forged }, new Map()).map((q) => [q.n, q.why])).toEqual([
+      [1, 'unanswered'],
+    ]);
+    expect(openQuestions({ spec: forged }, parseAnswers('A1. B\n'))).toEqual([]);
+  });
+
+  it('AC-033 (T182): an applied answer that differs from the Owner’s goes back to the command', () => {
+    const stale = clarifications('- Q1: Which sign-in? → A: A');
+    expect(answersToApply({ spec: stale }, parseAnswers('A1. B\n'), 'spec.md')).toEqual(['A1. B']);
+    const tooLong = parseAnswers('A1. Both, as long as the link expires soon\n');
+    expect(openQuestions({ spec: stale }, tooLong).map((q) => q.why)).toEqual(['answer']);
+  });
+
+  it('T182: a line with two → A: is refused, never settled, and given the Owner’s answer to rewrite', () => {
+    const doubled = clarifications('- Q1: Which sign-in? → A: A → A: B');
+    const [q] = questionsIn(doubled, 'spec.md');
+    expect(questionProblems(q ? [q] : [], 'spec.md').missing).toEqual([
+      'spec.md: Q1 has more than one → A:; the newest answer replaces everything after the question',
+    ]);
+    expect(answersToApply({ spec: doubled }, parseAnswers('A1. B\n'), 'spec.md')).toEqual([
+      'A1. B',
+    ]);
+    expect(openQuestions({ spec: doubled }, new Map()).map((q) => q.why)).toEqual(['unanswered']);
   });
 });
 

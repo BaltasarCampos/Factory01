@@ -3,7 +3,9 @@
 //
 // Everything is read from git objects on `claude/define`, never the work tree, so only what
 // was committed counts. Order is read from history: the questions are asked in one commit, the
-// Owner's answers come after them, and the brief and backlog come after the answers.
+// Owner's answers come after them, and the brief and backlog come after the answers. At
+// `factory merge` the answers count only when the Owner signed every commit that changed them,
+// alone in its commit (T182).
 //
 // The seed marker and the backlog list are trace information: admission waits for the Owner's
 // signed `Factory-Merge: define` and each issue's own `owner:approved` (src/dispatcher).
@@ -14,6 +16,8 @@ import { gh, Fields, numberArg, repoArg, type GhOptions } from '../../github/gh.
 import { listPrs } from '../../github/prs.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
 import { loadConfig } from '../../model/config.js';
+import type { ReleaseKeys } from '../../approvals/keys.js';
+import { signedAnswers } from '../../git/answers.js';
 import type { CheckResult } from '../../hooks/stop.js';
 
 export const QUESTIONS_PATH = '.factory/define/questions.md';
@@ -48,6 +52,12 @@ export interface DefineCheck {
   /** Default `origin/main`. */
   mainRef?: string;
   gh?: GhOptions;
+  /**
+   * `factory merge`, a gate: main's verified key lists, under which every commit that changed
+   * the answers since the merge base must be signed, alone in its commit, or they count as none
+   * (T182). The Stop hook reads them as committed: the gates decide.
+   */
+  answersSignedBy: ReleaseKeys | 'as-committed';
 }
 
 function git(cwd: string, args: readonly string[]): { ok: boolean; out: string } {
@@ -226,7 +236,18 @@ export async function checkDefine(input: DefineCheck): Promise<DefineResult> {
     missing.push(`output written before the Owner's answers in ${ANSWERS_PATH}`);
   if (asked.some((c) => !isAncestor(c, firstAnswer)))
     missing.push(`${ANSWERS_PATH}: committed before the questions`);
-  const answers = new Set(numbered(show(cwd, sha, ANSWERS_PATH) ?? '', 'A'));
+  let answersText = show(cwd, sha, ANSWERS_PATH);
+  if (input.answersSignedBy !== 'as-committed') {
+    const signed = signedAnswers({
+      ...{ repo: cwd, tip: sha, base, path: ANSWERS_PATH, keys: input.answersSignedBy },
+    });
+    if ('tampered' in signed) {
+      const { commit, reason } = signed.tampered;
+      missing.push(`${ANSWERS_PATH}: ${commit.slice(0, 12)} ${reason}; it counts as no answers`);
+      answersText = undefined;
+    }
+  }
+  const answers = new Set(numbered(answersText ?? '', 'A'));
   for (const q of questions)
     if (!answers.has(q)) missing.push(`${ANSWERS_PATH}: no answer to Q${String(q)}`);
 
@@ -254,6 +275,6 @@ export async function checkDefine(input: DefineCheck): Promise<DefineResult> {
 /** The stop hook's check: a Define session may stop when done or waiting for answers. */
 export async function defineStopCheck(cwd: string): Promise<CheckResult> {
   const { repo } = await loadConfig(join(cwd, '.factory', 'config'));
-  const result = await checkDefine({ workdir: cwd, repo });
+  const result = await checkDefine({ workdir: cwd, repo, answersSignedBy: 'as-committed' });
   return result.waiting ? { complete: true } : result;
 }

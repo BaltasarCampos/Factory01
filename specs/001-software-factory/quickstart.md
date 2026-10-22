@@ -36,6 +36,23 @@ guardrails byte-identical to the release manifest and a pinned inbox issue (AC-0
 one passing test and green CI, 5–10 tiered issues (AC-005); `factory run --once` picks
 nothing until the Owner approves (AC-006).
 
+Define's questions are in `.factory/define/questions.md` on `claude/define`, in its draft pull
+request. Until `factory answer` exists, answer them there, one `A<n>. <answer>` line per
+question, in a commit that changes only that file and is signed with your Owner key: anything
+else counts as no answers (T182).
+
+```bash
+git fetch origin
+git switch claude/define
+git merge --ff-only origin/claude/define
+$EDITOR .factory/define/answers.md                 # e.g. "A1. Only me"
+git add .factory/define/answers.md
+git -c gpg.format=ssh -c user.signingkey="$HOME/.factory/keys/approve_ed25519" \
+  commit -S -m "Answers for Define"
+git push origin claude/define
+git switch main
+```
+
 ## Scenario 2 — Gate A: one tier 1 item to release (US2, SC-001)
 
 ```bash
@@ -54,7 +71,9 @@ ways (AC-017).
 
 If Spec or Plan asks, the item moves to `blocked` and the inbox quotes the questions (AC-033).
 Until `factory answer` exists, answer on the item branch in your project clone, one
-`A<n>. <answer>` line per question (an option's letter or text, or five words or fewer):
+`A<n>. <answer>` line per question (an option's letter or text, or five words or fewer), in a
+commit that changes only that file and is signed with your Owner key: anything else counts as no
+answers, and the inbox gets an urgent alert naming the commit (T182):
 
 ```bash
 git fetch origin

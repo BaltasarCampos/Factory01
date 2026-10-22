@@ -744,7 +744,10 @@ function mergeSetup(o: MergeSetup = {}) {
   let head = branch(repo, branchName, first);
   if (more.length > 0) {
     repo.checkout(branchName);
-    for (const files of more) head = repo.commit(files, `more on ${branchName}`);
+    // The Owner's answers are signed and alone in their commit, as factory merge requires (T182).
+    const owners = (files: Files) => Object.keys(files).some((p) => p.endsWith('answers.md'));
+    for (const files of more)
+      head = repo.commit(files, `more on ${branchName}`, owners(files) ? { signWith: owner } : {});
     repo.checkout('main');
   }
   repo.push(branchName);

@@ -14,7 +14,8 @@
 //
 // Release evidence, the signed deploy records on the inbox issue, is read once per pass by the
 // dispatcher (released.ts, T160). Open questions are read from `spec.md`, `plan.md` and the
-// Owner's `answers.md` at the branch head (T180). Not yet gathered: what Release and Ops would
+// Owner's `answers.md` at the branch head (T180), which counts only when the Owner signed it
+// (T182, src/git/answers.ts). Not yet gathered: what Release and Ops would
 // work on, so Release, Ops and blocked items start no session.
 import { EnvironmentError, RefusedError } from '../cli/env.js';
 import { GhError, gh, repoArg, type GhOptions } from '../github/gh.js';
@@ -23,6 +24,8 @@ import { ciAt, requiredChecksAt, requiredJobs } from '../merge/ci.js';
 import type { MainMerges } from '../git/merges.js';
 import type { ProjectConfig, State } from '../model/types.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
+import type { ReleaseKeys } from '../approvals/keys.js';
+import { signedAnswers } from '../git/answers.js';
 import { checkPlan } from '../stations/checks/plan.js';
 import { openQuestions, parseAnswers, questionAlert } from '../stations/checks/questions.js';
 import { checkSecurityReport } from '../stations/checks/security.js';
@@ -110,6 +113,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
     item: Candidate,
     config: ProjectConfig,
     main: MainMerges,
+    keys: ReleaseKeys,
   ): Promise<StationEvidence> => {
     const n = item.issue.number;
     const ownerMerge = main.merges.some((m) => m.value === `#${String(n)}`);
@@ -148,7 +152,16 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const verify = report('reports/verify.md');
     const security = report('reports/security.md');
     const integrate = report('reports/integrate.md');
-    const answers = parseAnswers(read('answers.md'));
+    // On the branch the Owner's answers count only when the Owner signed them (T182); read from
+    // main, the item is merged and main's history is verified.
+    const signed =
+      tip === undefined
+        ? { text: read('answers.md') }
+        : signedAnswers({
+            ...{ repo: ctx.projectDir, tip, path: `${dir}/answers.md`, keys },
+            base: git(at, ['merge-base', ctx.mainRef ?? 'origin/main', tip]),
+          });
+    const answers = parseAnswers('text' in signed ? signed.text : undefined);
     const specComplete = spec !== undefined && checkSpec(spec, answers).complete;
     const sizeLimit = config.size_limit_lines;
     const planComplete =
@@ -195,6 +208,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(spec === undefined ? {} : { specSha: git(at, ['rev-parse', `${ref}:${dir}/spec.md`]) }),
       ...(tip === undefined ? {} : { branchHead: tip }),
       ...asked,
+      ...('tampered' in signed ? { answersTampered: signed.tampered } : {}),
       ...(rg === undefined ? {} : { redGreen: rg }),
       ...(review === undefined ? {} : { verifyReport: review.checksPass }),
       ...(review === undefined ? {} : { findingsResolved: review.findingsResolved }),

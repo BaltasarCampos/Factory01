@@ -458,21 +458,24 @@ describe('item trace (AC-017)', () => {
     ]);
   });
 
-  it('AC-017 (T180): accepts a commit without trailers that changes only the Owner’s answers.md', () => {
+  it('AC-017 (T180, T182): accepts a commit without trailers that changes only the Owner’s answers.md, and only when the Owner signed it', () => {
     const dir = `specs/${FEATURE}`;
-    const commit = (sha: string, paths: string[]) => ({
-      ...{ sha: sha.repeat(20), message: `Answers ${sha}\n`, parents: 1, paths },
+    const commit = (sha: string, paths: string[], ownerSigned = true) => ({
+      ...{ sha: sha.repeat(20), message: `Answers ${sha}\n`, parents: 1, paths, ownerSigned },
     });
     const commits = [
       commit('a1', [`${dir}/answers.md`]),
       commit('b2', [`${dir}/answers.md`, `${dir}/spec.md`]),
       commit('c3', ['specs/9-other/answers.md']),
+      commit('d4', [`${dir}/answers.md`], false),
     ];
     expect(untrailered(commits, FEATURE).map((p) => p.slice(0, 12))).toEqual([
       'b2b2b2b2b2b2',
       'b2b2b2b2b2b2',
       'c3c3c3c3c3c3',
       'c3c3c3c3c3c3',
+      'd4d4d4d4d4d4',
+      'd4d4d4d4d4d4',
     ]);
   });
 

@@ -4,7 +4,12 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import { createItemBranch } from '../../src/dispatcher/branch.js';
-import { changedFiles, dispatchOnce, type DispatchContext } from '../../src/dispatcher/dispatch.js';
+import {
+  changedFiles,
+  dispatchOnce,
+  ownerAnswers,
+  type DispatchContext,
+} from '../../src/dispatcher/dispatch.js';
 import { gatherEvidence } from '../../src/dispatcher/evidence.js';
 import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
 import { configOnMain } from '../../src/model/config.js';
@@ -13,8 +18,14 @@ import { STATES, STATIONS, type ApprovalRecord, type Tier } from '../../src/mode
 import { FakeClock } from '../helpers/fake-clock.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeComment, type FakeIssue } from '../helpers/fake-gh.js';
-import { makeRepo, mergeBrief, mergeIntoMain, type TestRepo } from '../helpers/git-repo.js';
-import { makeKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+import {
+  makeRepo,
+  mergeBrief,
+  mergeIntoMain,
+  type Files,
+  type TestRepo,
+} from '../helpers/git-repo.js';
+import { makeKeys, makeOtherKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
 
 const REPO = 'owner/project';
@@ -563,11 +574,12 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     const pin = { ...onMain.factory_release, ...(over.factory ? { sha: over.factory.sha } : {}) };
     const config = { ...onMain, factory_release: pin };
     const factory = over.factory === undefined ? {} : { factory: over.factory.path };
-    return gatherEvidence({ projectDir: t.project.path, ...factory })(item, config, {
-      lastVerified: undefined,
-      merges,
-      commits,
-    });
+    return gatherEvidence({ projectDir: t.project.path, ...factory })(
+      item,
+      config,
+      { lastVerified: undefined, merges, commits },
+      writeKeyFiles([owner]),
+    );
   };
   const tipOf = (t: ReturnType<typeof setup>) => t.project.git(['rev-parse', `origin/${BRANCH}`]);
 
@@ -809,6 +821,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       { issue, state, branch: BRANCH, tier: 2 },
       { ...onMain, factory_release: pin },
       { lastVerified: undefined, merges: [], commits: [] },
+      writeKeyFiles([owner]),
     );
   };
 
@@ -954,14 +967,23 @@ describe('the question loop (T180, AC-033)', { timeout: 60_000 }, () => {
       '## Problem',
     ].join('\n'),
   );
-  const answer = (t: ReturnType<typeof setup>, text: string) => {
+  /** The Owner's answers, committed alone and signed (T182), unless `as` says otherwise. */
+  const answer = (
+    t: ReturnType<typeof setup>,
+    text: string,
+    as: { signWith?: TestKeys | null; also?: Files } = {},
+  ) => {
     t.project.checkout(BRANCH);
-    t.project.commit({ [`${FEATURE}/answers.md`]: text }, 'Owner answers');
+    const signWith = as.signWith === undefined ? owner : as.signWith;
+    const files = { [`${FEATURE}/answers.md`]: text, ...as.also };
+    const sha = t.project.commit(files, 'Owner answers', signWith === null ? {} : { signWith });
     t.project.push(BRANCH);
     t.project.checkout('main');
+    return sha;
   };
-  const asking = () =>
-    setup({ states: ['state:triaged'], branch: { ...CREATED, [`${FEATURE}/spec.md`]: ASKING } });
+  const asking = (spec = ASKING) =>
+    setup({ states: ['state:triaged'], branch: { ...CREATED, [`${FEATURE}/spec.md`]: spec } });
+  const applied = (rest: string) => ASKING.replace('visitors use?', `visitors use? → A: ${rest}`);
 
   it('AC-033: an open question in spec.md blocks the item and the Owner is told what it is', async () => {
     const t = asking();
@@ -1001,5 +1023,60 @@ describe('the question loop (T180, AC-033)', { timeout: 60_000 }, () => {
     expect(launch).toMatchObject({ station: 2, role: 'spec' });
     expect(launch?.prompt).toContain('## Step 1: speckit-clarify');
     expect(launch?.prompt).toContain('A1. B\n```');
+  });
+
+  it.each<[string, { signWith?: TestKeys | null; also?: Files }]>([
+    ['unsigned', { signWith: null }],
+    ['signed by a key the lists do not name', { signWith: makeOtherKeys() }],
+    ['signed, but also changing another file', { also: { 'src/x.ts': 'x\n' } }],
+  ])(
+    'AC-033 (T182): answers in a commit %s count as none, and the Owner gets an urgent alert naming it',
+    async (_name, as) => {
+      const t = asking();
+      await dispatchOnce(t.ctx);
+
+      const sha = answer(t, 'A1. B\n', as);
+      const result = await dispatchOnce(t.ctx);
+
+      expect(result.moves).toEqual([]);
+      expect(t.labels()).toContain('state:blocked');
+      const alert = t.inbox().find((c) => /kind=tampering/.test(c.body));
+      expect(alert?.body).toMatch(/urgency=urgent/);
+      expect(alert?.body).toContain(sha.slice(0, 12));
+      expect(t.local.launches).toEqual([]);
+    },
+  );
+
+  it('AC-033 (T182): an applied answer with no line from the Owner is open: the item blocks and the Owner is asked', async () => {
+    const t = asking(applied('B'));
+
+    const result = await dispatchOnce(t.ctx);
+
+    expect(result.moves).toEqual([expect.objectContaining({ from: 'triaged', to: 'blocked' })]);
+    expect(t.inbox().at(-1)?.body).toContain('- Q1 (spec.md): Which sign-in should visitors use?');
+  });
+
+  it.each([
+    ['an applied answer that differs from the Owner’s', applied('A')],
+    ['an Owner-action question answered differently', applied('C → Owner action: tier raise')],
+  ])('AC-033 (T182): %s goes to clarify to apply', async (_name, spec) => {
+    const t = asking(spec);
+    answer(t, 'A1. B\n');
+
+    await dispatchOnce(t.ctx);
+
+    const [launch] = t.local.launches;
+    expect(launch).toMatchObject({ station: 2, role: 'spec' });
+    expect(launch?.prompt).toContain('## Step 1: speckit-clarify');
+    expect(launch?.prompt).toContain('A1. B\n```');
+  });
+
+  it('T182: reading the branch for the prompt, only a missing file is absent; a git failure throws', () => {
+    const t = asking();
+    const at = { projectDir: t.project.path, now: () => new Date() };
+    const keys = writeKeyFiles([owner]);
+    t.project.git(['fetch', '-q', 'origin']);
+    expect(ownerAnswers(at, BRANCH, 'plan.md', keys)).toEqual([]);
+    expect(() => ownerAnswers(at, 'claude/9-not-pushed', 'spec.md', keys)).toThrow();
   });
 });

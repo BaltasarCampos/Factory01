@@ -34,6 +34,11 @@ export interface TraceCommit {
   cleanMerge?: boolean;
   /** Files the commit changes; needed to accept a dispatcher commit. */
   paths?: readonly string[];
+  /**
+   * Signed by a key the lists pinned on main accept, checked as the dispatcher checks
+   * `answers.md` (T182); needed to accept the Owner's answers without trailers.
+   */
+  ownerSigned?: boolean;
 }
 
 /** Not a role: the dispatcher's own commits on an item branch (src/dispatcher/branch.ts). */
@@ -91,9 +96,11 @@ const names = (value: string, feature: string) =>
 
 function commitProblems(commit: TraceCommit, feature: string): string[] {
   if (commit.parents > 1 && commit.cleanMerge === true) return [];
-  // The Owner's answers to Spec's and Plan's questions carry no trailers (T180).
+  // The Owner's answers to Spec's and Plan's questions carry no trailers, but a signature (T180,
+  // T182).
   const answers = `specs/${feature}/answers.md`;
-  if (commit.parents === 1 && commit.paths?.length === 1 && commit.paths[0] === answers) return [];
+  const alone = commit.paths?.length === 1 && commit.paths[0] === answers;
+  if (commit.parents === 1 && alone && commit.ownerSigned === true) return [];
   const t = trailers(commit.message);
   const problems: string[] = [];
   const roles = t.get('Factory-Role') ?? [];

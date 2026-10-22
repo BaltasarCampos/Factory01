@@ -12,6 +12,11 @@
 // answer counts only when it is one of the question's options or five words or fewer, clarify's
 // own rule. A question needing an Owner action stays open until the Owner answers it differently,
 // so the item stays blocked and nothing relaunches (no done path before Gate A).
+//
+// An applied answer is settled only when the Owner's `A<n>.` line matches it (T182): with no line
+// the question is open, and with a different line that counts the station's command applies it,
+// so the factory heals a mismatch instead of a session having to. A line with two `→ A:` is
+// refused, never settled, and the Owner's answer goes back to the command to rewrite it.
 import { visible } from '../../notify/summary.js';
 import { section } from './spec.js';
 
@@ -29,6 +34,8 @@ export interface Question {
   applied?: string;
   /** The Owner action the applied answer needs (`→ Owner action: …`). */
   ownerAction?: string;
+  /** The line has more than one `→ A:`. */
+  doubled?: true;
 }
 
 export interface OpenQuestion extends Question {
@@ -45,14 +52,16 @@ export function questionsIn(text: string, file: QuestionFile): Question[] {
   for (const line of lines) {
     const m = QUESTION.exec(line);
     if (m !== null) {
-      const [question = '', applied, ownerAction] = (m[3] ?? '').split(
-        /\s*→ (?:A|Owner action):\s*/,
-      );
+      const rest = m[3] ?? '';
+      const [question = ''] = rest.split(/\s*→ (?:A|Owner action):/);
+      const applied = /→ A:\s*(.*?)\s*(?:→ Owner action:|$)/.exec(rest)?.[1];
+      const ownerAction = /→ Owner action:\s*(.*?)\s*$/.exec(rest)?.[1];
       found.push({
         ...{ file, n: Number(m[1]), followUp: m[2] !== undefined, text: question.trim() },
         options: {},
-        ...(applied === undefined ? {} : { applied: applied.trim() }),
-        ...(ownerAction === undefined ? {} : { ownerAction: ownerAction.trim() }),
+        ...(applied === undefined ? {} : { applied }),
+        ...(ownerAction === undefined ? {} : { ownerAction }),
+        ...(rest.split('→ A:').length > 2 ? { doubled: true as const } : {}),
       });
       continue;
     }
@@ -129,15 +138,31 @@ export function questionProblems(
         (q.followUp && q.applied === undefined && followUps.some((f) => f.applied !== undefined)),
     )
     .map((q) => q.n);
-  const missing = refused.map(
-    (n) =>
-      `${file}: Q${String(n)} is asked after the follow-up round; take its recommended default under ## Assumptions`,
-  );
+  const missing = [
+    ...refused.map(
+      (n) =>
+        `${file}: Q${String(n)} is asked after the follow-up round; take its recommended default under ## Assumptions`,
+    ),
+    // Not refused: the Owner's answer still goes to the command, which rewrites the line.
+    ...questions
+      .filter((q) => q.doubled === true)
+      .map(
+        (q) =>
+          `${file}: Q${String(q.n)} has more than one → A:; the newest answer replaces everything after the question`,
+      ),
+  ];
   return { refused, missing };
 }
 
-/** Whether the command has applied the question's answer and nothing is left to the Owner. */
-export const settled = (q: Question) => q.applied !== undefined && q.ownerAction === undefined;
+/**
+ * Whether the command applied the Owner's own answer and nothing is left to the Owner: the
+ * applied answer matches the Owner's `A<n>.` line (T182).
+ */
+export function settled(q: Question, answers: ReadonlyMap<number, string>): boolean {
+  const owner = answers.get(q.n);
+  if (q.applied === undefined || q.ownerAction !== undefined || q.doubled === true) return false;
+  return owner !== undefined && sameAnswer(q, q.applied, owner);
+}
 
 type Files = { spec?: string | undefined; plan?: string | undefined };
 
@@ -152,13 +177,13 @@ function asked(files: Files): Question[] {
 }
 
 /** Settled, answered for a session to apply, or why it is still the Owner's. */
-function standing(
+export function standing(
   q: Question,
   answers: ReadonlyMap<number, string>,
 ): 'settled' | 'apply' | OpenQuestion['why'] {
-  if (settled(q)) return 'settled';
+  if (settled(q, answers)) return 'settled';
   const answer = answers.get(q.n);
-  if (q.ownerAction !== undefined) {
+  if (q.ownerAction !== undefined && q.doubled !== true) {
     const changed = answer !== undefined && !sameAnswer(q, answer, q.applied ?? '');
     return changed && answerCounts(q, answer) ? 'apply' : 'action';
   }
