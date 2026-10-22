@@ -735,6 +735,95 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     expect(e.securityReport).toBeUndefined();
     expect(e.needsSession).toBe(true);
   });
+
+  /** The dispatcher's manifest for `role` at `station`, as before a session. */
+  const manifest = (t: ReturnType<typeof setup>, station: 4 | 5, role: 'builder' | 'test') => {
+    writeStationManifest(
+      { projectDir: t.project.path, now: () => new Date() },
+      { issue: ISSUE, branch: BRANCH },
+      { station, role },
+    );
+    // The manifest went straight to origin; the next session's commit follows it.
+    t.project.git(['branch', '-f', BRANCH, `origin/${BRANCH}`]);
+  };
+  const REVIEW = {
+    [`${FEATURE}/reports/verify.md`]: '| Check | Result |\n|---|---|\n| Review | pass |\n',
+  };
+  const SECURE = {
+    [`${FEATURE}/reports/security.md`]: '## Scans\n\n- semgrep: none\n\n## Findings\n\n- none\n',
+  };
+
+  it.each([
+    [1, 'reviewer'],
+    [2, 'test'],
+    [3, 'test'],
+  ] as const)('T181: at tier %i, Verify’s first session is the %s', async (tier, role) => {
+    const t = setup({ branch: CREATED });
+    expect(await gather(t, 'verifying', { tier })).toMatchObject({
+      verifyRole: role,
+      needsSession: true,
+    });
+  });
+
+  it('T181: at tier 2, Test, then the Reviewer once Test has ended, then Security once the review is written', async () => {
+    const t = setup({ branch: CREATED });
+    manifest(t, 5, 'test');
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: false });
+
+    later(t, { 'tests/login.test.ts': "it('AC-001: signs in', () => {});\n" });
+    expect(await gather(t, 'verifying')).toMatchObject({
+      verifyRole: 'reviewer',
+      needsSession: true,
+    });
+
+    later(t, REVIEW);
+    expect(await gather(t, 'verifying')).toMatchObject({
+      verifyRole: 'security',
+      needsSession: true,
+    });
+
+    later(t, SECURE);
+    const done = await gather(t, 'verifying');
+    expect(done.verifyRole).toBeUndefined();
+    expect(done.needsSession).toBe(false);
+  });
+
+  it('T181: at tier 1 the Reviewer alone: once the review is written, no Verify session is left', async () => {
+    const t = setup({ branch: { ...CREATED, ...REVIEW } });
+    const e = await gather(t, 'verifying', { tier: 1 });
+    expect(e.verifyRole).toBeUndefined();
+    expect(e.needsSession).toBe(false);
+  });
+
+  it('T181: a new Build round after Test runs Test again', async () => {
+    const t = setup({ branch: CREATED });
+    manifest(t, 5, 'test');
+    later(t, { 'tests/login.test.ts': "it('AC-001: signs in', () => {});\n" });
+    later(t, REVIEW);
+    manifest(t, 4, 'builder');
+    later(t, { 'src/login.ts': 'export const fixed = 1;\n' });
+
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: true });
+  });
+
+  it('T181: without the Owner’s tier, station 5 starts nothing', async () => {
+    const t = setup({ branch: CREATED });
+    const e = await gather(t, 'verifying', { tier: null });
+    expect(e.verifyRole).toBeUndefined();
+    expect(e.needsSession).toBe(false);
+  });
+
+  it('T181: the dispatcher launches the role the tier names, and its manifest names it', async () => {
+    const t = setup({ tier: 1, states: ['state:verifying'], branch: { ...SPECIFIED } });
+
+    await dispatchOnce(t.ctx);
+
+    expect(t.local.launches).toMatchObject([{ station: 5, role: 'reviewer' }]);
+    expect(JSON.parse(t.show(`${FEATURE}/.station.json`))).toMatchObject({
+      station: 5,
+      role: 'reviewer',
+    });
+  });
 });
 
 describe('Verify results from the required check runs (T168)', { timeout: 60_000 }, () => {

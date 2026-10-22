@@ -22,7 +22,7 @@ import { GhError, gh, repoArg, type GhOptions } from '../github/gh.js';
 import { listPrs } from '../github/prs.js';
 import { ciAt, requiredChecksAt, requiredJobs } from '../merge/ci.js';
 import type { MainMerges } from '../git/merges.js';
-import type { ProjectConfig, State } from '../model/types.js';
+import type { ProjectConfig, RoleName, State, Tier } from '../model/types.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
 import type { ReleaseKeys } from '../approvals/keys.js';
 import { signedAnswers } from '../git/answers.js';
@@ -35,7 +35,7 @@ import { conflictFailure } from '../stations/edges.js';
 import { featureOf, fetchBranch, git, type BranchContext } from './branch.js';
 import { branchGit, reportCurrent } from './currency.js';
 import type { Candidate, StationEvidence } from './dispatch.js';
-import { pendingManifest } from './manifest.js';
+import { pendingManifest, testEnded } from './manifest.js';
 import { STATION_OF, type Evidence } from './transitions.js';
 
 export interface EvidenceContext {
@@ -104,6 +104,17 @@ async function requiredChecks(
       return { head: tip, jobs: [], unreadable: err.message };
     throw err;
   }
+}
+
+/** The Verify role that works next, or undefined once the tier's last one has ended. */
+export function nextVerifyRole(
+  tier: Tier,
+  ended: { tested: () => boolean; reviewed: boolean; secured: boolean },
+): RoleName | undefined {
+  if (tier === 1) return ended.reviewed ? undefined : 'reviewer';
+  if (ended.secured) return undefined;
+  if (ended.reviewed) return 'security';
+  return ended.tested() ? 'reviewer' : 'test';
 }
 
 export function gatherEvidence(ctx: EvidenceContext) {
@@ -184,11 +195,21 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const [pr] = await listPrs(config.repo, { state: 'open', head: item.branch }, options);
     const checked = tip !== undefined && pr?.headRefOid === tip;
 
+    // Verify's next session by the Owner's tier (T181): the Reviewer alone at tier 1; Test,
+    // then the Reviewer, then Security at tier 2–3, each once the one before it has ended.
+    const verifyRole =
+      item.state !== 'verifying' || tip === undefined || item.tier === undefined
+        ? undefined
+        : nextVerifyRole(item.tier, {
+            tested: () => testEnded(at, tip, ctx.mainRef),
+            reviewed: verify !== undefined,
+            secured: security !== undefined,
+          });
     const work: Partial<Record<State, boolean>> = {
       triaged: !specComplete,
       'spec-approved': !planComplete,
       building: !tasksDone,
-      verifying: review?.complete !== true,
+      verifying: verifyRole !== undefined,
       integrating: integrate === undefined,
     };
     // The session the dispatcher last issued has pushed nothing yet: do not start another.
@@ -208,6 +229,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(spec === undefined ? {} : { specSha: git(at, ['rev-parse', `${ref}:${dir}/spec.md`]) }),
       ...(tip === undefined ? {} : { branchHead: tip }),
       ...asked,
+      ...(verifyRole === undefined ? {} : { verifyRole }),
       ...('tampered' in signed ? { answersTampered: signed.tampered } : {}),
       ...(rg === undefined ? {} : { redGreen: rg }),
       ...(review === undefined ? {} : { verifyReport: review.checksPass }),

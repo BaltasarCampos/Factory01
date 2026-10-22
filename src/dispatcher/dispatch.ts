@@ -67,6 +67,8 @@ export type StationEvidence = Omit<Evidence, 'owner' | 'rotationPending' | 'hist
   specSha?: string;
   /** The station working on the item's state has work left and no session running. */
   needsSession?: boolean;
+  /** Verify's next role by the Owner's tier (T181). */
+  verifyRole?: RoleName;
   /** A commit that makes the branch's `answers.md` not the Owner's: its answers count as none (T182). */
   answersTampered?: { commit: string; reason: string };
 };
@@ -152,7 +154,7 @@ const ROLE_AT: Readonly<Record<Station, RoleName>> = {
   2: 'spec',
   3: 'planner',
   4: 'builder',
-  5: 'test',
+  5: 'test', // unused: Verify's role comes from its evidence (T181)
   6: 'integrator',
   7: 'release',
   8: 'ops',
@@ -295,7 +297,13 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
 
   const git = { projectDir: ctx.projectDir, now: ctx.now ?? (() => new Date()) };
   const mainRef = ctx.mainRef ?? 'origin/main';
-  type Target = { item: Candidate; station: Station; branch: string; comments: PostedComment[] };
+  type Target = {
+    item: Candidate;
+    station: Station;
+    role: RoleName;
+    branch: string;
+    comments: PostedComment[];
+  };
   let target: Target | undefined;
   for (const issue of await listOpenIssues(repo, options)) {
     if (issue.number === config.inbox_issue) continue;
@@ -402,11 +410,14 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     if (!found.needsSession || pause.stations.has(at)) continue;
     if (ownerBasisMissing(item.state, evidence()) !== undefined) continue;
     const branch = at === 1 ? 'main' : at === 7 ? 'claude/factory-log' : item.branch;
-    if (branch !== undefined) target = { item, station: at, branch, comments };
+    // Verify runs the role its evidence names (T181); every other station has one role.
+    const role = at === 5 ? found.verifyRole : ROLE_AT[at];
+    if (branch !== undefined && role !== undefined)
+      target = { item, station: at, role, branch, comments };
   }
 
   if (target === undefined) return result;
-  const { item, station, branch, comments } = target;
+  const { item, station, role, branch, comments } = target;
   let launcher;
   try {
     launcher = selectLauncher(config, ctx.launchers);
@@ -437,7 +448,6 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       `the ${launcher.mode} launcher is unavailable: ${availability.reason}`,
       availability.urgent,
     );
-  const role = ROLE_AT[station];
   if (station >= 2 && station <= 6) {
     const ref: ItemRef = { issue: item.issue.number, branch };
     createItemBranch(git, ref, comments, mainRef);
