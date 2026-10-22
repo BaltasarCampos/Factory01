@@ -1,5 +1,7 @@
+import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { delimiter, join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
@@ -25,7 +27,7 @@ import {
   type Files,
   type TestRepo,
 } from '../helpers/git-repo.js';
-import { makeKeys, makeOtherKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
 
 const REPO = 'owner/project';
@@ -1170,6 +1172,98 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(t.show(TASKS_MD)).toBe(TASKS);
       expect(alerts(t, 'build-failed')).toEqual([
         `info #2: T001 left CI red at ${second.slice(0, 12)}: build-test (failure), after 2 Build sessions with retry_limit 1; nothing sends it on before T096: close this item and file it again`,
+      ]);
+    });
+
+    /** Runs `pass` with a `git` first on PATH that fails, exit 128, on any `arg` it is given. */
+    const failingGit = async (arg: string, pass: () => Promise<unknown>) => {
+      const dir = tempDir();
+      const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+      const script = `#!/bin/sh\nfor a in "$@"; do [ "$a" = "${arg}" ] && { echo 'fatal: injected' >&2; exit 128; }; done\nexec ${real} "$@"\n`;
+      writeFileSync(join(dir, 'git'), script, { mode: 0o755 });
+      const path = process.env.PATH;
+      process.env.PATH = [dir, path ?? ''].join(delimiter);
+      try {
+        await pass();
+      } finally {
+        process.env.PATH = path;
+      }
+    };
+
+    it('T174: an ancestry check that fails with a git error stops the pass and alerts nothing', async () => {
+      const t = await issued();
+      buildTest(work(t), 'success');
+
+      await failingGit('--is-ancestor', async () => {
+        await expect(dispatchOnce(t.ctx)).rejects.toThrow(/git merge-base failed: fatal: injected/);
+      });
+      expect(alerts(t, 'tampering')).toEqual([]);
+      expect(t.show(TASKS_MD)).toBe(TASKS);
+    });
+
+    it('T174: with no record in the clone the open task is issued again, then holds at the cap', async () => {
+      const t = await issued('retry_limit: 1\n');
+      const forget = () => t.project.git(['update-ref', '-d', `refs/factory/build/${BRANCH}`]);
+      forget();
+      work(t);
+      await dispatchOnce(t.ctx);
+      expect(t.local.launches).toHaveLength(2);
+
+      forget();
+      const head = work(t, { 'tests/login.test.ts': 't2\n' });
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toHaveLength(2);
+      expect(alerts(t, 'build-failed')).toEqual([
+        `info #2: T001 is still open at ${head.slice(0, 12)} after 2 Build sessions with retry_limit 1; nothing sends it on before T096: close this item and file it again`,
+      ]);
+    });
+
+    /** An item in Build with every task ticked and a current conflict report from Integrate. */
+    const conflicted = (config?: string) =>
+      setup({
+        ...{ tier: 1, states: ['state:building'] },
+        ...(config === undefined ? {} : { config }),
+        branch: {
+          ...{ ...SPECIFIED, [TASKS_MD]: TASKS.replace(/- \[ \]/g, '- [X]') },
+          [`${FEATURE}/reports/integrate.md`]: '## Conflicts\n\n- `src/login.ts`\n',
+        },
+      });
+
+    it('T174: a current conflict report starts a Build session with no task and the listed files, which the Builder’s merge ends', async () => {
+      const t = conflicted();
+      await dispatchOnce(t.ctx);
+
+      const manifest = JSON.parse(t.show(`${FEATURE}/.station.json`)) as Record<string, unknown>;
+      expect(manifest).toMatchObject({ station: 4, role: 'builder', files: ['src/login.ts'] });
+      expect(manifest).not.toHaveProperty('task');
+      expect(t.local.launches[0]?.prompt).toContain('Integrate sent this item back');
+      // Any commit but a clean merge of main makes the report stale.
+      work(t, { 'src/login.ts': 'resolved\n' });
+      await dispatchOnce(t.ctx);
+      expect(t.local.launches).toHaveLength(1);
+    });
+
+    it('T174: past retry_limit conflict sessions, Build holds with one alert', async () => {
+      const t = conflicted('retry_limit: 1\n');
+      t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+      for (const at of ['09', '10'])
+        t.project.commit(
+          {
+            [`${FEATURE}/.station.json`]: `{"item":2,"station":4,"files":[],"issued_at":"${at}"}\n`,
+          },
+          dispatcherMessage('station 4 (builder) manifest', '2-add-login'),
+        );
+      t.project.commit({ [`${FEATURE}/reports/verify.md`]: 'x\n' }, 'Review');
+      t.project.push(BRANCH);
+      t.project.checkout('main');
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toEqual([]);
+      expect(alerts(t, 'build-failed')).toEqual([
+        `info #2: the conflict with main is still open at ${tipOf(t).slice(0, 12)} after 2 Build sessions with retry_limit 1; nothing sends it on before T096: close this item and file it again`,
       ]);
     });
 

@@ -297,7 +297,9 @@ function decide(item: ItemStatus, e: Evidence): Decision {
   if (e.failure !== undefined) {
     const to = REDO_AT[e.failure.station];
     if (to === undefined || at(to) >= at(item.state))
-      return stay(`failure report names ${STATIONS[e.failure.station]}, not an earlier station`);
+      return e.buildAlert
+        ? { ...stay(e.buildAlert.text), alert: e.buildAlert }
+        : stay(`failure report names ${STATIONS[e.failure.station]}, not an earlier station`);
     return move(to, `gate failed: ${e.failure.reason}`);
   }
   return forward(item.state, e);

@@ -49,17 +49,34 @@ export function featureOf(item: ItemRef): string {
   return `${m[1]}-${m[2] ?? ''}`;
 }
 
-export function git(ctx: BranchContext, args: readonly string[], input?: string): string {
-  const result = spawnSync('git', args, {
+function run(ctx: BranchContext, args: readonly string[], input?: string) {
+  return spawnSync('git', args, {
     cwd: ctx.projectDir,
     env: ctx.env ?? process.env,
     encoding: 'utf8',
     ...(input === undefined ? {} : { input }),
   });
-  if (result.error !== undefined || result.status !== 0)
-    throw new EnvironmentError(
-      `git ${args[0] ?? ''} failed: ${result.error?.message ?? result.stderr.trim()}`,
-    );
+}
+
+const failed = (args: readonly string[], result: ReturnType<typeof run>) =>
+  new EnvironmentError(
+    `git ${args[0] ?? ''} failed: ${result.error?.message ?? result.stderr.trim()}`,
+  );
+
+export function git(ctx: BranchContext, args: readonly string[], input?: string): string {
+  const result = run(ctx, args, input);
+  if (result.error !== undefined || result.status !== 0) throw failed(args, result);
+  return result.stdout.trim();
+}
+
+/**
+ * Git where exit 1 is an answer, as for `merge-base --is-ancestor` or `rev-parse --verify -q`:
+ * undefined on exit 1, the output on 0, and any other failure throws.
+ */
+export function gitAnswer(ctx: BranchContext, args: readonly string[]): string | undefined {
+  const result = run(ctx, args);
+  if (result.error === undefined && result.status === 1) return undefined;
+  if (result.error !== undefined || result.status !== 0) throw failed(args, result);
   return result.stdout.trim();
 }
 

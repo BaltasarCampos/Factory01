@@ -57,13 +57,22 @@ export function checkSplit(input: {
   return { complete: missing.length === 0, missing, newItems };
 }
 
-/** The route back to Build when Integrate's report lists conflicts, else undefined. */
-export function conflictFailure(report: string): Failure | undefined {
+/** The entries under `## Conflicts` in Integrate's report, each `<path>` with any reason. */
+function conflictEntries(report: string): string[] {
   const lines = report.replace(/<!--[\s\S]*?-->/g, '').split('\n');
-  const conflicts = (section(lines, 'Conflicts') ?? [])
+  return (section(lines, 'Conflicts') ?? [])
     .filter((l) => /^\s*[-*]\s/.test(l) && meaningful(l))
     .map((l) => l.replace(/^\s*[-*]\s+/, '').trim())
     .filter((l) => !/^none\.?$/i.test(l));
+}
+
+/** The conflicted files Integrate's report lists, which the conflict Build session resolves (T174). */
+export const conflictFiles = (report: string) =>
+  conflictEntries(report).flatMap((entry) => /^`?([^`\s:]+)/.exec(entry)?.[1] ?? []);
+
+/** The route back to Build when Integrate's report lists conflicts, else undefined. */
+export function conflictFailure(report: string): Failure | undefined {
+  const conflicts = conflictEntries(report);
   if (conflicts.length === 0) return undefined;
   return {
     station: 4,

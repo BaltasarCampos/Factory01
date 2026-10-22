@@ -587,11 +587,96 @@ describe("Build's stop check for a task session (T174)", () => {
     expect(result.complete).toBe(false);
     expect(result.missing?.join('\n')).toMatch(reason);
   });
+});
 
-  it('T174: a Build manifest naming no task fails closed until the conflict session ships', () => {
-    const r = issued({ files: ['src/login.ts'] });
-    build(r, { 'src/login.ts': 'merged\n' });
+describe("Build's stop check for a conflict session (T174)", () => {
+  const BRANCH = 'claude/42-add-login';
+  const MANIFEST = 'specs/42-add-login/.station.json';
+  const TRAILERS = { 'Factory-Role': 'builder', 'Factory-Item': '42-add-login' };
 
-    expect(buildStopCheck(r.path).missing?.join('\n')).toMatch(/names no task/);
+  /** The branch after Integrate's conflict: the conflict manifest on origin, and main moved. */
+  function conflicted(): TestRepo {
+    const r = makeRepo({ files: { 'src/login.ts': 'a\n', 'src/other.ts': 'o\n' } });
+    r.checkout(BRANCH, { create: true });
+    r.commit({ 'src/login.ts': 'branch\n' }, 'Login', { trailers: TRAILERS });
+    const manifest = { item: 42, station: 4, role: 'builder', branch: BRANCH };
+    r.commit(
+      { [MANIFEST]: JSON.stringify({ ...manifest, files: ['src/login.ts'] }) },
+      dispatcherMessage('station 4 (builder) manifest', '42-add-login'),
+    );
+    r.push();
+    r.checkout('main');
+    r.commit({ 'src/login.ts': 'main\n', 'src/other.ts': 'o2\n' }, 'Main moved');
+    r.push('main');
+    r.checkout(BRANCH);
+    return r;
+  }
+  /** The Builder merges `theirs`, resolves with `files`, commits with `trailers` and pushes. */
+  const resolve = (
+    r: TestRepo,
+    {
+      files = {},
+      trailers = TRAILERS,
+      theirs = 'origin/main',
+    }: Partial<{
+      files: Files;
+      trailers: Record<string, string>;
+      theirs: string;
+    }> = {},
+  ) => {
+    try {
+      r.git(['merge', '-q', '--no-gpg-sign', theirs]);
+    } catch {
+      // The conflict Integrate reported; resolved below.
+    }
+    r.commit({ 'src/login.ts': 'both\n', ...files }, 'Merge main', { trailers });
+    r.push();
+  };
+
+  it('T174: the Builder may stop once its merge of main, resolving only the listed files, is pushed', () => {
+    const r = conflicted();
+    resolve(r);
+
+    expect(buildStopCheck(r.path)).toEqual({ complete: true });
+  });
+
+  it.each<[string, (r: TestRepo) => unknown, RegExp]>([
+    [
+      'a file beyond the merge and the list',
+      (r) => {
+        resolve(r, { files: { 'src/other.ts': 'mine\n' } });
+      },
+      /src\/other\.ts: changed beyond git's own merge, and not a file reports\/integrate\.md lists/,
+    ],
+    [
+      'a merge of something not on main',
+      (r) => {
+        r.git(['checkout', '-q', '-b', 'side', 'main~1']);
+        r.commit({ 'src/login.ts': 'side\n' }, 'Side');
+        r.checkout(BRANCH);
+        resolve(r, { theirs: 'side' });
+      },
+      /merges [0-9a-f]{12}, which is not on origin\/main/,
+    ],
+    [
+      'no merge',
+      (r) => {
+        r.commit({ 'src/login.ts': 'both\n' }, 'Resolve', { trailers: TRAILERS });
+        r.push();
+      },
+      /does not merge main: merge origin\/main first/,
+    ],
+    [
+      'a merge without trailers',
+      (r) => {
+        resolve(r, { trailers: {} });
+      },
+      /no Factory-Role: builder trailer/,
+    ],
+  ])('T174: the Builder may not stop with %s', (_name, act, reason) => {
+    const r = conflicted();
+    act(r);
+
+    expect(buildStopCheck(r.path).missing?.join('\n')).toMatch(reason);
   });
 });

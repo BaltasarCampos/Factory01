@@ -5,7 +5,9 @@
 //
 // The dispatcher's clone records the Build manifest commit it last pushed to a branch, which a
 // session can neither see nor rewrite; it ticks a task only on history that holds it (T174).
+import { EnvironmentError } from '../cli/env.js';
 import { fileAt } from '../git/answers.js';
+import { conflictFiles } from '../stations/edges.js';
 import type { RoleName, Station, StationManifest } from '../model/types.js';
 import {
   commitAndPush,
@@ -22,25 +24,44 @@ const BUILD_SUBJECT = 'Dispatcher: station 4 (builder) manifest';
 /** Where the dispatcher's clone records the Build manifest commit it last pushed to `branch`. */
 export const issuedRef = (branch: string) => `refs/factory/build/${branch}`;
 
-/** The task the manifest at `commit` names, if it names one. */
-export function manifestTask(ctx: BranchContext, commit: string, path: string) {
+/** The manifest at `commit`: undefined when it is missing or not a JSON object; git failing throws. */
+function manifestAt(ctx: BranchContext, commit: string, path: string) {
+  const text = fileAt(ctx.projectDir, commit, path, ctx.env);
+  if (text === undefined) return undefined;
   try {
-    const { task } = JSON.parse(git(ctx, ['show', `${commit}:${path}`])) as { task?: unknown };
-    return typeof task === 'string' && /^T\d+$/.test(task) ? task : undefined;
+    const value = JSON.parse(text) as unknown;
+    return typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : undefined;
   } catch {
     return undefined;
   }
 }
 
 /**
- * How many Build manifests on the branch since main name `task`: the times it was issued. A
- * session can only add commits, so a forged one only makes the count higher.
+ * The task the dispatcher's own manifest at `commit` names, undefined when it names none; one it
+ * could not have written is an error.
+ */
+export function manifestTask(ctx: BranchContext, commit: string, path: string) {
+  const manifest = manifestAt(ctx, commit, path);
+  if (manifest !== undefined && manifest.task === undefined) return undefined;
+  const task = manifest?.task;
+  if (typeof task === 'string' && /^T\d+$/.test(task)) return task;
+  throw new EnvironmentError(
+    `${commit.slice(0, 12)}:${path} is not a Build manifest the dispatcher wrote`,
+  );
+}
+
+/**
+ * How many Build manifests on the branch since main name `task`, or no task when it is undefined,
+ * as the conflict session's do: the times it was issued. A session can only add commits, so a
+ * forged one, even one that cannot be read, only adds to it.
  */
 export function buildIssues(
   ctx: BranchContext,
   tip: string,
   dir: string,
-  task: string,
+  task: string | undefined,
   mainRef = 'origin/main',
 ): number {
   const path = `${dir}/.station.json`;
@@ -48,7 +69,8 @@ export function buildIssues(
   return log
     .split('\n')
     .filter((line) => line.endsWith(` ${BUILD_SUBJECT}`))
-    .filter((line) => manifestTask(ctx, line.slice(0, line.indexOf(' ')), path) === task).length;
+    .map((line) => manifestAt(ctx, line.slice(0, line.indexOf(' ')), path))
+    .filter((manifest) => manifest === undefined || manifest.task === task).length;
 }
 
 /** Tick `task` in `tasks.md` on `head`, the branch's head, in the dispatcher's own commit. */
@@ -109,12 +131,17 @@ export function writeStationManifest(
   const tip = fetchBranch(ctx, item.branch);
   if (tip === undefined) throw new Error(`${item.branch} does not exist on origin`);
   let task: ReturnType<typeof nextTask>;
+  let conflicts: string[] | undefined;
   if (session.station === 4) {
     try {
       task = nextTask(git(ctx, ['show', `${tip}:specs/${feature}/tasks.md`]));
     } catch {
       task = undefined;
     }
+    // Every task ticked: the conflict session, with the files Integrate's report lists (T174).
+    const report = `specs/${feature}/reports/integrate.md`;
+    if (task === undefined)
+      conflicts = conflictFiles(fileAt(ctx.projectDir, tip, report, ctx.env) ?? '');
   }
   const manifest: StationManifest = {
     item: item.issue,
@@ -122,6 +149,7 @@ export function writeStationManifest(
     role: session.role,
     branch: item.branch,
     ...(task === undefined ? {} : task),
+    ...(conflicts === undefined ? {} : { files: conflicts }),
     issued_at: ctx.now().toISOString(),
   };
   const path = `specs/${feature}/.station.json`;
