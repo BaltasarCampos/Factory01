@@ -19,10 +19,11 @@ import { loadConfig } from '../../model/config.js';
 import type { ReleaseKeys } from '../../approvals/keys.js';
 import { signedAnswers } from '../../git/answers.js';
 import type { CheckResult } from '../../hooks/stop.js';
+import { BRIEF_PATH } from '../../install/manifest.js';
 
 export const QUESTIONS_PATH = '.factory/define/questions.md';
 export const ANSWERS_PATH = '.factory/define/answers.md';
-export const BRIEF_PATH = '.factory/brief.md';
+export { BRIEF_PATH };
 export const BACKLOG_PATH = '.factory/define/backlog.md';
 /** In the body of every issue Define files. */
 export const SEED_MARKER = '<!-- factory-seed -->';

@@ -44,6 +44,9 @@ to you (Principle VII).
    ` → A: <answer> → Owner action: tier raise`, and keep its sub-items.
 2. Write `plan.md` from the template, keeping its section order and headings, replacing every
    placeholder and deleting what does not apply.
+   - `## Clarifications`: your questions (step 3) and those already asked; delete
+     `## Clarifications` when you ask nothing and none was asked.
+   - `## Assumptions`: each default you took instead of asking, or "None".
    - Technical Context: the stack the repository already uses, read from its files. An unknown
      you cannot settle from the repository or the spec goes to `research.md` (step 3).
    - `Estimated changed lines`: a number, within the size limit in `.factory/config`. If the

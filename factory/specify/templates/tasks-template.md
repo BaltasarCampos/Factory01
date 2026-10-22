@@ -33,8 +33,9 @@ on the code before the change and passes after it.
 - **Test tasks** also name the criterion they cover, e.g., `(AC-001)`, and the test titles
   carry the same ID. Test files go under the release's test-path patterns.
 - No task may touch guardrail files (`.claude/`, `.mcp.json`, hooks, `.github/workflows/`,
-  `.factory/config`, `.specify/memory/constitution.md`, lockfile policy, `.gitattributes`,
-  `.gitmodules`); `factory merge` refuses any pull request that does. No task lists
+  `.factory/config`, `.factory/brief.md`, all of `.specify/` with the constitution, lockfile
+  policy, and every `.gitattributes`, `.gitmodules`, `CLAUDE.md` and `CLAUDE.local.md`);
+  `factory merge` refuses any item pull request that does. No task lists
   `events.jsonl` or `.station.json`, which only the hooks and the dispatcher write.
 - Each task fits one fresh session. A session that nears its context limit, or compacts once,
   stops and hands the task back to planning to be split.

@@ -5,10 +5,11 @@
 // honours keys that would break the rules (Owner decision 2026-10-19). The release's `.specify/`
 // holds only what the commands read.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { basename, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { parse as parseYaml } from 'yaml';
+import { importsOutside } from '../../src/install/manifest.js';
 
 const FACTORY = fileURLToPath(new URL('../../factory', import.meta.url));
 const SKILLS = join(FACTORY, 'skills');
@@ -204,6 +205,52 @@ describe('each command’s own rules (T172; T124 wording, T072)', () => {
   it('speckit-implement builds one task and never edits tasks.md', () => {
     expect(text('speckit-implement')).toMatch(/Build this one task, and no other/);
     expect(text('speckit-implement')).toMatch(/Never edit `tasks\.md`/);
+  });
+});
+
+describe('the release’s templates and this repository’s overrides (T173)', () => {
+  const template = (name: string) =>
+    readFileSync(join(FACTORY, 'specify', 'templates', name), 'utf8');
+
+  it.each(['plan-template.md', 'spec-template.md', 'tasks-template.md'])(
+    'this repository’s .specify/templates/overrides/%s equals the release’s template',
+    (name) => {
+      const override = fileURLToPath(
+        new URL(`../../.specify/templates/overrides/${name}`, import.meta.url),
+      );
+      expect(readFileSync(override, 'utf8')).toBe(template(name));
+    },
+  );
+
+  it('the plan template asks under ## Clarifications at the top and has ## Assumptions, as speckit-plan and the check say', () => {
+    const headings = template('plan-template.md')
+      .split('\n')
+      .filter((l) => l.startsWith('## '));
+    expect(headings.slice(0, 2)).toEqual(['## Clarifications', '## Summary']);
+    expect(headings).toContain('## Assumptions');
+    const plan = readFileSync(join(FACTORY, 'skills', 'speckit-plan', 'SKILL.md'), 'utf8');
+    expect(plan).toMatch(/delete\s+`## Clarifications` when you ask nothing/);
+    expect(plan).toMatch(/`## Assumptions`:/);
+  });
+
+  it.each(['plan-template.md', 'tasks-template.md'])(
+    '%s names the protected set: all of .specify/, the brief, CLAUDE.md and CLAUDE.local.md',
+    (name) => {
+      const text = template(name).replace(/\s+/g, ' ');
+      for (const path of ['all of `.specify/`', '`.factory/brief.md`', '`CLAUDE.local.md`'])
+        expect(text).toContain(path);
+      expect(text).not.toContain('`.specify/memory/constitution.md`, lockfile');
+    },
+  );
+
+  it('a CLAUDE.md or CLAUDE.local.md the release ships imports nothing outside the protected set', () => {
+    const shipped = files(FACTORY).filter((path) =>
+      ['CLAUDE.md', 'CLAUDE.local.md'].includes(basename(path)),
+    );
+    for (const path of shipped)
+      expect(importsOutside(relative(FACTORY, path), readFileSync(path, 'utf8')), path).toEqual([]);
+    expect(importsOutside('CLAUDE.md', '@.specify/memory/constitution.md\n')).toEqual([]);
+    expect(importsOutside('CLAUDE.md', '@README.md\n')).toEqual(['README.md']);
   });
 });
 

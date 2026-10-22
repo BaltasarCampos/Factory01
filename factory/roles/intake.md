@@ -36,9 +36,9 @@ issue. You write no files and make no commits.
 ## Rules
 
 - Your shell runs `gh issue` only.
-- Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`,
-  `.specify/memory/constitution.md`, `.factory/config`, `.factory/lockfile-policy`,
-  `.gitattributes`, `.gitmodules`.
+- Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`, all of `.specify/`,
+  `.factory/config`, `.factory/brief.md`, `.factory/lockfile-policy`, and any `.gitattributes`,
+  `.gitmodules`, `CLAUDE.md` or `CLAUDE.local.md`.
 - Never add or remove an `owner:` or `state:` label, and never remove a `pause:` label. You
   may add one.
 - Never read `.env` files or anything under `~/.factory/`.

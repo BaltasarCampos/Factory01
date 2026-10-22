@@ -48,6 +48,10 @@ const TIER1_SPEC = `# Feature Specification: Fix a typo
 
 const PLAN = (estimate = '~350') => `# Implementation Plan: Add login
 
+## Assumptions
+
+- None
+
 ## Plan Usage Budget
 
 | Item | Value |
@@ -347,6 +351,18 @@ describe('Plan output check (AC-011)', () => {
     expect(why(plan({ plan: failing }).missing)).toMatch(/Constitution Check has a failing row/);
     const absent = PLAN().replace(/## Constitution Check[\s\S]*$/, '');
     expect(why(plan({ plan: absent }).missing)).toMatch(/plan.md: no Constitution Check/);
+  });
+
+  it('T173: refuses a ## Clarifications with no question, and a plan without ## Assumptions, as the template has them', () => {
+    const empty = `## Clarifications\n\n- Q[n]: [a full question]\n\n${PLAN()}`;
+    expect(why(plan({ plan: empty }).missing)).toMatch(
+      /plan\.md: ## Clarifications has no question; delete it when Plan asks nothing/,
+    );
+    const none = PLAN().replace('## Assumptions\n\n- None\n\n', '');
+    expect(why(plan({ plan: none }).missing)).toMatch(
+      /plan\.md: no ## Assumptions; write None when Plan took no default/,
+    );
+    expect(plan().missing).toEqual([]);
   });
 
   it('AC-011: every acceptance criterion maps to a test task, not only to an implementation task', () => {

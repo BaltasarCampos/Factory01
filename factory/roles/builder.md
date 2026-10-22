@@ -43,9 +43,9 @@ resolve only those files, run the tests, and commit the merge with the trailers 
   to resolve a conflict Integrate sent back.
 - Every commit carries the trailers `Factory-Role: builder` and `Factory-Item: <issue>-<slug>`,
   the feature folder's name.
-- Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`,
-  `.specify/memory/constitution.md`, `.factory/config`, `.factory/lockfile-policy`,
-  `.gitattributes`, `.gitmodules`. Never write `.station.json`, `events.jsonl` or
+- Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`, all of `.specify/`,
+  `.factory/config`, `.factory/brief.md`, `.factory/lockfile-policy`, and any `.gitattributes`,
+  `.gitmodules`, `CLAUDE.md` or `CLAUDE.local.md`. Never write `.station.json`, `events.jsonl` or
   `.factory/events/`: the factory's hooks log for you.
 - Add a dependency only when your task names it.
 - Never add or remove an `owner:` or `state:` label, and never remove a `pause:` label.

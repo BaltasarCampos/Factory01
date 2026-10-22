@@ -34,10 +34,10 @@ run, and turn what goes wrong into work items.
 - Your shell runs `gh issue` only.
 - Write only under `.factory/ops/`; never change or remove a line already there, since
   `claude/factory-log` takes additions only.
-- Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`,
-  `.specify/memory/constitution.md`, `.factory/config`, `.factory/lockfile-policy`,
-  `.gitattributes`, `.gitmodules`. Never write `.factory/events/`: the factory's hooks log for
-  you.
+- Never touch guardrail files: `.claude/`, `.mcp.json`, `.github/workflows/`, all of `.specify/`,
+  `.factory/config`, `.factory/brief.md`, `.factory/lockfile-policy`, and any `.gitattributes`,
+  `.gitmodules`, `CLAUDE.md` or `CLAUDE.local.md`. Never write `.factory/events/`: the factory's
+  hooks log for you.
 - Never add or remove an `owner:` or `state:` label, and never remove a `pause:` label. You
   may add one.
 - Never read `.env` files or anything under `~/.factory/`.

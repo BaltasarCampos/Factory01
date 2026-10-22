@@ -4,10 +4,11 @@
 // reads the existing code. On a repo already adopted, Define re-runs without reinstalling.
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, posix } from 'node:path';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { cloneRepo, visibility } from '../github/repo.js';
+import { importsOutside } from '../install/manifest.js';
 import {
   CONFIG_PATH,
   createDefineBranch,
@@ -16,6 +17,7 @@ import {
 } from '../install/project.js';
 import { parseConfig } from '../model/config.js';
 import { formatReleasePin } from '../model/naming.js';
+import { visible } from '../notify/summary.js';
 import {
   askConsent,
   commitAndPush,
@@ -25,6 +27,30 @@ import {
   startDefine,
   verifiedRelease,
 } from './new.js';
+
+/**
+ * Every session loads each `CLAUDE.md` and `CLAUDE.local.md` (T173), which stay on main frozen:
+ * the Owner sees them before consenting, quoted through `visible()`, with each `@` import outside
+ * the protected set flagged.
+ */
+function showClaudeMd(ctx: CommandContext, workdir: string): void {
+  const listed = git(workdir, ['ls-tree', '-r', '-z', '--name-only', 'HEAD'], ctx.env).out;
+  const names = ['CLAUDE.md', 'CLAUDE.local.md'];
+  const paths = listed.split('\0').filter((p) => names.includes(posix.basename(p)));
+  if (paths.length === 0) return;
+  const shown = (text: string) => text.split('\n').map(visible).join('\n');
+  const out = ['Every agent session will load these files, which stay on main as they are:', ''];
+  const flagged: string[] = [];
+  for (const path of paths) {
+    const text = git(workdir, ['show', `HEAD:${path}`], ctx.env).out;
+    out.push(`--- ${shown(path)} ---`, shown(text), '');
+    for (const target of importsOutside(path, text))
+      flagged.push(
+        `- ${shown(path)} imports ${shown(target)}, outside the protected set, so it can change what every session reads`,
+      );
+  }
+  ctx.io.stdout.write(`${[...out, ...flagged].join('\n')}\n\n`);
+}
 
 export async function adopt(ctx: CommandContext): Promise<number> {
   const repo = ctx.positionals[0] ?? '';
@@ -69,6 +95,7 @@ export async function adopt(ctx: CommandContext): Promise<number> {
     if (head.ok && branch !== 'main')
       throw new RefusedError(`${repo}'s default branch is ${branch}; the factory works on main`);
     if (!head.ok) git(workdir, ['symbolic-ref', 'HEAD', 'refs/heads/main'], ctx.env);
+    else showClaudeMd(ctx, workdir);
 
     const release = verifiedRelease(ctx.env, home, scratch);
     const agents = await askConsent(ctx);

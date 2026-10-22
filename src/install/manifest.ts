@@ -11,13 +11,22 @@ import type { GuardrailManifest, ReleasePin } from '../model/types.js';
 
 export const MANIFEST_FILE = 'guardrails.manifest.json';
 
-/** Hashed against the manifest (`.claude/hooks/**` is inside `.claude/**`). */
-const HASHED_DIRS = ['.claude', '.github/workflows'] as const;
-const HASHED_FILES = ['.mcp.json', '.specify/memory/constitution.md', '.factory/lockfile-policy'];
+/**
+ * Hashed against the manifest (`.claude/hooks/**` is inside `.claude/**`; all of `.specify/`, the
+ * constitution included, T173).
+ */
+const HASHED_DIRS = ['.claude', '.github/workflows', '.specify'] as const;
+const HASHED_FILES = ['.mcp.json', '.factory/lockfile-policy'];
 
-/** Protected but per project or never allowed to change, so not hashed. */
+/**
+ * Protected but per project or never allowed to change, so not hashed. Every session loads each
+ * `CLAUDE.md` and `CLAUDE.local.md`, at any depth (T173).
+ */
 const UNHASHED_FILES = ['.factory/config'];
-const UNHASHED_NAMES = ['.gitattributes', '.gitmodules'];
+const UNHASHED_NAMES = ['.gitattributes', '.gitmodules', 'CLAUDE.md', 'CLAUDE.local.md'];
+
+/** The project brief: protected by name and not hashed; only Define's pull request changes it. */
+export const BRIEF_PATH = '.factory/brief.md';
 
 export class ManifestError extends RefusedError {}
 
@@ -37,10 +46,28 @@ export function coversHashed(path: string): boolean {
   return isHashed(p) || roots.some((root) => root === p || root.startsWith(`${p}/`));
 }
 
-/** True for every path an item or Define pull request may not touch. */
-export function isProtected(path: string): boolean {
+/** True for every path an item pull request, or with `define` Define's, may not touch. */
+export function isProtected(path: string, { define = false } = {}): boolean {
   const p = normalise(path);
+  if (p === BRIEF_PATH) return !define;
   return isHashed(p) || UNHASHED_FILES.includes(p) || UNHASHED_NAMES.includes(posix.basename(p));
+}
+
+/** Code spans and fenced blocks, where Claude Code reads no `@` import. */
+const CODE = /^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[^\n]*$|`[^`\n]*`/gm;
+
+/**
+ * The `@` imports in the `CLAUDE.md` at `path` that name a path outside the protected set, as
+ * written: a path outside the repository or in the home folder, or one any pull request may change.
+ */
+export function importsOutside(path: string, text: string): string[] {
+  const imports = text.replace(CODE, '').matchAll(/(?:^|\s)@([^\s`]+)/g);
+  return [...imports].flatMap(([, token = '']) => {
+    const target = token.replace(/[.,;:!?)]+$/, '');
+    const resolved = posix.normalize(posix.join(posix.dirname(normalise(path)), target));
+    const inside = !/^[~/]/.test(target) && !resolved.startsWith('../');
+    return inside && isProtected(resolved) ? [] : [target];
+  });
 }
 
 const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
