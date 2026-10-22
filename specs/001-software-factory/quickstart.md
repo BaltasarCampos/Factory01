@@ -37,9 +37,9 @@ one passing test and green CI, 5–10 tiered issues (AC-005); `factory run --onc
 nothing until the Owner approves (AC-006).
 
 Define's questions are in `.factory/define/questions.md` on `claude/define`, in its draft pull
-request. Until `factory answer` exists, answer them there, one `A<n>. <answer>` line per
-question, in a commit that changes only that file and is signed with your Owner key: anything
-else counts as no answers (T182).
+request. Until `factory answer` exists, write your answers in `.factory/define/answers.md` on
+that branch, one `A<n>. <answer>` line per question, in a commit that changes only that file and
+is signed with your Owner key: anything else counts as no answers (T182).
 
 ```bash
 git fetch origin
@@ -49,9 +49,18 @@ $EDITOR .factory/define/answers.md                 # e.g. "A1. Only me"
 git add .factory/define/answers.md
 git -c gpg.format=ssh -c user.signingkey="$HOME/.factory/keys/approve_ed25519" \
   commit -S -m "Answers for Define"
+git -c gpg.ssh.allowedSignersFile="$HOME/.factory/allowed_signers" \
+  -c gpg.ssh.revocationFile="$HOME/.factory/revoked_keys" -c gpg.minTrustLevel=fully \
+  verify-commit HEAD                               # check before you push
 git push origin claude/define
 git switch main
 ```
+
+Before `git push`, `git verify-commit` must print one line,
+`Good "git" signature for owner with ED25519 key SHA256:…`, whose fingerprint is your approval
+key's (`ssh-keygen -lf ~/.factory/keys/approve_ed25519.pub`). If it prints anything else, or
+nothing, do not push: `git reset --soft HEAD^` and commit again. A pushed commit that is not
+signed this way makes the branch's answers count as none, even under later signed ones (T182).
 
 ## Scenario 2 — Gate A: one tier 1 item to release (US2, SC-001)
 
@@ -83,9 +92,18 @@ $EDITOR specs/<issue>-<slug>/answers.md        # e.g. "A1. B"
 git add specs/<issue>-<slug>/answers.md
 git -c gpg.format=ssh -c user.signingkey="$HOME/.factory/keys/approve_ed25519" \
   commit -S -m "Answers for #<issue>"
+git -c gpg.ssh.allowedSignersFile="$HOME/.factory/allowed_signers" \
+  -c gpg.ssh.revocationFile="$HOME/.factory/revoked_keys" -c gpg.minTrustLevel=fully \
+  verify-commit HEAD                               # check before you push
 git push origin claude/<issue>-<slug>
 git switch main
 ```
+
+Before `git push`, `git verify-commit` must print one line,
+`Good "git" signature for owner with ED25519 key SHA256:…`, whose fingerprint is your approval
+key's (`ssh-keygen -lf ~/.factory/keys/approve_ed25519.pub`). If it prints anything else, or
+nothing, do not push: `git reset --soft HEAD^` and commit again. A pushed commit that is not
+signed this way makes the branch's answers count as none, even under later signed ones (T182).
 
 The next `factory run` pass returns the item to the station that asked.
 

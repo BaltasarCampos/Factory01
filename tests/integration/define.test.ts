@@ -183,6 +183,9 @@ describe('Define’s answers at the merge gate (T182)', { timeout: 60_000 }, () 
     const result = await gate(r);
     expect(result.complete).toBe(false);
     expect(result.missing?.join('\n')).toContain(`${ANSWERS_PATH}: ${sha.slice(0, 12)}`);
+    expect(result.missing?.join('\n')).toContain(
+      'if the commit is yours, re-run Define; if it is not, look into it before anything else',
+    );
     expect(result.missing?.join('\n')).toMatch(/no answer to Q1/);
   });
 });

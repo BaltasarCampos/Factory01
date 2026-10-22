@@ -334,7 +334,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     let found = await gather();
     if (found.answersTampered !== undefined) {
       const { commit, reason } = found.answersTampered;
-      const text = `#${String(issue.number)}: answers.md on ${item.branch ?? 'its branch'} is not the Owner's: ${commit.slice(0, 12)} ${reason}; its answers count as none`;
+      const text = `#${String(issue.number)}: answers.md on ${item.branch ?? 'its branch'} is not the Owner's: ${commit.slice(0, 12)} ${reason}; its answers count as none. If the commit is yours, close this item and file it again; if it is not, look into it before anything else.`;
       await alertOnce({ urgency: 'urgent', kind: 'tampering', text });
     }
     const verdicts = {

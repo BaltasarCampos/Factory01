@@ -1043,6 +1043,9 @@ describe('the question loop (T180, AC-033)', { timeout: 60_000 }, () => {
       const alert = t.inbox().find((c) => /kind=tampering/.test(c.body));
       expect(alert?.body).toMatch(/urgency=urgent/);
       expect(alert?.body).toContain(sha.slice(0, 12));
+      expect(alert?.body).toContain(
+        'If the commit is yours, close this item and file it again; if it is not, look into it before anything else.',
+      );
       expect(t.local.launches).toEqual([]);
     },
   );

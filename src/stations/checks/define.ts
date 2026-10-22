@@ -243,7 +243,9 @@ export async function checkDefine(input: DefineCheck): Promise<DefineResult> {
     });
     if ('tampered' in signed) {
       const { commit, reason } = signed.tampered;
-      missing.push(`${ANSWERS_PATH}: ${commit.slice(0, 12)} ${reason}; it counts as no answers`);
+      missing.push(
+        `${ANSWERS_PATH}: ${commit.slice(0, 12)} ${reason}; it counts as no answers: if the commit is yours, re-run Define; if it is not, look into it before anything else`,
+      );
       answersText = undefined;
     }
   }
