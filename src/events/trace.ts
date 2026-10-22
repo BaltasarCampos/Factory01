@@ -39,6 +39,11 @@ export interface TraceCommit {
    * `answers.md` (T182); needed to accept the Owner's answers without trailers.
    */
   ownerSigned?: boolean;
+  /**
+   * The commit changes exactly one `tasks.md` checkbox from `[ ]` to `[X]`, as the report currency
+   * rule reads it; needed to accept the dispatcher's tick (T174).
+   */
+  tick?: boolean;
 }
 
 /** Not a role: the dispatcher's own commits on an item branch (src/dispatcher/branch.ts). */
@@ -107,7 +112,8 @@ function commitProblems(commit: TraceCommit, feature: string): string[] {
   if (roles.length === 0) problems.push('no Factory-Role: trailer');
   for (const role of roles) {
     if (role === DISPATCHER) {
-      const others = commit.paths?.filter((p) => !dispatcherFile(p, feature));
+      const ticked = commit.tick === true && commit.paths?.join() === `specs/${feature}/tasks.md`;
+      const others = ticked ? [] : commit.paths?.filter((p) => !dispatcherFile(p, feature));
       if (others === undefined)
         problems.push(`Factory-Role: ${role} on a commit whose changed files are unknown`);
       else if (others.length > 0)

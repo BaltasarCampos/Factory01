@@ -2,6 +2,10 @@
 // .station.json`, committed by the dispatcher to the item branch before each session. Hooks read
 // the session's item, station, branch and file list from it, never from the prompt; no role may
 // write it. The Builder's manifest names the next open task of `tasks.md` and its files.
+//
+// The dispatcher's clone records the Build manifest commit it last pushed to a branch, which a
+// session can neither see nor rewrite; it ticks a task only on history that holds it (T174).
+import { fileAt } from '../git/answers.js';
 import type { RoleName, Station, StationManifest } from '../model/types.js';
 import {
   commitAndPush,
@@ -12,6 +16,52 @@ import {
   type BranchContext,
   type ItemRef,
 } from './branch.js';
+
+const BUILD_SUBJECT = 'Dispatcher: station 4 (builder) manifest';
+
+/** Where the dispatcher's clone records the Build manifest commit it last pushed to `branch`. */
+export const issuedRef = (branch: string) => `refs/factory/build/${branch}`;
+
+/** The task the manifest at `commit` names, if it names one. */
+export function manifestTask(ctx: BranchContext, commit: string, path: string) {
+  try {
+    const { task } = JSON.parse(git(ctx, ['show', `${commit}:${path}`])) as { task?: unknown };
+    return typeof task === 'string' && /^T\d+$/.test(task) ? task : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * How many Build manifests on the branch since main name `task`: the times it was issued. A
+ * session can only add commits, so a forged one only makes the count higher.
+ */
+export function buildIssues(
+  ctx: BranchContext,
+  tip: string,
+  dir: string,
+  task: string,
+  mainRef = 'origin/main',
+): number {
+  const path = `${dir}/.station.json`;
+  const log = git(ctx, ['log', '--first-parent', '--format=%H %s', `${mainRef}..${tip}`]);
+  return log
+    .split('\n')
+    .filter((line) => line.endsWith(` ${BUILD_SUBJECT}`))
+    .filter((line) => manifestTask(ctx, line.slice(0, line.indexOf(' ')), path) === task).length;
+}
+
+/** Tick `task` in `tasks.md` on `head`, the branch's head, in the dispatcher's own commit. */
+export function tickTask(ctx: BranchContext, item: ItemRef, task: string, head: string): void {
+  const feature = featureOf(item);
+  const path = `specs/${feature}/tasks.md`;
+  const text = fileAt(ctx.projectDir, head, path, ctx.env) ?? '';
+  const ticked = text.replace(new RegExp(`^(\\s*- \\[) (\\] ${task}\\b)`, 'm'), '$1X$2');
+  if (ticked === text) return;
+  const message = dispatcherMessage(`tick ${task}`, feature);
+  commitAndPush(ctx, head, { [path]: ticked }, message, item.branch);
+  fetchBranch(ctx, item.branch);
+}
 
 /** The first open task of `tasks.md` and the paths of its `· Files:` list. */
 export function nextTask(tasks: string): { task: string; files: string[] } | undefined {
@@ -77,7 +127,8 @@ export function writeStationManifest(
   const path = `specs/${feature}/.station.json`;
   const subject = `station ${String(session.station)} (${session.role}) manifest`;
   const files = { [path]: `${JSON.stringify(manifest, null, 2)}\n` };
-  commitAndPush(ctx, tip, files, dispatcherMessage(subject, feature), item.branch);
+  const sha = commitAndPush(ctx, tip, files, dispatcherMessage(subject, feature), item.branch);
+  if (session.station === 4) git(ctx, ['update-ref', issuedRef(item.branch), sha]);
   fetchBranch(ctx, item.branch);
   return manifest;
 }

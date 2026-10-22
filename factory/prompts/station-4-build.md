@@ -6,4 +6,6 @@ Feature folder: {{feature}}/ on the branch `{{branch}}`, which is checked out.
 commits on `{{branch}}`: commit and push your work there, as your role file says, before you
 end your session or wait on the Owner.
 
+{{failure}}
+
 {{commands}}

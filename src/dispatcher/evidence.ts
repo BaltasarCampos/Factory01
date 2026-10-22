@@ -12,6 +12,10 @@
 // report, a manifest, one tick or a clean merge of main, it reads as missing, so a stale conflict
 // report sends nothing back and stale Verify reports start Verify again.
 //
+// In Build (T174) the Builder's pushed head waits for CI's `build-test`: green ticks the task the
+// dispatcher issued, red issues it again with the failure, at most `retry_limit` times, and then
+// holds with one alert. Nothing is ticked on a branch whose history lost that manifest commit.
+//
 // Release evidence, the signed deploy records on the inbox issue, is read once per pass by the
 // dispatcher (released.ts, T160). Open questions are read from `spec.md`, `plan.md` and the
 // Owner's `answers.md` at the branch head (T180), which counts only when the Owner signed it
@@ -35,8 +39,8 @@ import { conflictFailure } from '../stations/edges.js';
 import { featureOf, fetchBranch, git, type BranchContext } from './branch.js';
 import { branchGit, reportCurrent } from './currency.js';
 import type { Candidate, StationEvidence } from './dispatch.js';
-import { pendingManifest, testEnded } from './manifest.js';
-import { STATION_OF, type Evidence } from './transitions.js';
+import { buildIssues, issuedRef, manifestTask, pendingManifest, testEnded } from './manifest.js';
+import { STATION_OF, type DecisionAlert, type Evidence } from './transitions.js';
 
 export interface EvidenceContext {
   projectDir: string;
@@ -104,6 +108,66 @@ async function requiredChecks(
       return { head: tip, jobs: [], unreadable: err.message };
     throw err;
   }
+}
+
+/** CI's `build-test` at `tip`, the head of the item's branch, from the pinned release's list. */
+async function buildTestAt(ctx: EvidenceContext, config: ProjectConfig, tip: string) {
+  try {
+    if (ctx.factory === undefined)
+      throw new RefusedError('no factory clone to read required-checks.json from');
+    const list = requiredChecksAt(ctx.factory, config.factory_release.sha, config.profile);
+    const jobs = list.jobs.filter((j) => j.job === 'build-test' && j.kinds.includes('item'));
+    if (jobs.length === 0) throw new RefusedError('the pinned release requires no build-test');
+    const results = await ciAt(config.repo, tip, jobs, ctx.gh ?? {});
+    return results.find((r) => r.state !== 'success')?.state ?? 'success';
+  } catch (err) {
+    if (err instanceof RefusedError || err instanceof GhError || err instanceof EnvironmentError)
+      return `unreadable: ${err.message}`;
+    throw err;
+  }
+}
+
+/** Build's round once the Builder has pushed: tick, issue the task again, or hold (T174). */
+export type BuildRound =
+  { tick: string; head: string } | { failure: string } | { hold: DecisionAlert | string };
+
+/**
+ * Build's round at `tip` for the task of the Build manifest the dispatcher last pushed; undefined
+ * when it pushed none, or that task is ticked, so the open task needs a session.
+ */
+async function buildRound(
+  ctx: EvidenceContext,
+  at: BranchContext,
+  config: ProjectConfig,
+  branch: string,
+  dir: string,
+  tip: string,
+  tasks: string,
+): Promise<BuildRound | undefined> {
+  let issued: string;
+  try {
+    issued = git(at, ['rev-parse', '--verify', '-q', `${issuedRef(branch)}^{commit}`]);
+  } catch {
+    return undefined;
+  }
+  const task = manifestTask(at, issued, `${dir}/.station.json`);
+  if (task === undefined) return undefined;
+  try {
+    git(at, ['merge-base', '--is-ancestor', issued, tip]);
+  } catch {
+    const text = `the Build manifest the dispatcher pushed, ${issued.slice(0, 12)}, is not in the history of ${branch} at ${tip.slice(0, 12)}: the branch was rewritten, so nothing more is ticked or issued for this item; close it and file it again`;
+    return { hold: { urgency: 'urgent', kind: 'tampering', text } };
+  }
+  if (!new RegExp(`^\\s*- \\[ \\] ${task}\\b`, 'm').test(tasks)) return undefined;
+  const state = await buildTestAt(ctx, config, tip);
+  if (state === 'success') return { tick: task, head: tip };
+  if (['pending', 'missing'].includes(state) || state.startsWith('unreadable'))
+    return { hold: `build-test ${state} at ${tip.slice(0, 12)}` };
+  const red = `${task} left CI red at ${tip.slice(0, 12)}: build-test (${state})`;
+  const issues = buildIssues(at, tip, dir, task, ctx.mainRef);
+  if (issues <= config.retry_limit) return { failure: `Your last attempt at ${red}.` };
+  const text = `${red}, after ${String(issues)} Build sessions with retry_limit ${String(config.retry_limit)}; nothing sends it on before T096: close this item and file it again`;
+  return { hold: { urgency: 'info', kind: 'build-failed', text } };
 }
 
 /** The Verify role that works next, or undefined once the tier's last one has ended. */
@@ -216,10 +280,19 @@ export function gatherEvidence(ctx: EvidenceContext) {
       item.tier !== undefined &&
       verifyRole === undefined &&
       !pending;
+    const round =
+      item.state === 'building' &&
+      tip !== undefined &&
+      tasks !== undefined &&
+      !tasksDone &&
+      !pending
+        ? await buildRound(ctx, at, config, item.branch, dir, tip, tasks)
+        : undefined;
+    const held = round !== undefined && 'hold' in round ? round.hold : undefined;
     const work: Partial<Record<State, boolean>> = {
       triaged: !specComplete,
       'spec-approved': !planComplete,
-      building: !tasksDone,
+      building: !tasksDone && (round === undefined || 'failure' in round),
       verifying: verifyRole !== undefined,
       integrating: integrate === undefined,
     };
@@ -246,6 +319,11 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(ci === undefined ? {} : { requiredChecks: ci }),
       ...(security === undefined ? {} : { securityReport: checkSecurityReport(security).complete }),
       ...(failure === undefined ? {} : { failure }),
+      ...(round !== undefined && 'tick' in round
+        ? { tick: { task: round.tick, head: round.head } }
+        : {}),
+      ...(round !== undefined && 'failure' in round ? { buildFailure: round.failure } : {}),
+      ...(held === undefined || typeof held === 'string' ? {} : { buildAlert: held }),
       needsSession: (work[item.state] ?? false) && !pending,
     };
   };

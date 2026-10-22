@@ -69,6 +69,8 @@ export interface PromptFacts {
   pitch?: string;
   /** Specify and Plan: the Owner's answers to apply, as `A<n>. <answer>` lines (T180). */
   answers?: readonly string[];
+  /** Build: why the Builder gets its task again, the factory's own words (T174). */
+  failure?: string;
 }
 
 const ADOPTED =
@@ -138,6 +140,7 @@ export function stationPrompt(read: ReleaseFile, f: PromptFacts): string {
     changed: changed.length > 0 ? fenced(changed.join('\n')) : 'None.',
     range: f.range ?? 'origin/main',
     note: `.factory/releases/${feature.slice('specs/'.length)}.md`,
+    failure: f.failure ?? '',
     commands: commands.join('\n\n'),
   };
   return `${fill(read(path), vars, path).trim()}\n`;

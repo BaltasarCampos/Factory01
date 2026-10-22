@@ -450,11 +450,15 @@ describe('item trace (AC-017)', () => {
       commit('c3', [`${dir}/.station.json`, 'src/login.ts']),
       commit('d4'),
       commit('e5', ['.specify/feature.json', `${dir}/events.jsonl`]),
+      // The tick of one task (T174): accepted only as one checkbox, as the caller computes it.
+      { ...commit('f6', [`${dir}/tasks.md`]), tick: true },
+      commit('a7', [`${dir}/tasks.md`]),
     ];
     expect(untrailered(commits, FEATURE)).toEqual([
       `c3c3c3c3c3c3 Dispatcher: c3: Factory-Role: dispatcher on a commit that changes src/login.ts`,
       `d4d4d4d4d4d4 Dispatcher: d4: Factory-Role: dispatcher on a commit whose changed files are unknown`,
       `e5e5e5e5e5e5 Dispatcher: e5: Factory-Role: dispatcher on a commit that changes .specify/feature.json`,
+      `a7a7a7a7a7a7 Dispatcher: a7: Factory-Role: dispatcher on a commit that changes ${dir}/tasks.md`,
     ]);
   });
 

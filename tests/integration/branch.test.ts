@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
-import { createItemBranch } from '../../src/dispatcher/branch.js';
+import { createItemBranch, dispatcherMessage } from '../../src/dispatcher/branch.js';
 import {
   changedFiles,
   dispatchOnce,
@@ -84,12 +84,14 @@ interface Setup {
   branch?: Record<string, string>;
   /** The release pin in main's config. */
   pin?: string;
+  /** More lines for main's config. */
+  config?: string;
 }
 
 function setup(options: Setup = {}) {
   const config = `factory_release: ${options.pin ?? PIN}\nrepo: ${REPO}\ninbox_issue: ${String(INBOX)}\n`;
   const project = makeRepo({
-    files: { '.factory/config': `${config}agents: local\n` },
+    files: { '.factory/config': `${config}agents: local\n${options.config ?? ''}` },
     signWith: owner,
   });
   mergeBrief(project, { signWith: owner });
@@ -1089,6 +1091,109 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
 
     expect(alerts()).toEqual([failed(tipOf(t))]);
     expect(t.local.launches).toHaveLength(1);
+  });
+
+  describe("Build's round on CI's build-test (T174)", () => {
+    const TASKS = [
+      '### Tests',
+      '- [ ] T001 Login tests (AC-001) · Files: tests/login.test.ts',
+      '### Implementation',
+      '- [ ] T002 Login form · Files: src/login.ts',
+    ].join('\n');
+    const TASKS_MD = `${FEATURE}/tasks.md`;
+    /** An item in Build at tier 1 whose first task the dispatcher has issued. */
+    const issued = async (config?: string) => {
+      const factory = factoryClone();
+      const t = setup({
+        ...{ tier: 1, pin: `v1.0.0@${factory.sha}`, states: ['state:building'] },
+        ...(config === undefined ? {} : { config }),
+        branch: { ...SPECIFIED, [TASKS_MD]: TASKS },
+      });
+      t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path, factory: factory.path });
+      openPr();
+      await dispatchOnce(t.ctx);
+      return t;
+    };
+    /** `files` committed and pushed on origin's branch head, as the session does; the new head. */
+    const work = (t: ReturnType<typeof setup>, files: Files = { 'tests/login.test.ts': 't\n' }) => {
+      t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+      const trailers = { 'Factory-Role': 'builder', 'Factory-Item': '2-add-login' };
+      t.project.commit(files, 'Login tests', { trailers });
+      t.project.push(BRANCH);
+      t.project.checkout('main');
+      return tipOf(t);
+    };
+    const buildTest = (sha: string, conclusion: string | null) => {
+      actionsAt(sha, [[CI_YML, 'build-test', conclusion]]);
+    };
+    const alerts = (t: ReturnType<typeof setup>, kind: string) =>
+      t.inbox().flatMap((c) => {
+        const a = parseAlert({ ...c, id: String(c.id) });
+        return a?.kind === kind ? [`${a.urgency} ${a.text}`] : [];
+      });
+    const task = (t: ReturnType<typeof setup>) =>
+      (JSON.parse(t.show(`${FEATURE}/.station.json`)) as { task?: string }).task;
+
+    it('T174: holds Build while build-test runs, then ticks the task in its own commit and issues the next', async () => {
+      const t = await issued();
+      const head = work(t);
+      buildTest(head, null);
+      await dispatchOnce(t.ctx);
+      expect(t.local.launches).toHaveLength(1);
+
+      buildTest(head, 'success');
+      await dispatchOnce(t.ctx);
+
+      expect(t.show(TASKS_MD)).toBe(TASKS.replace('- [ ] T001', '- [X] T001'));
+      const tick = t.project.git(['log', '-1', '--format=%P%n%B', `origin/${BRANCH}~1`]);
+      expect(tick).toBe(`${head}\n${dispatcherMessage('tick T001', '2-add-login').trim()}`);
+      expect(t.local.launches.map((l) => l.station)).toEqual([4, 4]);
+      expect(task(t)).toBe('T002');
+    });
+
+    it('T174: a red head gives the Builder the same task again with the failure, at most retry_limit times', async () => {
+      const t = await issued('retry_limit: 1\n');
+      const first = work(t);
+      buildTest(first, 'failure');
+      await dispatchOnce(t.ctx);
+      expect(task(t)).toBe('T001');
+      expect(t.local.launches[1]?.prompt).toContain(
+        `Your last attempt at T001 left CI red at ${first.slice(0, 12)}: build-test (failure).`,
+      );
+
+      const second = work(t, { 'tests/login.test.ts': 't2\n' });
+      buildTest(second, 'failure');
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toHaveLength(2);
+      expect(t.show(TASKS_MD)).toBe(TASKS);
+      expect(alerts(t, 'build-failed')).toEqual([
+        `info #2: T001 left CI red at ${second.slice(0, 12)}: build-test (failure), after 2 Build sessions with retry_limit 1; nothing sends it on before T096: close this item and file it again`,
+      ]);
+    });
+
+    it('T174: a rewritten branch with a forged manifest commit is never ticked, and the Owner gets one urgent alert', async () => {
+      const t = await issued();
+      const pushed = tipOf(t);
+      t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}~1`]);
+      const forged = { item: 2, station: 4, role: 'builder', branch: BRANCH, task: 'T001' };
+      t.project.commit(
+        { [`${FEATURE}/.station.json`]: `${JSON.stringify({ ...forged, files: [] })}\n` },
+        dispatcherMessage('station 4 (builder) manifest', '2-add-login'),
+      );
+      t.project.push(BRANCH, { force: true });
+      const head = work(t);
+      buildTest(head, 'success');
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.show(TASKS_MD)).toBe(TASKS);
+      expect(t.local.launches).toHaveLength(1);
+      expect(alerts(t, 'tampering')).toEqual([
+        `urgent #2: the Build manifest the dispatcher pushed, ${pushed.slice(0, 12)}, is not in the history of ${BRANCH} at ${head.slice(0, 12)}: the branch was rewritten, so nothing more is ticked or issued for this item; close it and file it again`,
+      ]);
+    });
   });
 });
 
