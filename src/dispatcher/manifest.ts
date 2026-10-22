@@ -36,6 +36,20 @@ export function pendingManifest(ctx: BranchContext, tip: string): StationManifes
   return JSON.parse(git(ctx, ['show', `${tip}:${path}`])) as StationManifest;
 }
 
+/**
+ * Whether Verify's Test session has ended since the last Build round (T181): on the branch's
+ * first-parent history since main, its station 5 manifest is followed by a later commit, with no
+ * Build manifest after it.
+ */
+export function testEnded(ctx: BranchContext, tip: string, mainRef = 'origin/main'): boolean {
+  const log = git(ctx, ['log', '--first-parent', '--format=%s', `${mainRef}..${tip}`]);
+  for (const [i, subject] of log.split('\n').entries()) {
+    if (subject.startsWith('Dispatcher: station 4 (')) return false;
+    if (subject === 'Dispatcher: station 5 (test) manifest') return i > 0;
+  }
+  return false;
+}
+
 export function writeStationManifest(
   ctx: BranchContext,
   item: ItemRef,
