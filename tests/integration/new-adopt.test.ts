@@ -337,6 +337,7 @@ describe('guardrail manifest (AC-003)', { timeout: 30_000 }, () => {
     expect(importsOutside('CLAUDE.md', 'Read **@AGENTS.md** and mail me@example.com\n')).toEqual([
       'AGENTS.md',
     ]);
+    expect(importsOutside('CLAUDE.md', 'Read _@AGENTS.md_ and a1@b.md\n')).toEqual(['AGENTS.md']);
     // The raw token counts too: `.factory/config.` is not the protected `.factory/config`.
     expect(importsOutside('CLAUDE.md', 'See @.factory/config.\n')).toEqual(['.factory/config.']);
     expect(importsOutside('CLAUDE.md', 'See @.factory/config, then\n')).toEqual([

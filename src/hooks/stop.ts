@@ -1,7 +1,7 @@
 // `factory hook stop` (AC-063): a session may end only when its station's output exists and
 // passes the station's completeness check. Checkers register here as their stations ship
-// (Define in slice 12, T045; the others in slice 14, T057; Intake in slice 16b); a station
-// without one fails closed (Owner decision, slice 7 note B).
+// (Define in slice 12, T045; the others in slice 14, T057; Intake in slice 16b; Build in slice
+// 26e-1, T174); a station without one fails closed (Owner decision, slice 7 note B).
 //
 // After one forced continuation (`stop_hook_active`) the session may end: the dispatcher reads
 // the station output from the branch, so a session that stops early still advances nothing.
@@ -9,6 +9,7 @@ import { join } from 'node:path';
 import { appendEvent } from '../events/append.js';
 import { loadConfig } from '../model/config.js';
 import { STATIONS, type Station } from '../model/types.js';
+import { buildStopCheck } from '../stations/checks/build.js';
 import { defineStopCheck } from '../stations/checks/define.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
 import { planStopCheck } from '../stations/checks/plan.js';
@@ -59,6 +60,7 @@ export const CHECKERS: Partial<Record<Station, StationChecker>> = {
   1: intakeStopCheck,
   2: (_session, ctx) => specStopCheck(ctx.cwd),
   3: (_session, ctx) => planStopCheck(ctx.cwd),
+  4: (_session, ctx) => buildStopCheck(ctx.cwd),
   5: (session, ctx) =>
     session.role === 'security' ? securityStopCheck(ctx.cwd) : verifyStopCheck(ctx.cwd),
 };

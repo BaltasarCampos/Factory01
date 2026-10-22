@@ -75,8 +75,11 @@ export function outsideProtected(path: string, target: string): boolean {
 
 /** Code spans and fenced blocks, where Claude Code reads no `@` import; each becomes a space. */
 const CODE = /^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[^\n]*$|`[^`\n]*`/gm;
-/** An `@` after any character no path holds, and the token after it. */
-const IMPORT = /(?<![\p{L}\p{N}_.~/\\+%-])@([^\s`]+)/gu;
+/**
+ * An `@` after any character no path holds, `_` included, as in `_@AGENTS.md_`, and the token
+ * after it; a letter or digit before it, as in an address, starts none.
+ */
+const IMPORT = /(?<![\p{L}\p{N}.~/\\+%-])@([^\s`]+)/gu;
 
 /**
  * The `@` imports in the `CLAUDE.md` at `path` that name a path outside the protected set. Erring
