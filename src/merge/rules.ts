@@ -3,18 +3,25 @@
 // head alone, never a local branch. Every diff is the safe diff from the merge base.
 //
 // Project rules, by head branch: a work item `claude/<issue>-<slug>` and `claude/define` touch no
-// protected path; `factory/upgrade-<tag>` pins a signed release whose protected files it installs
-// exactly; `claude/factory-log` only appends regular text under the log paths. Any other branch is
-// refused, except in the factory repository, identified positively by its origin. There, before
-// it adopts itself, every branch gets the factory-repository rule; after, the project rules come
-// first and that rule covers only the rest (`coach/<yyyy-Www>`, the Owner's own branches).
+// protected path, except that Define's may change the brief (T173); `factory/upgrade-<tag>` pins
+// a signed release whose protected files it installs exactly; `claude/factory-log` only appends
+// regular text under the log paths. Any other branch is refused, except in the factory
+// repository, identified positively by its origin. There, before it adopts itself, every branch
+// gets the factory-repository rule; after, the project rules come first and that rule covers only
+// the rest (`coach/<yyyy-Www>`, the Owner's own branches).
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import type { ReleaseKeys } from '../approvals/keys.js';
 import { verifyGate, type LabelAdd, type PostedComment } from '../approvals/verify.js';
 import { checkAppendOnly, LOG_BRANCH } from '../ci/append-only.js';
 import { mergeBase, safeDiff, safeGit } from '../git/diff.js';
-import { coversHashed, isHashed, isProtected, manifestMismatches } from '../install/manifest.js';
+import {
+  BRIEF_PATH,
+  coversHashed,
+  isHashed,
+  isProtected,
+  manifestMismatches,
+} from '../install/manifest.js';
 import { parseConfig } from '../model/config.js';
 import { isSlug } from '../model/naming.js';
 import { verifiedManifest, verifyReleaseTag } from '../release/tag.js';
@@ -81,8 +88,9 @@ export function releaseSource(factory: string, sha: string): string | undefined 
   return /^\s*FACTORY_REPO:\s*([\w.-]+\/[\w.-]+)\s*$/m.exec(shown.stdout)?.[1];
 }
 
-/** Paths an item or Define pull request may not touch, and a symlink over a guarded folder. */
-const guarded = (path: string) => isProtected(path) || coversHashed(path);
+/** Paths an item, or Define's, pull request may not touch, and a symlink over a guarded folder. */
+const guarded = (path: string, define = false) =>
+  isProtected(path, { define }) || coversHashed(path);
 
 export function mergeRules(input: MergeRulesInput): RuleResult {
   const env = input.env ?? process.env;
@@ -97,10 +105,10 @@ export function mergeRules(input: MergeRulesInput): RuleResult {
   const { branch } = input;
   const item = /^claude\/([1-9]\d*)-(.+)$/.exec(branch);
   if (item !== null && isSlug(item[2] ?? '')) {
-    const problems = pathRule(changes());
+    const problems = pathRule(changes(), false);
     return { rule: 'item', problems, issue: Number(item[1]) };
   }
-  if (branch === 'claude/define') return { rule: 'define', problems: pathRule(changes()) };
+  if (branch === 'claude/define') return { rule: 'define', problems: pathRule(changes(), true) };
   if (branch === LOG_BRANCH) {
     const options = { logBranch: true, env };
     return {
@@ -114,16 +122,24 @@ export function mergeRules(input: MergeRulesInput): RuleResult {
   return { rule: 'none', problems: [`no merge rule takes branch ${branch}`] };
 }
 
-function pathRule(changes: ReturnType<typeof safeDiff>): string[] {
-  return changes
-    .filter((c) => guarded(c.path))
-    .map((c) => `${c.path}: a protected path, which no item or Define pull request may change`);
+function pathRule(changes: ReturnType<typeof safeDiff>, define: boolean): string[] {
+  const problems = changes
+    .filter((c) => guarded(c.path, define))
+    .map((c) =>
+      c.path === BRIEF_PATH
+        ? `${c.path}: the project brief, which only a Define pull request may change`
+        : `${c.path}: a protected path, which no item or Define pull request may change`,
+    );
+  // Define may change the brief, but only as a regular file (T173).
+  const brief = changes.find((c) => c.path === BRIEF_PATH && c.newMode !== undefined);
+  if (define && brief !== undefined && !['100644', '100755'].includes(brief.newMode ?? ''))
+    problems.push(`${BRIEF_PATH}: not a regular file (mode ${brief.newMode ?? ''})`);
+  return problems;
 }
 
 function factoryRule(changes: ReturnType<typeof safeDiff>): RuleResult {
-  const refused = (path: string) => guarded(path) || path.startsWith('.specify/memory/');
   const problems = changes
-    .filter((c) => refused(c.path))
+    .filter((c) => guarded(c.path))
     .map(
       (c) =>
         `${c.path}: the factory's own workflows and self-protection files change only when the Owner copies them into place with a signed commit`,

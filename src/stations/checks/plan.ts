@@ -3,12 +3,13 @@
 // failing row; in `tasks.md` every task lists the files it may touch, every acceptance criterion
 // of the spec maps to a test task, and in every phase the test tasks come before the
 // implementation tasks. A test task is one under a `### Tests …` heading, as in the template.
-// Plan's own questions wait for the Owner as the spec's do (T180).
+// Plan's own questions wait for the Owner as the spec's do (T180). As the template has them,
+// `## Clarifications` holds a question or is deleted, and `## Assumptions` is there (T173).
 import type { CheckResult } from '../../hooks/stop.js';
 import { parseConfig } from '../../model/config.js';
 import { committed, featureFiles } from './feature.js';
 import { questionsIn } from './questions.js';
-import { checkSpec, committedAnswers, withQuestions } from './spec.js';
+import { checkSpec, committedAnswers, section, withQuestions } from './spec.js';
 
 export interface PlanInput {
   spec: string;
@@ -36,6 +37,18 @@ function planProblems(plan: string, sizeLimit: number): string[] {
   if (!check) missing.push('plan.md: no Constitution Check');
   else if ((check[1] ?? '').includes('❌'))
     missing.push('plan.md: Constitution Check has a failing row (❌)');
+  const lines = plan.split('\n');
+  if (section(lines, 'Clarifications') !== undefined && questionsIn(plan, 'plan.md').length === 0)
+    missing.push('plan.md: ## Clarifications has no question; delete it when Plan asks nothing');
+  const assumptions = section(lines, 'Assumptions')
+    ?.join('\n')
+    .replace(/<!--[\s\S]*?-->/g, '');
+  if (assumptions === undefined)
+    missing.push('plan.md: no ## Assumptions; write None when Plan took no default');
+  else if (assumptions.trim() === '')
+    missing.push('plan.md: ## Assumptions is empty; write None when Plan took no default');
+  else if (/^\s*-\s*\[.*\]\s*$/m.test(assumptions))
+    missing.push("plan.md: ## Assumptions still holds the template's placeholder");
   return missing;
 }
 

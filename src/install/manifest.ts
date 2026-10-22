@@ -11,13 +11,28 @@ import type { GuardrailManifest, ReleasePin } from '../model/types.js';
 
 export const MANIFEST_FILE = 'guardrails.manifest.json';
 
-/** Hashed against the manifest (`.claude/hooks/**` is inside `.claude/**`). */
-const HASHED_DIRS = ['.claude', '.github/workflows'] as const;
-const HASHED_FILES = ['.mcp.json', '.specify/memory/constitution.md', '.factory/lockfile-policy'];
+/**
+ * Hashed against the manifest (`.claude/hooks/**` is inside `.claude/**`; all of `.specify/`, the
+ * constitution included, T173).
+ */
+const HASHED_DIRS = ['.claude', '.github/workflows', '.specify'] as const;
+const HASHED_FILES = ['.mcp.json', '.factory/lockfile-policy'];
 
-/** Protected but per project or never allowed to change, so not hashed. */
+/**
+ * Protected but per project or never allowed to change, so not hashed. Every session loads each
+ * `CLAUDE.md` and `CLAUDE.local.md`, at any depth (T173). Names compare in lower case, as a disk
+ * that ignores case opens `claude.md` for `CLAUDE.md`.
+ */
 const UNHASHED_FILES = ['.factory/config'];
-const UNHASHED_NAMES = ['.gitattributes', '.gitmodules'];
+const CLAUDE_NAMES = ['claude.md', 'claude.local.md'];
+const UNHASHED_NAMES = ['.gitattributes', '.gitmodules', ...CLAUDE_NAMES];
+
+/** A `CLAUDE.md` or `CLAUDE.local.md` at any depth, in any letter case. */
+export const isClaudeMd = (path: string) =>
+  CLAUDE_NAMES.includes(posix.basename(normalise(path)).toLowerCase());
+
+/** The project brief: protected by name and not hashed; only Define's pull request changes it. */
+export const BRIEF_PATH = '.factory/brief.md';
 
 export class ManifestError extends RefusedError {}
 
@@ -37,10 +52,43 @@ export function coversHashed(path: string): boolean {
   return isHashed(p) || roots.some((root) => root === p || root.startsWith(`${p}/`));
 }
 
-/** True for every path an item or Define pull request may not touch. */
-export function isProtected(path: string): boolean {
+/** True for every path an item pull request, or with `define` Define's, may not touch. */
+export function isProtected(path: string, { define = false } = {}): boolean {
   const p = normalise(path);
-  return isHashed(p) || UNHASHED_FILES.includes(p) || UNHASHED_NAMES.includes(posix.basename(p));
+  if (p === BRIEF_PATH) return !define;
+  const name = posix.basename(p).toLowerCase();
+  return isHashed(p) || UNHASHED_FILES.includes(p) || UNHASHED_NAMES.includes(name);
+}
+
+/**
+ * Whether `target`, imported or linked from the file at `path`, names a path outside the protected
+ * set: one in the home folder, absolute, outside the repository, or one a pull request may change,
+ * the brief included, since Define's may.
+ */
+export function outsideProtected(path: string, target: string): boolean {
+  if (/^[~/]/.test(target)) return true;
+  const resolved = posix.normalize(posix.join(posix.dirname(normalise(path)), target));
+  return (
+    resolved === '..' || resolved.startsWith('../') || !isProtected(resolved, { define: true })
+  );
+}
+
+/** Code spans and fenced blocks, where Claude Code reads no `@` import; each becomes a space. */
+const CODE = /^(`{3,}|~{3,})[^\n]*\n[\s\S]*?^\1[^\n]*$|`[^`\n]*`/gm;
+/** An `@` after any character no path holds, and the token after it. */
+const IMPORT = /(?<![\p{L}\p{N}_.~/\\+%-])@([^\s`]+)/gu;
+
+/**
+ * The `@` imports in the `CLAUDE.md` at `path` that name a path outside the protected set. Erring
+ * toward flagging, a token counts with and without its trailing punctuation: `@.factory/config.`
+ * is flagged, though `.factory/config` is protected.
+ */
+export function importsOutside(path: string, text: string): string[] {
+  return [...text.replace(CODE, ' ').matchAll(IMPORT)].flatMap(([, raw = '']) => {
+    const trimmed = raw.replace(/[.,;:!?)\]}*_'"]+$/, '');
+    if (trimmed !== '' && outsideProtected(path, trimmed)) return [trimmed];
+    return outsideProtected(path, raw) ? [raw] : [];
+  });
 }
 
 const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');

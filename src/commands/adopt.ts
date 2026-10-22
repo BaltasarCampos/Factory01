@@ -8,6 +8,8 @@ import { join } from 'node:path';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { cloneRepo, visibility } from '../github/repo.js';
+import { gitOut } from '../git/answers.js';
+import { importsOutside, isClaudeMd, isHashed, outsideProtected } from '../install/manifest.js';
 import {
   CONFIG_PATH,
   createDefineBranch,
@@ -16,6 +18,7 @@ import {
 } from '../install/project.js';
 import { parseConfig } from '../model/config.js';
 import { formatReleasePin } from '../model/naming.js';
+import { visible } from '../notify/summary.js';
 import {
   askConsent,
   commitAndPush,
@@ -25,6 +28,65 @@ import {
   startDefine,
   verifiedRelease,
 } from './new.js';
+
+const SYMLINK = '120000';
+const GITLINK = '160000';
+
+/**
+ * Every session loads each `CLAUDE.md` and `CLAUDE.local.md` (T173), in any letter case: what the
+ * Owner sees of those on main before consenting. Their text is untrusted, so every quoted line is
+ * prefixed and goes through `visible()`; a symlink shows its target, which counts as an import;
+ * each import outside the protected set is flagged, under a heading that gives their count. Any git
+ * failure throws, never reading as no file, and a gitlink by those names refuses adopt.
+ */
+export function claudeMdShown(workdir: string, env: NodeJS.ProcessEnv): string {
+  const git = (args: readonly string[]) => gitOut(workdir, args, env);
+  const found = git(['ls-tree', '-r', '-z', 'HEAD'])
+    .split('\0')
+    .flatMap((entry) => {
+      const tab = entry.indexOf('\t');
+      const path = entry.slice(tab + 1);
+      const [mode = '', , oid = ''] = entry.slice(0, tab).split(' ');
+      return tab >= 0 && isClaudeMd(path) ? [{ path, mode, oid }] : [];
+    });
+  if (found.length === 0) return '';
+  const out = ['Every agent session loads each CLAUDE.md and CLAUDE.local.md. On main now:'];
+  const flagged: string[] = [];
+  for (const { path, mode, oid } of found) {
+    const name = visible(path);
+    if (mode === GITLINK)
+      throw new RefusedError(
+        `${name} is a submodule; adopt needs each CLAUDE.md and CLAUDE.local.md to be a file`,
+      );
+    // Install removes or replaces what lies in a hashed folder, such as `.claude/`.
+    const kept = !isHashed(path);
+    out.push(
+      '',
+      `${name}: ${kept ? 'stays on main as it is' : "install replaces it with the release's files"}`,
+    );
+    const text = git(['cat-file', 'blob', oid]);
+    if (mode === SYMLINK) {
+      out.push(`  a symlink to ${visible(text)}`);
+      if (kept && outsideProtected(path, text)) flagged.push(`${name} links to ${visible(text)}`);
+      continue;
+    }
+    out.push(
+      ...text
+        .replace(/\n$/, '')
+        .split('\n')
+        .map((line) => `│ ${visible(line)}`),
+    );
+    if (kept)
+      flagged.push(...importsOutside(path, text).map((t) => `${name} imports ${visible(t)}`));
+  }
+  const count = flagged.length === 0 ? 'none' : String(flagged.length);
+  out.push(
+    '',
+    `Imports outside the protected set, which can change what every session reads: ${count}`,
+    ...flagged.map((f) => `- ${f}`),
+  );
+  return out.join('\n');
+}
 
 export async function adopt(ctx: CommandContext): Promise<number> {
   const repo = ctx.positionals[0] ?? '';
@@ -69,6 +131,10 @@ export async function adopt(ctx: CommandContext): Promise<number> {
     if (head.ok && branch !== 'main')
       throw new RefusedError(`${repo}'s default branch is ${branch}; the factory works on main`);
     if (!head.ok) git(workdir, ['symbolic-ref', 'HEAD', 'refs/heads/main'], ctx.env);
+    else {
+      const shown = claudeMdShown(workdir, ctx.env);
+      if (shown !== '') ctx.io.stdout.write(`${shown}\n\n`);
+    }
 
     const release = verifiedRelease(ctx.env, home, scratch);
     const agents = await askConsent(ctx);

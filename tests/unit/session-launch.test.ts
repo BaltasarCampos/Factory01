@@ -151,6 +151,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     ['a settings.local.json', { '.claude/settings.local.json': '{}\n' }],
     ['a new .mcp.json', { '.mcp.json': '{"mcpServers":{}}\n' }],
     ['changed hooks', { '.claude/settings.json': '{"hooks":{}}\n' }],
+    ['a .specify/ file the release does not ship (T173)', { '.specify/feature.json': '{}\n' }],
   ])('refuses the launch, urgent, when the branch has %s', async (_name, branchFiles) => {
     const t = setup({ branchFiles });
 

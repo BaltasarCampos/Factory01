@@ -436,14 +436,20 @@ write it.
 `guardrails.manifest.json` in each factory release, built and signed into the tag by
 `factory release`: `{ "release": "v1.0.0", "commit": "<sha>", "files": { "<path>": "<sha256>" } }`.
 
-Protected paths (refused in any item or Define pull request):
+Protected paths (refused in any item pull request, and in a Define pull request all but the
+brief):
 
 - hashed against the manifest: `.claude/**`, `.mcp.json`, `.claude/hooks/**`,
-  `.github/workflows/**`, `.specify/memory/constitution.md`, `.factory/lockfile-policy`;
+  `.github/workflows/**`, `.specify/**` (the constitution included), `.factory/lockfile-policy`;
 - not hashed (content is per project or must never appear): `.factory/config` (rules in
-  § Project config), and `.gitattributes` / `.gitmodules` anywhere in the tree (files already
-  on main, for example in an adopted repo, stay allowed; pull requests may not add, change or
-  delete them).
+  § Project config), and `.gitattributes`, `.gitmodules`, `CLAUDE.md` and `CLAUDE.local.md`
+  anywhere in the tree (files already on main, for example in an adopted repo, stay and are
+  frozen; pull requests may not add, change or delete them). `factory adopt` shows each
+  `CLAUDE.md` and `CLAUDE.local.md` to the Owner, since every session loads it, flagging each
+  `@import` of a path outside the protected set;
+- `.factory/brief.md`, not hashed: only a Define pull request may change it; item, log and
+  upgrade pull requests that touch it are refused, and the session-start check treats a
+  branch's own change to it as tampering, except on `claude/define`.
 
 CI never runs the project's own test, lint or scan configuration: workflows call
 `factory ci test|coverage|lint|scan|red-green`, built from the pinned release commit, with the

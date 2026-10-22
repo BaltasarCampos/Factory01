@@ -8,6 +8,21 @@
 
 **Note**: This template is filled in by the `/speckit-plan` command; its definition describes the execution workflow.
 
+## Clarifications
+
+<!--
+  Only when Plan asks the Owner; delete this section otherwise. At most five questions in all,
+  the most important first, numbered on from the highest question in spec.md and plan.md, each
+  in the spec's form. A question asked after the Owner's answers is a follow-up,
+  `- Q<n> (follow-up): …`, and there is one follow-up round. The Owner answers in the feature's
+  answers.md; Plan applies each answer as ` → A: <answer>` at the end of its question's line.
+-->
+
+- Q[n]: [a full question, ending with a question mark]
+  - Why it matters: [one sentence]
+  - Options: A) … B) … C) … (or: a short answer, at most five words)
+  - Recommended: [option], because [one sentence]
+
 ## Summary
 
 [Extract from feature spec: primary requirement + technical approach from research]
@@ -38,6 +53,17 @@ constitution amendment)
 **Constraints**: [domain-specific, e.g., <200ms p95, offline-capable or N/A]
 
 **Scale/Scope**: [domain-specific, e.g., 10k users, 50 screens or NEEDS CLARIFICATION]
+
+## Assumptions
+
+<!--
+  The defaults Plan took instead of asking: a question past the follow-up round, with its
+  recommended option, and low-impact defaults. Any gap that changes user-visible behavior, cost
+  or risk is a question under Clarifications instead (Principle I). Write "None" if Plan took
+  no default.
+-->
+
+- [The default taken, and why it is low-impact]
 
 ## Plan Usage Budget
 
@@ -80,7 +106,7 @@ with Owner approval).
 | IV | Independent Agent Review | Review by a separate fresh session planned; tier 3: second independent review planned | [ ] |
 | V | Frugal by Design | Usage budget stated above; no API credits or new paid services; dependencies minimal and justified | [ ] |
 | VI | Traceable and Observable Work | Trace links request → spec → plan → tasks are present; commits carry `Factory-Role:` and `Factory-Item:`; events are written by the hooks to `events.jsonl` (never by hand); structured logs and health signals for new behavior are planned | [ ] |
-| VII | Bounded Autonomy and Safe Operations | No guardrail file changes (`.claude/`, `.mcp.json`, hooks, `.github/workflows/`, `.factory/config`, constitution, lockfile policy, `.gitattributes`, `.gitmodules`) — `factory merge` refuses any pull request that touches them; pushes only to the branch named in the station prompt; no secrets; new dependencies gated; irreversible actions flagged for the Owner; rollback path defined (tier 3: written and tested) | [ ] |
+| VII | Bounded Autonomy and Safe Operations | No guardrail file changes (`.claude/`, `.mcp.json`, hooks, `.github/workflows/`, `.factory/config`, `.factory/brief.md`, all of `.specify/` with the constitution, lockfile policy, and every `.gitattributes`, `.gitmodules`, `CLAUDE.md` and `CLAUDE.local.md`) — `factory merge` refuses any item pull request that touches them; pushes only to the branch named in the station prompt; no secrets; new dependencies gated; irreversible actions flagged for the Owner; rollback path defined (tier 3: written and tested) | [ ] |
 | VIII | Fresh Context, File Hand-offs | Each task fits one fresh session; hand-offs only via repository artifacts | [ ] |
 | IX | Learning Within Limits | Relevant `.factory/lessons/` entries consulted; no changes to gates, permissions or budgets | [ ] |
 | — | Risk tier and lane | Tier matches the spec (agents never lower it); lane allowed for the tier | [ ] |
