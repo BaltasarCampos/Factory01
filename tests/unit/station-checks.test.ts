@@ -368,6 +368,9 @@ describe('Plan output check (AC-011)', () => {
     expect(why(plan({ plan: placeholder }).missing)).toMatch(
       /plan\.md: ## Assumptions still holds the template's placeholder/,
     );
+    // Only the template's own line: a bracketed default or a reference link passes.
+    for (const line of ['- [Default] Postgres, see [R2]', '- [ADR-0007][adr]'])
+      expect(plan({ plan: PLAN().replace('- None', line) }).missing, line).toEqual([]);
     expect(plan().missing).toEqual([]);
   });
 

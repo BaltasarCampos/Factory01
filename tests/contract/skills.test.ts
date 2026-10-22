@@ -228,6 +228,10 @@ describe('the release’s templates and this repository’s overrides (T173)', (
       .filter((l) => l.startsWith('## '));
     expect(headings.slice(0, 2)).toEqual(['## Clarifications', '## Summary']);
     expect(headings).toContain('## Assumptions');
+    // The exact line Plan's check refuses as the placeholder.
+    expect(template('plan-template.md').split('\n')).toContain(
+      '- [The default taken, and why it is low-impact]',
+    );
     const plan = readFileSync(join(FACTORY, 'skills', 'speckit-plan', 'SKILL.md'), 'utf8');
     expect(plan).toMatch(/delete\s+`## Clarifications` when you ask nothing/);
     expect(plan).toMatch(/`## Assumptions`:/);

@@ -21,6 +21,9 @@ export interface PlanInput {
   answers?: ReadonlyMap<number, string>;
 }
 
+/** The template's own placeholder line, refused by its exact text so a bracketed default passes. */
+const ASSUMPTION_PLACEHOLDER = '- [The default taken, and why it is low-impact]';
+
 function planProblems(plan: string, sizeLimit: number): string[] {
   const missing: string[] = [];
   const cell = /^\|\s*Estimated changed lines\s*\|([^|\n]*)\|/im.exec(plan)?.[1]?.trim() ?? '';
@@ -47,7 +50,7 @@ function planProblems(plan: string, sizeLimit: number): string[] {
     missing.push('plan.md: no ## Assumptions; write None when Plan took no default');
   else if (assumptions.trim() === '')
     missing.push('plan.md: ## Assumptions is empty; write None when Plan took no default');
-  else if (/^\s*-\s*\[.*\]\s*$/m.test(assumptions))
+  else if (assumptions.split('\n').some((l) => l.trim() === ASSUMPTION_PLACEHOLDER))
     missing.push("plan.md: ## Assumptions still holds the template's placeholder");
   return missing;
 }
