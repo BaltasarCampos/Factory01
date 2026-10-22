@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
@@ -55,9 +55,9 @@ const labeled = (name: string) => ({
   created_at: BEFORE,
 });
 
-function approvalBody(tier: Tier): string {
+function approvalBody(tier: Tier, more: Partial<ApprovalRecord> = {}): string {
   const record: ApprovalRecord = {
-    ...{ repo: REPO, issue: ISSUE, gate: 'approved', tier, branch: BRANCH },
+    ...{ repo: REPO, issue: ISSUE, gate: 'approved', tier, branch: BRANCH, ...more },
     ...{ timestamp: BEFORE, nonce: randomBytes(16).toString('hex') },
   };
   return renderComment(record, sign(record, owner.privateKey, { stdinIsTTY: true }));
@@ -788,6 +788,20 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     expect(done.needsSession).toBe(false);
   });
 
+  it('T181: at tier 2, a current Security report without a current review runs the Reviewer', async () => {
+    const t = setup({ branch: { ...CREATED, ...SECURE } });
+    expect(await gather(t, 'verifying')).toMatchObject({
+      verifyRole: 'reviewer',
+      needsSession: true,
+    });
+    expect(await gather(t, 'verifying')).not.toHaveProperty('verifyEnded');
+
+    later(t, REVIEW);
+    const done = await gather(t, 'verifying');
+    expect(done.verifyRole).toBeUndefined();
+    expect(done.verifyEnded).toBe(true);
+  });
+
   it('T181: at tier 1 the Reviewer alone: once the review is written, no Verify session is left', async () => {
     const t = setup({ branch: { ...CREATED, ...REVIEW } });
     const e = await gather(t, 'verifying', { tier: 1 });
@@ -1010,6 +1024,71 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
 
     expect(alerts()).toEqual([`info ${red(first)}`, `info ${red(second)}`]);
     expect(t.labels()).toContain('state:verifying');
+  });
+
+  /** An item at Verify with a failing review, at `tier`, its required checks green at its head. */
+  const failingReview = (tier: Tier) => {
+    const factory = factoryClone();
+    // Tier 2 needs the Owner's approval of this spec.md to start a session.
+    const spec = createHash('sha1').update(`blob ${String(Buffer.byteLength(SPEC))}\0${SPEC}`);
+    const more = { gate: 'spec-approved' as const, spec_sha: spec.digest('hex') };
+    const t = setup({
+      ...{ tier, pin: `v1.0.0@${factory.sha}` },
+      states: ['state:verifying', ...(tier > 1 ? ['owner:spec-approved'] : [])],
+      comments: tier > 1 ? [{ body: approvalBody(tier, more), createdAt: BEFORE }] : [],
+      branch: {
+        ...SPECIFIED,
+        [`${FEATURE}/reports/verify.md`]: '| Check | Result |\n|---|---|\n| Review | fail |\n',
+      },
+    });
+    t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path, factory: factory.path });
+    openPr();
+    const green = () => {
+      actionsAt(tipOf(t), ITEM_JOBS);
+    };
+    green();
+    const alerts = () =>
+      t.inbox().flatMap((c) => {
+        const a = parseAlert({ ...c, id: String(c.id) });
+        return a?.kind === 'verify-failed' ? [`${a.urgency} ${a.text}`] : [];
+      });
+    const failed = (tip: string) =>
+      `info #2: reports/verify.md does not pass at ${tip.slice(0, 12)}; Verify's sessions for its tier have ended and nothing sends it back to Build yet: close this item and file it again`;
+    return { t, green, alerts, failed };
+  };
+
+  it('T181: a failing tier 1 review alerts once, and a second pass at the same head nothing new', async () => {
+    const { t, alerts, failed } = failingReview(1);
+
+    await dispatchOnce(t.ctx);
+    await dispatchOnce(t.ctx);
+
+    expect(alerts()).toEqual([failed(tipOf(t))]);
+    expect(t.local.launches).toEqual([]);
+    expect(t.labels()).toContain('state:verifying');
+  });
+
+  it('T181: a failing tier 2 review alerts only once Security has ended', async () => {
+    const { t, green, alerts, failed } = failingReview(2);
+
+    await dispatchOnce(t.ctx);
+    expect(t.local.launches).toMatchObject([{ station: 5, role: 'security' }]);
+    green();
+    await dispatchOnce(t.ctx);
+    expect(alerts()).toEqual([]);
+
+    // Security's session follows its manifest, which went straight to origin.
+    t.project.git(['branch', '-f', BRANCH, `origin/${BRANCH}`]);
+    t.project.checkout(BRANCH);
+    t.project.commit({ [`${FEATURE}/reports/security.md`]: SECURITY }, 'Security report');
+    t.project.push(BRANCH);
+    t.project.checkout('main');
+    green();
+    await dispatchOnce(t.ctx);
+    await dispatchOnce(t.ctx);
+
+    expect(alerts()).toEqual([failed(tipOf(t))]);
+    expect(t.local.launches).toHaveLength(1);
   });
 });
 

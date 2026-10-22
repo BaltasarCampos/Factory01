@@ -250,6 +250,25 @@ describe('transition table rows (data-model.md § State machine)', () => {
     expect(next('verifying', open)).toMatchObject({ reason: 'reports/security.md does not pass' });
   });
 
+  it('a failing Verify result alerts once per head, only once Verify’s sessions have ended (T181)', () => {
+    const ready = { ...verified, verifyReport: true, findingsResolved: true, securityReport: true };
+    const failing = { ...ready, verifyReport: false };
+    expect(next('verifying', failing)).toEqual({
+      ok: false,
+      reason: 'reports/verify.md does not pass',
+    });
+    const ended = (e: Evidence, reason: string) => {
+      const text = `${reason} at 1c9d0e5f6a7b; Verify's sessions for its tier have ended and nothing sends it back to Build yet: close this item and file it again`;
+      expect(next('verifying', { ...e, verifyEnded: true })).toEqual({
+        ...{ ok: false, reason: text },
+        alert: { urgency: 'info', kind: 'verify-failed', text },
+      });
+    };
+    ended(failing, 'reports/verify.md does not pass');
+    ended({ ...ready, findingsResolved: false }, 'blocking review findings open');
+    ended({ ...ready, securityReport: false }, 'reports/security.md does not pass');
+  });
+
   it('integrating → releasing only on an Owner-signed merge of the checked head', () => {
     moves('integrating', { ...gated, ownerMerge: true }, 'releasing');
     stays('integrating', gated);

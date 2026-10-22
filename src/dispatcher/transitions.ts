@@ -64,6 +64,8 @@ export interface Evidence {
   verifyReport?: boolean;
   /** No blocking finding is open in `reports/verify.md`. */
   findingsResolved?: boolean;
+  /** Every Verify session the Owner's tier needs has ended, and none is pending (T181). */
+  verifyEnded?: boolean;
   /** `reports/security.md` is on the branch; true when it is complete with no finding open. */
   securityReport?: boolean;
   /** Main has an Owner-signed merge commit of the item's checked head. */
@@ -209,13 +211,13 @@ function forward(state: State, e: Evidence): Decision {
     case 'verifying': {
       const waits = checksWait(e);
       if (waits) return waits;
-      if (!e.verifyReport) return stay('reports/verify.md does not pass');
-      if (!e.findingsResolved) return stay('blocking review findings open');
+      if (!e.verifyReport) return verifyFailed(e, 'reports/verify.md does not pass');
+      if (!e.findingsResolved) return verifyFailed(e, 'blocking review findings open');
       // The Lean lane gives tier 1 no Security session; an unknown tier is held as the highest.
       const tier = ownerRecord(e, 'approved')?.tier ?? 3;
       if (e.securityReport === undefined && tier > 1)
         return stay(`no reports/security.md, which tier ${String(tier)} needs`);
-      if (e.securityReport === false) return stay('reports/security.md does not pass');
+      if (e.securityReport === false) return verifyFailed(e, 'reports/security.md does not pass');
       return move('integrating', 'required checks green, review passes, no finding open');
     }
     case 'integrating':
@@ -253,6 +255,17 @@ function checksWait(e: Evidence): Decision | undefined {
   }
   if (running.length > 0) return stay(`required checks not finished at ${at}: ${named(running)}`);
   return undefined;
+}
+
+/**
+ * A failing Verify result holds the item. Once every Verify session its tier needs has ended
+ * (T181), nothing runs again and nothing routes it back to Build before T096, so the Owner is told,
+ * one alert per head, with the way out until then.
+ */
+function verifyFailed(e: Evidence, reason: string): Decision {
+  if (!e.verifyEnded || e.branchHead === undefined) return stay(reason);
+  const text = `${reason} at ${e.branchHead.slice(0, 12)}; Verify's sessions for its tier have ended and nothing sends it back to Build yet: close this item and file it again`;
+  return { ...stay(text), alert: { urgency: 'info', kind: 'verify-failed', text } };
 }
 
 const question = (text: string): DecisionAlert => ({ urgency: 'info', kind: 'question', text });

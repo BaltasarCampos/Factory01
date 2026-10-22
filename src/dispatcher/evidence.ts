@@ -112,9 +112,10 @@ export function nextVerifyRole(
   ended: { tested: () => boolean; reviewed: boolean; secured: boolean },
 ): RoleName | undefined {
   if (tier === 1) return ended.reviewed ? undefined : 'reviewer';
-  if (ended.secured) return undefined;
-  if (ended.reviewed) return 'security';
-  return ended.tested() ? 'reviewer' : 'test';
+  // Done only once both reports are current: a current Security report with no current review
+  // means Test has ended, so the Reviewer runs.
+  if (ended.reviewed) return ended.secured ? undefined : 'security';
+  return ended.secured || ended.tested() ? 'reviewer' : 'test';
 }
 
 export function gatherEvidence(ctx: EvidenceContext) {
@@ -205,6 +206,16 @@ export function gatherEvidence(ctx: EvidenceContext) {
             reviewed: verify !== undefined,
             secured: security !== undefined,
           });
+    // The session the dispatcher last issued has pushed nothing yet: do not start another.
+    const pending =
+      tip !== undefined && pendingManifest(at, tip)?.station === STATION_OF[item.state];
+    // Every Verify session the tier needs has ended, so a failing result is the Owner's to hear.
+    const verifyEnded =
+      item.state === 'verifying' &&
+      tip !== undefined &&
+      item.tier !== undefined &&
+      verifyRole === undefined &&
+      !pending;
     const work: Partial<Record<State, boolean>> = {
       triaged: !specComplete,
       'spec-approved': !planComplete,
@@ -212,9 +223,6 @@ export function gatherEvidence(ctx: EvidenceContext) {
       verifying: verifyRole !== undefined,
       integrating: integrate === undefined,
     };
-    // The session the dispatcher last issued has pushed nothing yet: do not start another.
-    const pending =
-      tip !== undefined && pendingManifest(at, tip)?.station === STATION_OF[item.state];
     const rg = checked ? await redGreen(config.repo, tip, options) : undefined;
     const ci =
       checked && item.state === 'verifying'
@@ -230,6 +238,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(tip === undefined ? {} : { branchHead: tip }),
       ...asked,
       ...(verifyRole === undefined ? {} : { verifyRole }),
+      ...(verifyEnded ? { verifyEnded } : {}),
       ...('tampered' in signed ? { answersTampered: signed.tampered } : {}),
       ...(rg === undefined ? {} : { redGreen: rg }),
       ...(review === undefined ? {} : { verifyReport: review.checksPass }),
