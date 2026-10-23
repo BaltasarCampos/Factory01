@@ -19,6 +19,8 @@ export interface RolePolicy {
   shell: string[];
   /** Command prefixes always refused for the role, on top of `denyShell`. */
   blocked: string[];
+  /** The hosts the role's sandboxed shell may reach (T183). */
+  network: string[];
   branch: (typeof BRANCHES)[number];
 }
 
@@ -32,7 +34,8 @@ export interface Policy {
   keepTools: Record<string, string>;
 }
 
-const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'branch'];
+const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'network', 'branch'];
+const HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 const TOP_KEYS = ['roles', 'deny_write', 'deny_read', 'deny_shell', 'keep_tools'];
 
 const refuse = (why: string) => new RefusedError(`roles.yaml: ${why}`);
@@ -69,12 +72,18 @@ function rolePolicy(role: RoleName, value: unknown): RolePolicy {
     throw refuse(
       shell.length > 0 ? `${role}: a shell without Bash` : `${role}: Bash with no shell`,
     );
+  const network = strings(row.network, `${role}: network`);
+  if (network.length > 0 && !tools.includes('Bash'))
+    throw refuse(`${role}: a network without Bash`);
+  if (network.some((host) => !HOST.test(host)))
+    throw refuse(`${role}: network has a host that is not a plain name`);
   const branch = row.branch;
   if (typeof branch !== 'string' || !(BRANCHES as readonly string[]).includes(branch))
     throw refuse(`${role}: branch ${String(branch)} is not one of ${BRANCHES.join(', ')}`);
   return {
     ...{ tools: tools as RolePolicy['tools'], write, shell },
     blocked: strings(row.blocked, `${role}: blocked`),
+    network,
     branch: branch as RolePolicy['branch'],
   };
 }

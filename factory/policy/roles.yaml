@@ -10,6 +10,8 @@
 #          changes a pull request: the launcher fetches before the session, and the factory
 #          pushes from the Stop hook and opens and readies pull requests (T183, T086).
 # blocked: command prefixes always refused for the role, on top of deny_shell.
+# network: the hosts the role's sandboxed shell may reach (T183): the package registry for roles
+#          that install or audit, `api.github.com` for roles with `gh` in their shell; no other.
 # branch:  where the role's work may be pushed: `item` (the branch `.station.json` names),
 #          `claude/factory-log`, `claude/define` or `none`. Roles that commit nothing push
 #          nothing themselves; the Stop hook commits their output there (T086).
@@ -19,18 +21,21 @@ roles:
     write: ['**']
     shell: [npm, git, gh issue]
     blocked: [git rebase, git reset, git commit --amend]
+    network: [registry.npmjs.org, api.github.com]
     branch: claude/define
   intake:
     tools: [Read, Grep, Glob, Bash]
     write: []
     shell: [gh issue]
     blocked: []
+    network: [api.github.com]
     branch: none
   spec:
     tools: [Read, Grep, Glob, Write]
     write: ['{feature}/spec.md', '{feature}/checklists/requirements.md']
     shell: []
     blocked: []
+    network: []
     branch: item
   planner:
     tools: [Read, Grep, Glob, Write]
@@ -43,6 +48,7 @@ roles:
       - '{feature}/tasks.md'
     shell: []
     blocked: []
+    network: []
     branch: item
   builder:
     tools: [Read, Write, Edit, Bash, Grep, Glob, Agent]
@@ -50,24 +56,28 @@ roles:
     write: ['{task}']
     shell: [npm, npx vitest, vitest, git]
     blocked: [git rebase, git reset, git commit --amend]
+    network: [registry.npmjs.org]
     branch: item
   test:
     tools: [Read, Grep, Glob, Write, Edit, Bash]
     write: ['{task:tests}']
     shell: [npm test, npm run test, npx vitest, vitest]
     blocked: []
+    network: [registry.npmjs.org]
     branch: item
   reviewer:
     tools: [Read, Grep, Glob, Bash, Write]
     write: ['{feature}/reports/verify.md']
     shell: [git diff, gh pr comment]
     blocked: [gh pr review]
+    network: [api.github.com]
     branch: item
   security:
     tools: [Read, Grep, Glob, Bash, Write]
     write: ['{feature}/reports/security.md']
     shell: [semgrep, gitleaks, npm audit]
     blocked: []
+    network: [registry.npmjs.org]
     branch: item
   integrator:
     tools: [Read, Bash, Write]
@@ -81,24 +91,28 @@ roles:
       - gh pr view
       - gh pr checks
     blocked: [gh pr review, git commit, git rebase, git reset, git commit --amend]
+    network: [api.github.com]
     branch: item
   release:
     tools: [Read, Write, Bash]
     write: ['.factory/releases/**']
     shell: [git log, git show, git diff]
     blocked: [gh release, git tag]
+    network: []
     branch: claude/factory-log
   ops:
     tools: [Read, Grep, Glob, Bash, Write]
     write: ['.factory/ops/**']
     shell: [gh issue]
     blocked: []
+    network: [api.github.com]
     branch: claude/factory-log
   coach:
     tools: [Read, Grep, Glob, Write, Bash]
     write: ['.factory/lessons/**']
     shell: [gh pr view, gh pr list]
     blocked: []
+    network: [api.github.com]
     branch: claude/factory-log
 
 # Paths no role may Write or Edit (FR-6.4, T173): the guardrail files, the station manifest and
