@@ -111,10 +111,11 @@ describe('the role permission table (T074, T081)', () => {
     }
   });
 
-  it('denies every role reading the approval key, credentials and .env files (T183)', () => {
+  it('denies every role reading the approval key, credentials, git config, sessions and .env files (T183)', () => {
     expect(policy.denyRead).toEqual([
       ...['~/.factory/**', '~/.ssh/**', '~/.config/gh/**', '~/.git-credentials', '~/.netrc'],
-      ...['~/.npmrc', '~/.gnupg/**', '~/.claude/.credentials.json', '**/.env*'],
+      ...['~/.npmrc', '~/.gnupg/**', '~/.claude/.credentials.json', '~/.claude.json'],
+      ...['~/.claude/projects/**', '~/.gitconfig', '~/.config/git/**', '**/.env*'],
     ]);
   });
 
