@@ -81,6 +81,17 @@ describe('the sandbox settings for session shells (T183)', () => {
     expect(at({ tmp: '/var/tmp/factory-42' })).not.toThrow();
   });
 
+  it('refuses an opened folder that holds another, which would open every other session’s clone', () => {
+    const at = (change: Partial<typeof session>) => () =>
+      renderSandbox(policy, 'builder', { ...session, ...change });
+    const work = `${HOME}/factory-work`;
+    expect(at({ tmp: work })).toThrow(new RegExp(`${work} holds the opened folder ${CLONE}`));
+    expect(at({ tools: [NODE, `${work}/owner`] })).toThrow(
+      new RegExp(`${work}/owner holds the opened folder ${CLONE}`),
+    );
+    expect(at({ tools: [NODE, `${NODE}/bin`] })).toThrow(/holds the opened folder/);
+  });
+
   it('runs only the role’s shell column, through Claude Code’s own matcher, not every sandboxed command', () => {
     for (const role of ROLES) {
       const row = policy.roles[role];
