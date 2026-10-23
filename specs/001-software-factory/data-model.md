@@ -402,7 +402,9 @@ count toward `retry_limit`; attempts are the gate failures the dispatcher saw it
 Permission row in `.claude/settings.json` and in `src/guard/policy.ts` (generated from one
 source table, `factory/policy/roles.yaml`). Twelve roles, fixed set.
 
-Each role row has a `branch` field naming where the role may push:
+Each role row has a `branch` field naming the branch its work goes to. No session pushes: once a
+session ends, the launcher pushes the head the Stop hook recorded in the dispatcher's clone,
+fast-forward only, with the Owner's own git credentials (Owner decision 2026-10-23):
 
 | `branch` | Roles | Allowed push target |
 |----------|-------|---------------------|
