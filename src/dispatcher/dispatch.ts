@@ -465,7 +465,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     const ref: ItemRef = { issue: item.issue.number, branch };
     createItemBranch(git, ref, comments, mainRef);
     await ensureDraftPr(repo, { ...ref, title: item.issue.title }, options);
-    writeStationManifest(git, ref, { station, role });
+    writeStationManifest(git, ref, { station, role }, mainRef);
   }
   const answersFor = (file: QuestionFile | undefined) => {
     const answers = file === undefined ? [] : ownerAnswers(git, branch, file, keys, mainRef);

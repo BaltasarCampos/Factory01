@@ -1221,15 +1221,77 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
     });
 
     /** An item in Build with every task ticked and a current conflict report from Integrate. */
-    const conflicted = (config?: string) =>
-      setup({
+    /**
+     * An item in Build with every task ticked and a current conflict report listing `listed`;
+     * main then adds each of `conflicts` differently from the branch, signed by the Owner.
+     */
+    const conflicted = (
+      config?: string,
+      { listed = ['src/login.ts'], conflicts = ['src/login.ts'] } = {},
+    ) => {
+      const t = setup({
         ...{ tier: 1, states: ['state:building'] },
         ...(config === undefined ? {} : { config }),
         branch: {
           ...{ ...SPECIFIED, [TASKS_MD]: TASKS.replace(/- \[ \]/g, '- [X]') },
-          [`${FEATURE}/reports/integrate.md`]: '## Conflicts\n\n- `src/login.ts`\n',
+          ...Object.fromEntries(conflicts.map((path) => [path, 'branch\n'])),
+          [`${FEATURE}/reports/integrate.md`]: `## Conflicts\n\n${listed.map((p) => `- \`${p}\`\n`).join('')}`,
         },
       });
+      if (conflicts.length > 0) {
+        t.project.commit(
+          Object.fromEntries(conflicts.map((path) => [path, 'main\n'])),
+          'Main moved',
+          { signWith: owner },
+        );
+        t.project.push('main');
+      }
+      return t;
+    };
+
+    it('T174: the conflict session takes the files git finds conflicted, not the ones the report lists', async () => {
+      const listed = ['src/login.ts', 'src/extra.ts'];
+      const t = conflicted(undefined, { listed, conflicts: ['src/login.ts', 'src/other.ts'] });
+      await dispatchOnce(t.ctx);
+
+      const manifest = JSON.parse(t.show(`${FEATURE}/.station.json`)) as { files?: string[] };
+      // An extra file the report lists is left out; a conflict main gained later is in.
+      expect(manifest.files).toEqual(['src/login.ts', 'src/other.ts']);
+    });
+
+    it('T174: a conflict report git cannot confirm issues no session, with one alert', async () => {
+      const t = conflicted(undefined, { conflicts: [] });
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toEqual([]);
+      expect(alerts(t, 'build-failed')).toEqual([
+        `info #2: reports/integrate.md lists conflicts with main, but git merges origin/main into ${BRANCH} at ${tipOf(t).slice(0, 12)} with none, so no conflict session is issued; nothing sends it on before T096: close this item and file it again`,
+      ]);
+    });
+
+    it('T174: a git failure reading tasks.md stops the manifest, never reads as a conflict session', async () => {
+      const t = conflicted();
+      const at = { projectDir: t.project.path, now: () => new Date() };
+      await failingGit('ls-tree', () => {
+        const write = () =>
+          writeStationManifest(
+            at,
+            { issue: ISSUE, branch: BRANCH },
+            { station: 4, role: 'builder' },
+          );
+        expect(write).toThrow(/git ls-tree .* failed: fatal: injected/);
+        return Promise.resolve();
+      });
+    });
+
+    it('T174: a merge-tree that fails stops the pass and issues nothing', async () => {
+      const t = conflicted();
+      await failingGit('merge-tree', async () => {
+        await expect(dispatchOnce(t.ctx)).rejects.toThrow(/git merge-tree failed: fatal: injected/);
+      });
+      expect(t.local.launches).toEqual([]);
+    });
 
     it('T174: a current conflict report starts a Build session with no task and the listed files, which the Builder’s merge ends', async () => {
       const t = conflicted();

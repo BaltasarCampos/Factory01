@@ -70,7 +70,12 @@ function mergeProblems(cwd: string, sha: string, parents: string[], files: reado
   if (!answer(cwd, ['merge-base', '--is-ancestor', theirs, 'origin/main']).ok)
     return [`merges ${theirs.slice(0, 12)}, which is not on origin/main`];
   // Exit 1 is a merge with conflicts; its tree holds them, so resolving them shows as a change.
+  // git 2.39 also exits 1 on a commit it cannot read: only a merge result counts.
   const auto = answer(cwd, ['merge-tree', '--write-tree', ours, theirs]).out.split('\n')[0] ?? '';
+  if (!/^[0-9a-f]{40,64}$/.test(auto))
+    throw new EnvironmentError(
+      `git merge-tree gave no merge of ${ours.slice(0, 12)} and ${theirs.slice(0, 12)}`,
+    );
   return changed(cwd, auto, sha)
     .filter((p) => !files.includes(p))
     .map((p) => `${p}: changed beyond git's own merge, and not a file reports/integrate.md lists`);

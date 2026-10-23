@@ -66,10 +66,6 @@ function conflictEntries(report: string): string[] {
     .filter((l) => !/^none\.?$/i.test(l));
 }
 
-/** The conflicted files Integrate's report lists, which the conflict Build session resolves (T174). */
-export const conflictFiles = (report: string) =>
-  conflictEntries(report).flatMap((entry) => /^`?([^`\s:]+)/.exec(entry)?.[1] ?? []);
-
 /** The route back to Build when Integrate's report lists conflicts, else undefined. */
 export function conflictFailure(report: string): Failure | undefined {
   const conflicts = conflictEntries(report);
