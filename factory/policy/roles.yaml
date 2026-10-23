@@ -1,0 +1,160 @@
+# The role permission table (T081): the design's Tools and permissions table (v1.8), the
+# `branch` column of data-model.md § Role, and the denials common to every role. It is the one
+# source for the generated `.claude/settings.json` and the guards; src/guard/policy.ts reads it
+# and refuses anything it does not expect. Each role's `tools` equal its role file's.
+#
+# write:   paths the role may Write or Edit. `{feature}` is the item's feature folder,
+#          `specs/<issue>-<slug>`; `{task}` is the files `.station.json` lists, and
+#          `{task:tests}` those of them that are test files. `**` matches any depth.
+# shell:   command prefixes, as words, that the role's shell may run.
+# blocked: command prefixes always refused for the role, on top of deny_shell.
+# branch:  where the role's work may be pushed: `item` (the branch `.station.json` names),
+#          `claude/factory-log`, `claude/define` or `none`. Roles that commit nothing push
+#          nothing themselves; the Stop hook commits their output there (T086).
+roles:
+  define:
+    tools: [Read, Write, Edit, Bash, Grep, Glob]
+    write: ['**']
+    shell: [npm, git, gh issue, gh pr create --draft --head claude/define, gh pr view]
+    blocked:
+      - git rebase
+      - git reset
+      - git commit --amend
+      - git push --force
+      - git push -f
+      - git push --force-with-lease
+    branch: claude/define
+  intake:
+    tools: [Read, Grep, Glob, Bash]
+    write: []
+    shell: [gh issue]
+    blocked: []
+    branch: none
+  spec:
+    tools: [Read, Grep, Glob, Write]
+    write: ['{feature}/spec.md', '{feature}/checklists/requirements.md']
+    shell: []
+    blocked: []
+    branch: item
+  planner:
+    tools: [Read, Grep, Glob, Write]
+    write:
+      - '{feature}/plan.md'
+      - '{feature}/research.md'
+      - '{feature}/data-model.md'
+      - '{feature}/quickstart.md'
+      - '{feature}/contracts/**'
+      - '{feature}/tasks.md'
+    shell: []
+    blocked: []
+    branch: item
+  builder:
+    tools: [Read, Write, Edit, Bash, Grep, Glob, Agent]
+    # Never tasks.md, even when a task lists it: the dispatcher ticks it (T174).
+    write: ['{task}']
+    shell: [npm, npx vitest, vitest, git]
+    blocked:
+      - git rebase
+      - git reset
+      - git commit --amend
+      - git push --force
+      - git push -f
+      - git push --force-with-lease
+    branch: item
+  test:
+    tools: [Read, Grep, Glob, Write, Edit, Bash]
+    write: ['{task:tests}']
+    shell: [npm test, npm run test, npx vitest, vitest]
+    blocked: []
+    branch: item
+  reviewer:
+    tools: [Read, Grep, Glob, Bash, Write]
+    write: ['{feature}/reports/verify.md']
+    shell: [git diff, gh pr comment]
+    blocked: [gh pr review]
+    branch: item
+  security:
+    tools: [Read, Grep, Glob, Bash, Write]
+    write: ['{feature}/reports/security.md']
+    shell: [semgrep, gitleaks, npm audit]
+    blocked: []
+    branch: item
+  integrator:
+    tools: [Read, Bash, Write]
+    write: ['{feature}/reports/integrate.md']
+    # `git merge` makes its own commit; the push is a plain one, which only fast-forwards.
+    shell:
+      - git fetch origin main
+      - git merge origin/main
+      - git merge --abort
+      - git status
+      - git diff --name-only
+      - git push
+      - gh pr view
+      - gh pr checks
+      - gh pr ready
+      - gh pr comment
+    blocked:
+      - gh pr review
+      - git commit
+      - git rebase
+      - git reset
+      - git commit --amend
+      - git push --force
+      - git push -f
+      - git push --force-with-lease
+    branch: item
+  release:
+    tools: [Read, Write, Bash]
+    write: ['.factory/releases/**']
+    shell: [git fetch, git log, git show, git diff]
+    blocked: [gh release, git tag]
+    branch: claude/factory-log
+  ops:
+    tools: [Read, Grep, Glob, Bash, Write]
+    write: ['.factory/ops/**']
+    shell: [gh issue]
+    blocked: []
+    branch: claude/factory-log
+  coach:
+    tools: [Read, Grep, Glob, Write, Bash]
+    write: ['.factory/lessons/**']
+    shell: [gh pr view, gh pr list]
+    # Design v1.8: the Coach pushes to, and opens pull requests in, no repository.
+    blocked: [git push, gh pr create]
+    branch: claude/factory-log
+
+# Paths no role may Write or Edit (FR-6.4, T173): the guardrail files, the station manifest and
+# the event log, which only the factory writes. `except` names the roles a path is open to.
+deny_write:
+  - '.claude/**'
+  - '.mcp.json'
+  - '.github/workflows/**'
+  - '.factory/config'
+  - '.factory/lockfile-policy'
+  - '.specify/**'
+  - '**/.gitattributes'
+  - '**/.gitmodules'
+  - '**/CLAUDE.md'
+  - '**/CLAUDE.local.md'
+  - '**/.station.json'
+  - '**/events.jsonl'
+  - '.factory/events/**'
+  - { path: '.factory/brief.md', except: [define] }
+
+# Paths no role may read: the approval key and the laptop's key lists and ledger, and secrets.
+deny_read:
+  - '~/.factory/**'
+  - '~/.ssh/**'
+  - '**/.env*'
+
+# Commands no role may run, whatever its shell allows: the Owner's own commands, merges,
+# approvals and signing. Label changes and push targets need the command guard's own rules (T084).
+deny_shell:
+  - gh pr merge
+  - factory approve
+  - factory merge
+  - factory deploy
+  - factory resume
+  - factory keygen
+  - ssh-keygen -Y sign
