@@ -8,9 +8,9 @@ Modified principles:
   - VI. Traceable and Observable Work: the factory's hooks record each session and no agent
     writes the log; the log no longer feeds retries, which the dispatcher counts from the gate
     failures it sees itself
-  - VII. Bounded Autonomy and Safe Operations: the guardrail list names `.factory/brief.md`,
-    which only Define's pull request may change, all of `.specify/` with the constitution, and
-    every `CLAUDE.md` and `CLAUDE.local.md`
+  - VII. Bounded Autonomy and Safe Operations: the guardrail list names all of `.specify/` with
+    the constitution, every `CLAUDE.md` and `CLAUDE.local.md`, and `.factory/brief.md`, which
+    only Define's pull request may change
 Modified sections: none
 Added sections: none
 Removed sections: none
@@ -170,9 +170,10 @@ usage records are what make that approval informed rather than blind.
   `.factory/brief.md`, all of `.specify/` with the constitution, the lockfile policy, and every
   `.gitattributes`, `.gitmodules`, `CLAUDE.md` and `CLAUDE.local.md`—MUST NOT be installed or
   edited by any agent role, except `.factory/brief.md`, which only Define's pull request may
-  change. Only the factory tool changes them: `factory new` and `factory adopt` install them from the pinned factory release, and
-  `factory upgrade` updates them through a `factory/upgrade-<tag>` pull request. Agents MAY
-  only propose changes to them as pull requests to the factory repository.
+  change. Only the factory tool changes them: `factory new` and `factory adopt` install them
+  from the pinned factory release, and `factory upgrade` updates them through a
+  `factory/upgrade-<tag>` pull request. Agents MAY only propose changes to them as pull
+  requests to the factory repository.
 - `factory merge` MUST refuse any pull request that touches a protected path, computed on the
   Owner's laptop, except an upgrade pull request whose protected set equals its release
   manifest; no waiver overrides this. CI checks the same early but is trusted only after this

@@ -28,12 +28,12 @@ export interface Policy {
   denyWrite: { path: string; except: RoleName[] }[];
   denyRead: string[];
   denyShell: string[];
-  /** Claude Code tools no session may use. */
-  denyTools: string[];
+  /** Claude Code tools open to every session besides each role's own, each with its reason. */
+  keepTools: Record<string, string>;
 }
 
 const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'branch'];
-const TOP_KEYS = ['roles', 'deny_write', 'deny_read', 'deny_shell', 'deny_tools'];
+const TOP_KEYS = ['roles', 'deny_write', 'deny_read', 'deny_shell', 'keep_tools'];
 
 const refuse = (why: string) => new RefusedError(`roles.yaml: ${why}`);
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -112,8 +112,34 @@ export function loadPolicy(text: string): Policy {
     denyWrite: denyWrite(top.deny_write),
     denyRead: strings(top.deny_read, 'deny_read'),
     denyShell: strings(top.deny_shell, 'deny_shell'),
-    denyTools: strings(top.deny_tools, 'deny_tools'),
+    keepTools: keepTools(top.keep_tools),
   };
+}
+
+function keepTools(value: unknown): Record<string, string> {
+  if (!isObject(value)) throw refuse('keep_tools is not a mapping');
+  for (const [tool, reason] of Object.entries(value))
+    if (typeof reason !== 'string' || reason.trim() === '')
+      throw refuse(`keep_tools: ${tool} has no reason`);
+  return value as Record<string, string>;
+}
+
+/**
+ * Whether a table path matches `path`, relative to the clone: `**` spans folders, `*` stays in
+ * one, and a pattern starting `**` + `/` matches at any depth, as gitignore does.
+ */
+export function matchesPath(pattern: string, path: string): boolean {
+  const source = pattern
+    .split(/(\*\*\/|\/\*\*|\*\*|\*)/)
+    .map((part) => {
+      if (part === '**/') return '(?:.*/)?';
+      if (part === '/**') return '(?:/.*)?';
+      if (part === '**') return '.*';
+      if (part === '*') return '[^/]*';
+      return part.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+    })
+    .join('');
+  return new RegExp(`^${source}$`).test(path);
 }
 
 /** The paths `role` may never Write or Edit. */

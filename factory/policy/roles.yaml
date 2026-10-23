@@ -117,6 +117,9 @@ deny_write:
   - '**/.station.json'
   - '**/events.jsonl'
   - '.factory/events/**'
+  # The repository's own git files: git reads config, hooks, commondir and refs from there (T183).
+  - '**/.git'
+  - '**/.git/**'
   - { path: '.factory/brief.md', except: [define] }
 
 # Paths no role may read: the approval key and the laptop's key lists and ledger, and secrets.
@@ -146,23 +149,10 @@ deny_shell:
   - factory keygen
   - ssh-keygen -Y sign
 
-# Claude Code tools denied to every session: none is in any role's tools, and each reaches past
-# the session's clone, to the network, other sessions or the Owner. Checked against the tool
-# names of the Claude Code version the release targets (src/install/settings.ts).
-deny_tools:
-  - WebFetch
-  - WebSearch
-  - NotebookEdit
-  - PowerShell
-  - Monitor
-  - Skill
-  - Workflow
-  - Artifact
-  - CronCreate
-  - RemoteTrigger
-  - EnterWorktree
-  - SendMessage
-  - PushNotification
-  - SendUserFile
-  - ShareOnboardingGuide
-  - AskUserQuestion
+# Claude Code tools open to every session besides each role's own, with why. Every other tool of
+# the version the release targets is denied, so a tool a later version adds stays denied until it
+# is named here (src/install/settings.ts).
+keep_tools:
+  ToolSearch: loads the factory MCP server's tools, which Claude Code defers until searched
+  EndConversation: Claude Code cannot deny it while any other tool remains
+  WaitForMcpServers: waits for the factory MCP server while it is still connecting
