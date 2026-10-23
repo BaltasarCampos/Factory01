@@ -7,14 +7,16 @@
 #          `specs/<issue>-<slug>`; `{task}` is the files `.station.json` lists, and
 #          `{task:tests}` those of them that are test files. `**` matches any depth.
 # shell:   command prefixes, as words, that the role's shell may run. No shell has git network or
-#          changes a pull request: the launcher fetches before the session, and the factory
-#          pushes from the Stop hook and opens and readies pull requests (T183, T086).
+#          changes a pull request: the launcher fetches before the session and, once it has
+#          ended, pushes the head the Stop hook recorded and opens and readies pull requests
+#          (T183, T086).
 # blocked: command prefixes always refused for the role, on top of deny_shell.
 # network: the hosts the role's sandboxed shell may reach (T183): the package registry for roles
 #          that install or audit, `api.github.com` for roles with `gh` in their shell; no other.
 # branch:  where the role's work may be pushed: `item` (the branch `.station.json` names),
-#          `claude/factory-log`, `claude/define` or `none`. Roles that commit nothing push
-#          nothing themselves; the Stop hook commits their output there (T086).
+#          `claude/factory-log`, `claude/define` or `none`. No session pushes: the Stop hook
+#          records the head, committing the output of roles that commit nothing, and the launcher
+#          pushes it there after the session ends (T086).
 roles:
   define:
     tools: [Read, Write, Edit, Bash, Grep, Glob]
@@ -136,7 +138,9 @@ deny_write:
   - '**/.git/**'
   - { path: '.factory/brief.md', except: [define] }
 
-# Paths no role may read: the approval key and the laptop's key lists and ledger, and secrets.
+# Paths no role may read: the approval key and the laptop's key lists and ledger, secrets, the
+# Owner's Claude Code state and other sessions, and the global git config, which Claude Code
+# re-opens to sandboxed shells (T183). The sandbox denies all of home besides (src/install/sandbox.ts).
 deny_read:
   - '~/.factory/**'
   - '~/.ssh/**'
@@ -146,6 +150,10 @@ deny_read:
   - '~/.npmrc'
   - '~/.gnupg/**'
   - '~/.claude/.credentials.json'
+  - '~/.claude.json'
+  - '~/.claude/projects/**'
+  - '~/.gitconfig'
+  - '~/.config/git/**'
   - '**/.env*'
 
 # Commands no role may run, whatever its shell allows: the Owner's own commands, merges,
@@ -165,7 +173,8 @@ deny_shell:
 
 # Claude Code tools open to every session besides each role's own, with why. Every other tool of
 # the version the release targets is denied, so a tool a later version adds stays denied until it
-# is named here (src/install/settings.ts).
+# is named here (src/install/settings.ts). SubagentHandback is not kept: Claude Code gives it
+# only in auto mode, which no session runs in (T061).
 keep_tools:
   ToolSearch: loads the factory MCP server's tools, which Claude Code defers until searched
   EndConversation: Claude Code cannot deny it while any other tool remains
