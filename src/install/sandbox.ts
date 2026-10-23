@@ -5,8 +5,11 @@
 // Code from starting without it. Checked against code.claude.com/docs/en/sandboxing and the
 // settings reference for Claude Code 2.1.309, read 2026-10-23.
 //
-// Reads are default-no: all of home is denied and only the clone, the session's temporary folder
-// and the tools' folders are opened again, the narrower path winning; the table's denied reads
+// Reads are default-no: all of home and the shared temporary folders are denied, and only the
+// clone, the session's temporary folder and the tools' folders are opened again, the narrower
+// path winning. The launcher makes that folder fresh for each session and points
+// `CLAUDE_CODE_TMPDIR` and `TMPDIR` at it, so the per-user folder Claude Code gives sandboxed
+// shells as `$TMPDIR`, `<folder>/claude-<uid>/`, lies inside it. The table's denied reads
 // stay as a second layer, and a denied path inside an opened folder stays denied. Claude Code
 // re-opens the global git config under `blockReadsOutsideWorkingDirectories`, which the table's
 // `~/.gitconfig` entry overrides. On Linux the sandbox expands a read entry with a wildcard to
@@ -57,21 +60,35 @@ export interface SandboxSettings {
 const sandboxPath = (path: string, clone: string) =>
   path.startsWith('~/') ? path.replace(/\/\*\*$/, '') : `${clone}/${path}`;
 
+/** Temporary folders every process on the machine shares; only the session's own is opened. */
+const SHARED_TMP = ['/tmp', '/var/tmp', '/dev/shm'];
+
 const under = (path: string, folder: string) => path === folder || path.startsWith(`${folder}/`);
 
-/** Refuses an opened folder that would open home, or re-open a path the table denies. */
-function checkOpened(policy: Policy, paths: SessionPaths, folders: string[]) {
+/**
+ * Refuses an opened folder that would open home or a shared temporary folder, or re-open a path
+ * the table denies. Only the session's temporary folder may lie inside a shared one.
+ */
+function checkOpened(policy: Policy, paths: SessionPaths) {
   const home = paths.home.replace(/\/+$/, '');
-  for (const raw of folders) {
+  const check = (raw: string, temporary: boolean) => {
     const folder = raw.replace(/\/+$/, '');
     if (!folder.startsWith('/')) throw new RefusedError(`${raw} is not an absolute path`);
     if (under(home, folder)) throw new RefusedError(`${raw} would open all of home`);
+    for (const shared of SHARED_TMP) {
+      if (folder === shared) throw new RefusedError(`${raw} would open all of ${shared}`);
+      if (!temporary && under(folder, shared))
+        throw new RefusedError(`${raw} is under the shared temporary folder ${shared}`);
+    }
     for (const entry of policy.denyRead.map((path) => sandboxPath(path, paths.clone))) {
       const denied = entry.replace(/^~/, home);
       if (!/[*?[]/.test(denied) && under(folder, denied))
         throw new RefusedError(`${raw} is under the denied read ${entry}`);
     }
-  }
+  };
+  check(paths.clone, false);
+  check(paths.tmp, true);
+  for (const tool of paths.tools) check(tool, false);
 }
 
 /** The `--settings` file for a session of `role` working at `paths`. */
@@ -81,8 +98,7 @@ export function renderSandbox(
   paths: SessionPaths,
 ): SandboxSettings {
   const row = policy.roles[role];
-  const opened = [paths.clone, paths.tmp, ...paths.tools];
-  checkOpened(policy, paths, opened);
+  checkOpened(policy, paths);
   const gh = row.shell.some((prefix) => prefix.startsWith('gh '));
   const denied = gh ? CREDENTIALS : ['GH_TOKEN', ...CREDENTIALS];
   return {
@@ -93,8 +109,11 @@ export function renderSandbox(
       autoAllowBashIfSandboxed: false,
       excludedCommands: [],
       filesystem: {
-        denyRead: ['~/', ...policy.denyRead.map((path) => sandboxPath(path, paths.clone))],
-        allowRead: opened,
+        denyRead: [
+          ...['~/', ...SHARED_TMP],
+          ...policy.denyRead.map((path) => sandboxPath(path, paths.clone)),
+        ],
+        allowRead: [paths.clone, paths.tmp, ...paths.tools],
         allowWrite: [paths.tmp],
       },
       network: { allowedDomains: row.network, strictAllowlist: true },

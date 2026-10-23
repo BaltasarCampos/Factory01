@@ -37,7 +37,7 @@ describe('the sandbox settings for session shells (T183)', () => {
 
   it('denies all of home, opening only the clone, the session’s temporary folder and the tools’ folders', () => {
     const { denyRead, allowRead, allowWrite } = sandbox('builder').sandbox.filesystem;
-    expect(denyRead[0]).toBe('~/');
+    expect(denyRead.slice(0, 4)).toEqual(['~/', '/tmp', '/var/tmp', '/dev/shm']);
     expect(allowRead).toEqual([CLONE, TMP, NODE]);
     // The npm cache lives in the temporary folder.
     expect(allowWrite).toEqual([TMP]);
@@ -45,7 +45,7 @@ describe('the sandbox settings for session shells (T183)', () => {
 
   it('keeps the table’s denied reads as a second layer, the clone’s own under the clone', () => {
     const denyRead = sandbox('builder').sandbox.filesystem.denyRead;
-    expect(denyRead.slice(1)).toEqual([
+    expect(denyRead.slice(4)).toEqual([
       ...['~/.factory', '~/.ssh', '~/.config/gh', '~/.git-credentials', '~/.netrc', '~/.npmrc'],
       ...['~/.gnupg', '~/.claude/.credentials.json', '~/.claude.json', '~/.claude/projects'],
       ...['~/.gitconfig', '~/.config/git', `${CLONE}/**/.env*`],
@@ -65,6 +65,20 @@ describe('the sandbox settings for session shells (T183)', () => {
     expect(() =>
       renderSandbox(policy, 'builder', { ...session, clone: `${HOME}/.factory/work/x` }),
     ).toThrow(/is under the denied read ~\/\.factory/);
+  });
+
+  it('refuses the shared temporary folders themselves, and a clone or tool folder in one', () => {
+    const at = (change: Partial<typeof session>) => () =>
+      renderSandbox(policy, 'builder', { ...session, ...change });
+    expect(at({ tmp: '/tmp' })).toThrow(/\/tmp would open all of \/tmp/);
+    expect(at({ tmp: '/dev/shm/' })).toThrow(/would open all of \/dev\/shm/);
+    expect(at({ clone: '/tmp/42-add-login' })).toThrow(
+      /\/tmp\/42-add-login is under the shared temporary folder \/tmp/,
+    );
+    expect(at({ tools: ['/var/tmp/node'] })).toThrow(
+      /under the shared temporary folder \/var\/tmp/,
+    );
+    expect(at({ tmp: '/var/tmp/factory-42' })).not.toThrow();
   });
 
   it('runs only the role’s shell column, through Claude Code’s own matcher, not every sandboxed command', () => {
