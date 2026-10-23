@@ -1030,6 +1030,32 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
     expect(t.labels()).toContain('state:verifying');
   });
 
+  it('T168: required checks that cannot be read hold Verify with one info alert per head, naming why', async () => {
+    const factory = factoryClone(null);
+    const t = setup({
+      pin: `v1.0.0@${factory.sha}`,
+      states: ['state:verifying'],
+      branch: {
+        ...SPECIFIED,
+        [`${FEATURE}/reports/verify.md`]: '| Check | Result |\n|---|---|\n| Review | pass |\n',
+        [`${FEATURE}/reports/security.md`]: SECURITY,
+      },
+    });
+    t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path, factory: factory.path });
+    openPr();
+    await dispatchOnce(t.ctx);
+    await dispatchOnce(t.ctx);
+
+    const unreadable = t.inbox().flatMap((c) => {
+      const a = parseAlert({ ...c, id: String(c.id) });
+      return a?.kind === 'checks-unreadable' ? [`${a.urgency} ${a.text}`] : [];
+    });
+    expect(unreadable).toEqual([
+      `info #2: required checks at ${tipOf(t).slice(0, 12)} cannot be read: the release pinned on main has no required-checks.json; the item waits in Verify`,
+    ]);
+    expect(t.labels()).toContain('state:verifying');
+  });
+
   /** An item at Verify with a failing review, at `tier`, its required checks green at its head. */
   const failingReview = (tier: Tier) => {
     const factory = factoryClone();
@@ -1189,6 +1215,29 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
         process.env.PATH = path;
       }
     };
+
+    it('T060: a git failure reading a station file stops the pass, never reads as missing', async () => {
+      const t = await issued();
+      work(t);
+
+      await failingGit('ls-tree', async () => {
+        await expect(dispatchOnce(t.ctx)).rejects.toThrow(/git ls-tree .* failed: fatal: injected/);
+      });
+      expect(t.local.launches).toHaveLength(1);
+    });
+
+    it('T174: a build-test that cannot be read holds Build with one info alert per head, naming why', async () => {
+      const t = await issued();
+      t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path });
+      const head = work(t);
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toHaveLength(1);
+      expect(alerts(t, 'checks-unreadable')).toEqual([
+        `info #2: build-test at ${head.slice(0, 12)} cannot be read: no factory clone to read required-checks.json from; Build waits until it can`,
+      ]);
+    });
 
     it('T174: an ancestry check that fails with a git error stops the pass and alerts nothing', async () => {
       const t = await issued();

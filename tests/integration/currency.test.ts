@@ -165,4 +165,15 @@ describe('report currency (T178)', { timeout: 60_000 }, () => {
     expect(cleanMainMerge(at(), head, [ours], main)).toBe(false);
     expect(cleanMainMerge(at(), head, [ours, theirs, theirs], main)).toBe(false);
   });
+
+  it('T178: a merge-tree that cannot read a commit is an error, never "not clean"', () => {
+    onMain({ 'src/other.ts': 'x\n' });
+    mergeMain();
+    const head = repo.revParse('HEAD');
+    const missing = 'f'.repeat(40);
+
+    expect(() => cleanMainMerge(at(), head, [head, missing], new Set([missing]))).toThrow(
+      /git merge-tree gave no merge/,
+    );
+  });
 });
