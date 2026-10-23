@@ -67,7 +67,9 @@ const under = (path: string, folder: string) => path === folder || path.startsWi
 
 /**
  * Refuses an opened folder that would open home or a shared temporary folder, or re-open a path
- * the table denies. Only the session's temporary folder may lie inside a shared one.
+ * the table denies. Only the session's temporary folder may lie inside a shared one. No opened
+ * folder may hold another: a temporary folder that is the clones' parent would open every other
+ * session's clone. Paths are compared as text, so the launcher passes resolved ones (T061).
  */
 function checkOpened(policy: Policy, paths: SessionPaths) {
   const home = paths.home.replace(/\/+$/, '');
@@ -89,6 +91,11 @@ function checkOpened(policy: Policy, paths: SessionPaths) {
   check(paths.clone, false);
   check(paths.tmp, true);
   for (const tool of paths.tools) check(tool, false);
+  const opened = [paths.clone, paths.tmp, ...paths.tools].map((raw) => raw.replace(/\/+$/, ''));
+  for (const [i, outer] of opened.entries())
+    for (const [j, inner] of opened.entries())
+      if (i !== j && under(inner, outer))
+        throw new RefusedError(`${outer} holds the opened folder ${inner}`);
 }
 
 /** The `--settings` file for a session of `role` working at `paths`. */
