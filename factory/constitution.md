@@ -9,7 +9,8 @@ Modified principles:
     writes the log; the log no longer feeds retries, which the dispatcher counts from the gate
     failures it sees itself
   - VII. Bounded Autonomy and Safe Operations: the guardrail list names `.factory/brief.md`,
-    which only Define's pull request may change
+    which only Define's pull request may change, all of `.specify/` with the constitution, and
+    every `CLAUDE.md` and `CLAUDE.local.md`
 Modified sections: none
 Added sections: none
 Removed sections: none
@@ -166,10 +167,10 @@ usage records are what make that approval informed rather than blind.
   limited by role definitions (`.claude/agents/`), permission rules (`.claude/settings.json`)
   and hooks. No role may both write and approve a change.
 - Guardrail files—`.claude/`, `.mcp.json`, hooks, `.github/workflows/`, `.factory/config`,
-  `.factory/brief.md`, `.specify/memory/constitution.md`, the lockfile policy, and every
-  `.gitattributes` and `.gitmodules`—MUST NOT be installed or edited by any agent role, except
-  `.factory/brief.md`, which only Define's pull request may change. Only the factory tool changes
-  them: `factory new` and `factory adopt` install them from the pinned factory release, and
+  `.factory/brief.md`, all of `.specify/` with the constitution, the lockfile policy, and every
+  `.gitattributes`, `.gitmodules`, `CLAUDE.md` and `CLAUDE.local.md`—MUST NOT be installed or
+  edited by any agent role, except `.factory/brief.md`, which only Define's pull request may
+  change. Only the factory tool changes them: `factory new` and `factory adopt` install them from the pinned factory release, and
   `factory upgrade` updates them through a `factory/upgrade-<tag>` pull request. Agents MAY
   only propose changes to them as pull requests to the factory repository.
 - `factory merge` MUST refuse any pull request that touches a protected path, computed on the
