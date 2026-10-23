@@ -18,7 +18,21 @@ describe('the generated settings (T082)', () => {
   });
 
   it('denies every session the tools no role has, Edit on the guardrails and Read on the secrets (T074)', () => {
-    expect(deny).toEqual(expect.arrayContaining(policy.denyTools));
+    expect(deny).toEqual(
+      expect.arrayContaining(['WebFetch', 'Monitor', 'Skill', 'ListAgents', 'SendFeedback', 'LSP']),
+    );
+    expect(deny).toEqual(
+      expect.arrayContaining([
+        ...[
+          'ListMcpResourcesTool',
+          'ReadMcpResourceTool',
+          'ScheduleWakeup',
+          'CronList',
+          'CronDelete',
+        ],
+        ...['Edit(**/.git)', 'Edit(**/.git/**)'],
+      ]),
+    );
     expect(deny).toEqual(
       expect.arrayContaining([
         ...[
@@ -70,10 +84,28 @@ describe('the generated settings (T082)', () => {
     ]);
   });
 
-  it('refuses a deny rule naming no tool of the Claude Code version the release targets', () => {
+  it('denies every tool it does not name, so a tool a new version adds stays denied (T183)', () => {
+    const tools = new Set<string>(Object.values(policy.roles).flatMap((r) => r.tools));
+    for (const tool of CLAUDE_CODE_TOOLS)
+      expect(deny.includes(tool), tool).toBe(!tools.has(tool) && !(tool in policy.keepTools));
+    const later = renderSettings(policy, [...CLAUDE_CODE_TOOLS, 'NewTool']);
+    expect(later.permissions.deny).toContain('NewTool');
+  });
+
+  it('refuses a kept or role tool that the Claude Code version the release targets does not have', () => {
     expect(CLAUDE_CODE_TOOLS).not.toContain('MultiEdit');
-    expect(() =>
-      renderSettings({ ...policy, denyTools: [...policy.denyTools, 'MultiEdit'] }),
-    ).toThrow(/deny rule MultiEdit names no tool of Claude Code 2\.1\.309/);
+    const keep = { ...policy.keepTools, MultiEdit: 'a tool this version does not have' };
+    expect(() => renderSettings({ ...policy, keepTools: keep })).toThrow(
+      /MultiEdit is not a tool of Claude Code 2\.1\.309/,
+    );
+  });
+
+  it('keeps the Owner’s own connectors, Remote Control, other sessions and artifacts out of sessions', () => {
+    expect(settings).toMatchObject({
+      disableClaudeAiConnectors: true,
+      remoteControlAtStartup: false,
+      crossSessionInbound: 'refuse',
+      enableArtifact: false,
+    });
   });
 });

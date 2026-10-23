@@ -5,7 +5,7 @@
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
-import { deniedWrites, loadPolicy, type Policy } from '../../src/guard/policy.js';
+import { deniedWrites, loadPolicy, matchesPath, type Policy } from '../../src/guard/policy.js';
 import { ROLES, type RoleName } from '../../src/model/types.js';
 
 const TABLE = fileURLToPath(new URL('../../factory/policy/roles.yaml', import.meta.url));
@@ -118,12 +118,29 @@ describe('the role permission table (T074, T081)', () => {
     ]);
   });
 
-  it('denies every session the tools no role is given that reach past its clone', () => {
-    expect(policy.denyTools).toEqual(
-      expect.arrayContaining(['WebFetch', 'WebSearch', 'Monitor', 'Skill', 'AskUserQuestion']),
+  it('keeps open only the tools it names, each with a reason, and none a role already has', () => {
+    expect(Object.keys(policy.keepTools)).toEqual([
+      'ToolSearch',
+      'EndConversation',
+      'WaitForMcpServers',
+    ]);
+    for (const [tool, reason] of Object.entries(policy.keepTools)) {
+      expect(reason.length, tool).toBeGreaterThan(10);
+      for (const role of ROLES) expect(row(role).tools, role).not.toContain(tool);
+    }
+  });
+
+  it('denies every role writing anything under .git/, at any depth (T183)', () => {
+    const denied = (path: string) =>
+      deniedWrites(policy, 'builder').some((p) => matchesPath(p, path));
+    for (const path of ['.git/config', '.git/commondir', 'sub/.git', 'sub/.git/refs/replace/x'])
+      expect(denied(path), path).toBe(true);
+    for (const path of ['src/git.ts', '.gitignore', 'docs/.github-notes.md'])
+      expect(denied(path), path).toBe(false);
+    // The brief stays open to Define alone.
+    expect(deniedWrites(policy, 'define').some((p) => matchesPath(p, '.factory/brief.md'))).toBe(
+      false,
     );
-    for (const role of ROLES)
-      for (const tool of row(role).tools) expect(policy.denyTools, role).not.toContain(tool);
   });
 });
 
@@ -164,6 +181,11 @@ describe('loadPolicy refuses a table it does not expect (T082)', () => {
       'an unknown branch',
       swap('    branch: none\n', '    branch: main\n'),
       /intake: branch main is not one of/,
+    ],
+    [
+      'a kept tool with no reason',
+      swap('  ToolSearch: ', "  ToolSearch: ''\n  WasToolSearch: "),
+      /keep_tools: ToolSearch has no reason/,
     ],
     [
       'a blank entry',

@@ -44,6 +44,10 @@ type HookEvent = 'SessionStart' | 'PreToolUse' | 'PostToolUse' | 'Stop' | 'PreCo
 
 export interface Settings {
   permissions: { allow: string[]; deny: string[]; blockReadsOutsideWorkingDirectories: true };
+  disableClaudeAiConnectors: true;
+  remoteControlAtStartup: false;
+  crossSessionInbound: 'refuse';
+  enableArtifact: false;
   hooks: Record<HookEvent, HookGroup[]>;
   advisorModel: 'opus';
   availableModels: string[];
@@ -64,19 +68,30 @@ const hook = (name: string, guard: boolean, matcher?: string): HookGroup => ({
 const rulePath = (path: string) =>
   path.startsWith('~/') || path.startsWith('**/') ? path : `/${path}`;
 
-export function renderSettings(policy: Policy): Settings {
+export function renderSettings(
+  policy: Policy,
+  tools: readonly string[] = CLAUDE_CODE_TOOLS,
+): Settings {
+  // Default-no: every tool of the version is denied but the roles' own and the kept ones.
+  const open = new Set([
+    ...Object.values(policy.roles).flatMap((row) => row.tools),
+    ...Object.keys(policy.keepTools),
+  ]);
+  for (const tool of open)
+    if (!tools.includes(tool))
+      throw new RefusedError(`${tool} is not a tool of Claude Code ${CLAUDE_CODE_VERSION}`);
   const everyRole = deniedWrites(policy, ROLES[0]).filter((path) =>
     ROLES.every((role) => deniedWrites(policy, role).includes(path)),
   );
   const deny = [
-    ...policy.denyTools,
+    ...tools.filter((tool) => !open.has(tool)),
     ...everyRole.map((path) => `Edit(${rulePath(path)})`),
     ...policy.denyRead.map((path) => `Read(${rulePath(path)})`),
     ...policy.denyShell.map((command) => `Bash(${command} *)`),
   ];
   for (const rule of deny) {
     const tool = rule.split('(', 1)[0] ?? '';
-    if (!(CLAUDE_CODE_TOOLS as readonly string[]).includes(tool))
+    if (!tools.includes(tool))
       throw new RefusedError(
         `deny rule ${rule} names no tool of Claude Code ${CLAUDE_CODE_VERSION}`,
       );
@@ -87,6 +102,12 @@ export function renderSettings(policy: Policy): Settings {
       deny,
       blockReadsOutsideWorkingDirectories: true,
     },
+    // The Owner's own setup stays out of sessions: claude.ai connectors, Remote Control,
+    // messages from other sessions and the Artifact tool.
+    disableClaudeAiConnectors: true,
+    remoteControlAtStartup: false,
+    crossSessionInbound: 'refuse',
+    enableArtifact: false,
     hooks: {
       SessionStart: [hook('session-start', true)],
       PreToolUse: [
