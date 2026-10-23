@@ -407,18 +407,18 @@ Each role row has a `branch` field naming where the role may push:
 | `branch` | Roles | Allowed push target |
 |----------|-------|---------------------|
 | `item` | Spec, Planner, Builder, Test, Reviewer, Security, Integrator | The branch in `.station.json` |
-| `claude/factory-log` | Release, Ops | `claude/factory-log` only |
-| `claude/factory-log` + `coach/<yyyy-Www>` | Coach | `claude/factory-log` in the project; `coach/<yyyy-Www>` in the factory repository only |
+| `claude/factory-log` | Release, Ops, Coach | `claude/factory-log` only |
 | `claude/define` | Define | `claude/define` only |
 | `none` | Intake | No pushes, no file writes |
 
 The session-start check requires `.station.json` only for `item` roles; for the others the
 guard's allowed push branch is the role's fixed branch.
 
-Against the factory repository the Coach may only push `coach/<yyyy-Www>` and run
-`gh pr create --draft --head coach/<yyyy-Www> --repo <factory repo>`. It is the only role given
-the factory repository; FR-047 lists it as the Coach routine's one extra repository. Its pull
-requests are merged by the Owner with `factory merge` under the factory-repository rule.
+No role pushes to the factory repository or opens a pull request there (design v1.8). The Coach
+writes its proposals for role files as files under `.factory/lessons/` on `claude/factory-log`,
+which the Stop hook commits; factory code on the Owner's laptop opens them as pull requests to the
+factory repository, which the Owner merges with `factory merge` under the factory-repository
+rule.
 
 ## Station manifest
 

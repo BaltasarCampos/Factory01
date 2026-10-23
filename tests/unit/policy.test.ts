@@ -58,18 +58,27 @@ describe('the role permission table (T074, T081)', () => {
   it('gives each role with a shell only its prefixes, and a role without Bash none', () => {
     expect(row('intake').shell).toEqual(['gh issue']);
     for (const role of ['spec', 'planner'] as const) expect(row(role).shell, role).toEqual([]);
-    expect(row('define').shell).toEqual(
-      expect.arrayContaining(['gh pr create --draft --head claude/define', 'gh pr view']),
-    );
-    expect(row('define').shell.filter((s) => s.startsWith('gh pr'))).toEqual([
-      'gh pr create --draft --head claude/define',
-      'gh pr view',
-    ]);
+    expect(row('define').shell).toEqual(['npm', 'git', 'gh issue']);
     expect(row('reviewer').shell).toEqual(['git diff', 'gh pr comment']);
     expect(row('security').shell).toEqual(['semgrep', 'gitleaks', 'npm audit']);
-    expect(row('release').shell).toEqual(['git fetch', 'git log', 'git show', 'git diff']);
+    expect(row('release').shell).toEqual(['git log', 'git show', 'git diff']);
     expect(row('coach').shell).toEqual(['gh pr view', 'gh pr list']);
-    expect(row('integrator').shell).not.toContain('git commit');
+    expect(row('integrator').shell).toEqual([
+      ...['git merge origin/main', 'git merge --abort', 'git status', 'git diff --name-only'],
+      ...['gh pr view', 'gh pr checks'],
+    ]);
+  });
+
+  it('leaves git network and pull request changes to the factory: no shell pushes, fetches or opens one (T183)', () => {
+    for (const role of ROLES)
+      for (const command of ['git push', 'git fetch', 'gh pr create', 'gh pr ready'])
+        expect(
+          row(role).shell.some((s) => s.startsWith(command)),
+          `${role}: ${command}`,
+        ).toBe(false);
+    expect(policy.denyShell).toEqual(
+      expect.arrayContaining(['git push', 'gh pr create', 'gh pr ready']),
+    );
   });
 
   it('blocks what the design always blocks: merges, approvals, rewrites, deploys and tags', () => {
@@ -78,22 +87,9 @@ describe('the role permission table (T074, T081)', () => {
     expect(row('integrator').blocked).toEqual(expect.arrayContaining(['git commit', 'git rebase']));
     for (const role of ['define', 'builder', 'integrator'] as const)
       expect(row(role).blocked, role).toEqual(
-        expect.arrayContaining([
-          'git rebase',
-          'git reset',
-          'git commit --amend',
-          'git push --force',
-        ]),
+        expect.arrayContaining(['git rebase', 'git reset', 'git commit --amend']),
       );
     expect(row('release').blocked).toEqual(expect.arrayContaining(['gh release', 'git tag']));
-    // No role pushes to the factory repository or opens a pull request but Define's draft.
-    expect(row('coach').blocked).toEqual(expect.arrayContaining(['git push', 'gh pr create']));
-    for (const role of ROLES)
-      if (role !== 'define')
-        expect(
-          row(role).shell.some((s) => s.startsWith('gh pr create')),
-          role,
-        ).toBe(false);
     for (const command of ['gh pr merge', 'factory approve', 'factory merge', 'factory deploy'])
       expect(policy.denyShell).toContain(command);
     expect(policy.denyShell).toEqual(
@@ -115,8 +111,19 @@ describe('the role permission table (T074, T081)', () => {
     }
   });
 
-  it('denies every role reading the approval key and .env files', () => {
-    expect(policy.denyRead).toEqual(expect.arrayContaining(['~/.factory/**', '**/.env*']));
+  it('denies every role reading the approval key, credentials and .env files (T183)', () => {
+    expect(policy.denyRead).toEqual([
+      ...['~/.factory/**', '~/.ssh/**', '~/.config/gh/**', '~/.git-credentials', '~/.netrc'],
+      ...['~/.npmrc', '~/.gnupg/**', '~/.claude/.credentials.json', '**/.env*'],
+    ]);
+  });
+
+  it('denies every session the tools no role is given that reach past its clone', () => {
+    expect(policy.denyTools).toEqual(
+      expect.arrayContaining(['WebFetch', 'WebSearch', 'Monitor', 'Skill', 'AskUserQuestion']),
+    );
+    for (const role of ROLES)
+      for (const tool of row(role).tools) expect(policy.denyTools, role).not.toContain(tool);
   });
 });
 
