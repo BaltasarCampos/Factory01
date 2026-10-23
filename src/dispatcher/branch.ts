@@ -69,15 +69,21 @@ export function git(ctx: BranchContext, args: readonly string[], input?: string)
   return result.stdout.trim();
 }
 
+/** Git where exit 1 is an answer: `ok` false on it, with git's output; any other failure throws. */
+export function gitExit1(ctx: BranchContext, args: readonly string[]) {
+  const result = run(ctx, args);
+  if (result.error !== undefined || (result.status !== 0 && result.status !== 1))
+    throw failed(args, result);
+  return { ok: result.status === 0, out: result.stdout.trim() };
+}
+
 /**
  * Git where exit 1 is an answer, as for `merge-base --is-ancestor` or `rev-parse --verify -q`:
  * undefined on exit 1, the output on 0, and any other failure throws.
  */
 export function gitAnswer(ctx: BranchContext, args: readonly string[]): string | undefined {
-  const result = run(ctx, args);
-  if (result.error === undefined && result.status === 1) return undefined;
-  if (result.error !== undefined || result.status !== 0) throw failed(args, result);
-  return result.stdout.trim();
+  const { ok, out } = gitExit1(ctx, args);
+  return ok ? out : undefined;
 }
 
 /**

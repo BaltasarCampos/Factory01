@@ -12,16 +12,21 @@
 // Any other later commit makes the report stale. The rule reads only content: commit authors and
 // trailers are agent-written and can be forged. The dispatcher and `factory merge` (T179) share it,
 // each with its own git runner and its own verified history of main.
-import { git, type BranchContext } from './branch.js';
+import { EnvironmentError } from '../cli/env.js';
+import { git, gitExit1, type BranchContext } from './branch.js';
 
 /** Runs git with these arguments and returns its trimmed stdout; throws when git fails. */
-export type Git = (args: readonly string[]) => string;
+export interface Git {
+  (args: readonly string[]): string;
+  /** Exit 1 as an answer: `ok` false, with git's output; any other failure throws. */
+  exit1: (args: readonly string[]) => { ok: boolean; out: string };
+}
 
 /** The dispatcher's runner, in its clone. */
-export const branchGit =
-  (at: BranchContext): Git =>
-  (args) =>
-    git(at, args);
+export const branchGit = (at: BranchContext): Git =>
+  Object.assign((args: readonly string[]) => git(at, args), {
+    exit1: (args: readonly string[]) => gitExit1(at, args),
+  });
 
 /** Whether `commit`, with these parents, is a merge of main that git makes on its own. */
 export function cleanMainMerge(
@@ -33,13 +38,15 @@ export function cleanMainMerge(
   const [ours, theirs] = parents;
   if (parents.length !== 2 || ours === undefined || theirs === undefined) return false;
   if (!verified.has(theirs)) return false;
-  try {
-    // Exit 1 (a conflict) throws, like any failure: the merge is then not clean.
-    const tree = run(['merge-tree', '--write-tree', ours, theirs]).split('\n')[0];
-    return tree === run(['rev-parse', `${commit}^{tree}`]);
-  } catch {
-    return false;
-  }
+  // Exit 1 is a conflict, so not clean, but only with a merge tree on stdout: git 2.39 also exits
+  // 1 on a commit it cannot read, which, like any other failure, is an error.
+  const { ok, out } = run.exit1(['merge-tree', '--write-tree', ours, theirs]);
+  const tree = out.split('\n')[0] ?? '';
+  if (!/^[0-9a-f]{40,64}$/.test(tree))
+    throw new EnvironmentError(
+      `git merge-tree gave no merge of ${ours.slice(0, 12)} and ${theirs.slice(0, 12)}`,
+    );
+  return ok && tree === run(['rev-parse', `${commit}^{tree}`]);
 }
 
 const TICK = /^(\s*- \[) (\] T\d+.*)$/;

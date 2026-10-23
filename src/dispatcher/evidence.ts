@@ -29,7 +29,7 @@ import type { MainMerges } from '../git/merges.js';
 import type { ProjectConfig, RoleName, State, Tier } from '../model/types.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
 import type { ReleaseKeys } from '../approvals/keys.js';
-import { signedAnswers } from '../git/answers.js';
+import { fileAt, signedAnswers } from '../git/answers.js';
 import { checkPlan } from '../stations/checks/plan.js';
 import { openQuestions, parseAnswers, questionAlert } from '../stations/checks/questions.js';
 import { checkSecurityReport } from '../stations/checks/security.js';
@@ -200,8 +200,11 @@ async function buildRound(
   if (!new RegExp(`^\\s*- \\[ \\] ${task}\\b`, 'm').test(tasks)) return issue();
   const state = await buildTestAt(ctx, config, tip);
   if (state === 'success') return { tick: task, head: tip };
-  if (['pending', 'missing'].includes(state) || state.startsWith('unreadable'))
-    return { hold: `build-test ${state} at ${tip.slice(0, 12)}` };
+  if (['pending', 'missing'].includes(state)) return { hold: `build-test ${state}` };
+  if (state.startsWith('unreadable: ')) {
+    const text = `build-test at ${tip.slice(0, 12)} cannot be read: ${state.slice('unreadable: '.length)}; Build waits until it can`;
+    return { hold: { urgency: 'info', kind: 'checks-unreadable', text } };
+  }
   const red = `${task} left CI red at ${tip.slice(0, 12)}: build-test (${state})`;
   const issues = buildIssues(at, tip, dir, task, ctx.mainRef);
   if (issues <= config.retry_limit) return { failure: `Your last attempt at ${red}.` };
@@ -245,13 +248,9 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const tip = fetchBranch(at, item.branch);
     const ref = tip ?? (ownerMerge ? (ctx.mainRef ?? 'origin/main') : undefined);
     if (ref === undefined) return { ownerMerge, needsSession: true };
-    const read = (name: string): string | undefined => {
-      try {
-        return git(at, ['show', `${ref}:${dir}/${name}`]);
-      } catch {
-        return undefined;
-      }
-    };
+    // Only a path missing from the tree reads as missing; any other git failure stops the pass.
+    const read = (name: string): string | undefined =>
+      fileAt(at.projectDir, ref, `${dir}/${name}`, at.env)?.trim();
 
     // On the branch, a report counts only while current; read from main, the item is merged.
     const verified = new Set(main.commits.map((c) => c.commit));

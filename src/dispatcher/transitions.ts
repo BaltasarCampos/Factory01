@@ -248,7 +248,11 @@ function checksWait(e: Evidence): Decision | undefined {
   const ci = e.requiredChecks;
   if (ci === undefined || e.branchHead === undefined || ci.head !== e.branchHead)
     return stay('no required check results for the branch head');
-  if (ci.unreadable !== undefined) return stay(`required checks unreadable: ${ci.unreadable}`);
+  if (ci.unreadable !== undefined) {
+    // One alert per head, naming why; pending or missing runs still wait silently (T168).
+    const text = `required checks at ${ci.head.slice(0, 12)} cannot be read: ${ci.unreadable}`;
+    return { ...stay(text), alert: { urgency: 'info', kind: 'checks-unreadable', text } };
+  }
   const at = ci.head.slice(0, 12);
   const named = (jobs: typeof ci.jobs) => jobs.map((j) => `${j.job} (${j.state})`).join(', ');
   const red = ci.jobs.filter((j) => !DONE.includes(j.state) && !RUNNING.includes(j.state));

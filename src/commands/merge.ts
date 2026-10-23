@@ -261,11 +261,20 @@ const rulesInput = (c: MergeContext) => ({
  * counts as missing, and the summary names where each was written.
  */
 function currentReports(c: MergeContext, branch: string, view: ReturnType<typeof viewAt>) {
-  const run: Git = (args) => {
+  const exit1 = (args: readonly string[]) => {
     const r = safeGit(c.cwd, args, c.env);
-    if (r.status !== 0) throw new RefusedError(`git ${args[0] ?? ''} failed: ${r.stderr}`);
-    return r.stdout.toString().trim();
+    if (r.status !== 0 && r.status !== 1)
+      throw new RefusedError(`git ${args[0] ?? ''} failed: ${r.stderr}`);
+    return { ok: r.status === 0, out: r.stdout.toString().trim() };
   };
+  const run: Git = Object.assign(
+    (args: readonly string[]) => {
+      const { ok, out } = exit1(args);
+      if (!ok) throw new RefusedError(`git ${args[0] ?? ''} failed`);
+      return out;
+    },
+    { exit1 },
+  );
   const verified = new Set(c.commits.map((m) => m.commit));
   const dir = `specs/${branch.slice('claude/'.length)}`;
   const at = (name: string) => reportAt(run, c.head, dir, `reports/${name}.md`, verified);

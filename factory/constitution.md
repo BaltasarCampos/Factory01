@@ -1,38 +1,19 @@
 <!--
 Sync Impact Report
 ==================
-Version change: 2.6.0 → 2.7.0
-Bump rationale: MINOR. Aligns with "Software Factory — Design v1.8": v1.7 closed the ways
-around v1.6's checks, and v1.8 records the decisions made while building slice 15. No
-principle is removed and no gate is relaxed.
+Version change: 2.7.0 → 2.7.1
+Bump rationale: PATCH. Wording that matches the factory as built (Owner decision 2026-10-23,
+from the T124 probe and slice 26d). No principle is removed and no gate is relaxed.
 Modified principles:
-  - II. Spec-Driven Assembly Line: the automatic test-only skip of `red-green` is the one
-    gate skip without a waiver; no item is admitted before the brief is merged
-  - III. Test-Gated Delivery: `red-green` and `ac-map` share one rule (a tagged `AC-###`
-    test per criterion, failing at the base and passing at the head); a spec without IDs
-    fails; one ID per test, matched strictly; changed tests count by their head version;
-    test paths from the release's Vitest config; refactors and removed or skipped tests need
-    signed waivers, as do added retries and removed assertions; quarantines need the waiver
-    plus an open issue; criterion lines and the checked set defined, an empty set fails; item
-    type never decides; weak-test limit restated
-  - VII. Bounded Autonomy and Safe Operations: only a signed `owner:approved` admits work
-    (authorship never counts); `Factory-Merge:` trailers; `history_start` renamed `baseline`; new
-    repositories signed from the first commit; each item merges once; merged branches closed
-    (pushes are tampering); a running session is a warning, never a block
-Modified sections:
-  - Assembly Line Workflow and Quality Gates: approval summaries built by the CLI per gate,
-    not supplied by agents
-  - Branches and Approval Labels: waiver records sign their exact target; gate and test
-    waivers carry `head: <sha>` and are re-signed against a range-diff after a rebase
+  - VI. Traceable and Observable Work: the factory's hooks record each session and no agent
+    writes the log; the log no longer feeds retries, which the dispatcher counts from the gate
+    failures it sees itself
+  - VII. Bounded Autonomy and Safe Operations: the guardrail list names `.factory/brief.md`,
+    which only Define's pull request may change
+Modified sections: none
 Added sections: none
 Removed sections: none
-Templates (read at runtime; not modified by this command):
-  - .specify/templates/plan-template.md — ⚠ update "Constitution Check" to cover I–IX,
-    risk tier, lane, and plan-usage budget
-  - .specify/templates/spec-template.md — ⚠ add risk tier and "risks" section (tier 3);
-    acceptance criteria must be testable (III)
-  - .specify/templates/tasks-template.md — ⚠ test tasks precede implementation tasks; each
-    task lists the files it may touch (VII, VIII)
+Templates: none changed by this amendment.
 Source design: "Software Factory — Design v1.8", 2026-10-05.
 Deferred TODOs: token budgets per role, retry count, security fix targets and metric targets
 are set from shadow-mode data (specification §17). Phase 0 confirms how Spec Kit is told which
@@ -165,11 +146,12 @@ reviews and fewer failures.
  
 - Every artifact MUST be traceable in both directions: request → brief → spec → plan → tasks →
   commits → review → tests → release, and back.
-- Every agent session MUST record, in the work item's append-only event log, the station it
-  served, its inputs, outputs, model, tool calls, and usage. The log is `events.jsonl` in the
-  item's feature folder until merge, then lines under `.factory/events/` on
-  `claude/factory-log`; Intake's entries start as issue comments. The log is untrusted
-  telemetry: it feeds metrics, retries and the Coach, and MUST NOT decide any merge or gate.
+- Every agent session MUST be recorded in the work item's append-only event log: the station it
+  served, its inputs, outputs, model, tool calls, and usage. The factory's hooks write these
+  records; no agent writes the log. The log is `events.jsonl` in the item's feature folder until
+  merge, then lines under `.factory/events/` on `claude/factory-log`; Intake's entries start as
+  issue comments. The log is untrusted telemetry: it feeds metrics and the Coach, and MUST NOT
+  decide any merge or gate.
   `factory merge` accepts only additions to it, checked on the Owner's laptop.
 - Agent-authored commits MUST be labelled with agent role and work item id.
 - Deployed software MUST emit structured logs and basic health signals sufficient to detect
@@ -184,8 +166,9 @@ usage records are what make that approval informed rather than blind.
   limited by role definitions (`.claude/agents/`), permission rules (`.claude/settings.json`)
   and hooks. No role may both write and approve a change.
 - Guardrail files—`.claude/`, `.mcp.json`, hooks, `.github/workflows/`, `.factory/config`,
-  `.specify/memory/constitution.md`, the lockfile policy, and every `.gitattributes` and
-  `.gitmodules`—MUST NOT be installed or edited by any agent role. Only the factory tool changes
+  `.factory/brief.md`, `.specify/memory/constitution.md`, the lockfile policy, and every
+  `.gitattributes` and `.gitmodules`—MUST NOT be installed or edited by any agent role, except
+  `.factory/brief.md`, which only Define's pull request may change. Only the factory tool changes
   them: `factory new` and `factory adopt` install them from the pinned factory release, and
   `factory upgrade` updates them through a `factory/upgrade-<tag>` pull request. Agents MAY
   only propose changes to them as pull requests to the factory repository.
@@ -428,4 +411,4 @@ form.
 - **Periodic review**: The Owner reviews this constitution, usage records, and escaped defects
   at least quarterly and amends where the rules no longer serve the product.
   
-**Version**: 2.7.0 | **Ratified**: 2026-09-30 | **Last Amended**: 2026-10-02
+**Version**: 2.7.1 | **Ratified**: 2026-09-30 | **Last Amended**: 2026-10-23
