@@ -28,10 +28,12 @@ export interface Policy {
   denyWrite: { path: string; except: RoleName[] }[];
   denyRead: string[];
   denyShell: string[];
+  /** Claude Code tools no session may use. */
+  denyTools: string[];
 }
 
 const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'branch'];
-const TOP_KEYS = ['roles', 'deny_write', 'deny_read', 'deny_shell'];
+const TOP_KEYS = ['roles', 'deny_write', 'deny_read', 'deny_shell', 'deny_tools'];
 
 const refuse = (why: string) => new RefusedError(`roles.yaml: ${why}`);
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -110,6 +112,7 @@ export function loadPolicy(text: string): Policy {
     denyWrite: denyWrite(top.deny_write),
     denyRead: strings(top.deny_read, 'deny_read'),
     denyShell: strings(top.deny_shell, 'deny_shell'),
+    denyTools: strings(top.deny_tools, 'deny_tools'),
   };
 }
 

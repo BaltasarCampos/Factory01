@@ -6,7 +6,9 @@
 # write:   paths the role may Write or Edit. `{feature}` is the item's feature folder,
 #          `specs/<issue>-<slug>`; `{task}` is the files `.station.json` lists, and
 #          `{task:tests}` those of them that are test files. `**` matches any depth.
-# shell:   command prefixes, as words, that the role's shell may run.
+# shell:   command prefixes, as words, that the role's shell may run. No shell has git network or
+#          changes a pull request: the launcher fetches before the session, and the factory
+#          pushes from the Stop hook and opens and readies pull requests (T183, T086).
 # blocked: command prefixes always refused for the role, on top of deny_shell.
 # branch:  where the role's work may be pushed: `item` (the branch `.station.json` names),
 #          `claude/factory-log`, `claude/define` or `none`. Roles that commit nothing push
@@ -15,14 +17,8 @@ roles:
   define:
     tools: [Read, Write, Edit, Bash, Grep, Glob]
     write: ['**']
-    shell: [npm, git, gh issue, gh pr create --draft --head claude/define, gh pr view]
-    blocked:
-      - git rebase
-      - git reset
-      - git commit --amend
-      - git push --force
-      - git push -f
-      - git push --force-with-lease
+    shell: [npm, git, gh issue]
+    blocked: [git rebase, git reset, git commit --amend]
     branch: claude/define
   intake:
     tools: [Read, Grep, Glob, Bash]
@@ -53,13 +49,7 @@ roles:
     # Never tasks.md, even when a task lists it: the dispatcher ticks it (T174).
     write: ['{task}']
     shell: [npm, npx vitest, vitest, git]
-    blocked:
-      - git rebase
-      - git reset
-      - git commit --amend
-      - git push --force
-      - git push -f
-      - git push --force-with-lease
+    blocked: [git rebase, git reset, git commit --amend]
     branch: item
   test:
     tools: [Read, Grep, Glob, Write, Edit, Bash]
@@ -82,32 +72,20 @@ roles:
   integrator:
     tools: [Read, Bash, Write]
     write: ['{feature}/reports/integrate.md']
-    # `git merge` makes its own commit; the push is a plain one, which only fast-forwards.
+    # `git merge` makes its own commit; the factory pushes it and marks the pull request ready.
     shell:
-      - git fetch origin main
       - git merge origin/main
       - git merge --abort
       - git status
       - git diff --name-only
-      - git push
       - gh pr view
       - gh pr checks
-      - gh pr ready
-      - gh pr comment
-    blocked:
-      - gh pr review
-      - git commit
-      - git rebase
-      - git reset
-      - git commit --amend
-      - git push --force
-      - git push -f
-      - git push --force-with-lease
+    blocked: [gh pr review, git commit, git rebase, git reset, git commit --amend]
     branch: item
   release:
     tools: [Read, Write, Bash]
     write: ['.factory/releases/**']
-    shell: [git fetch, git log, git show, git diff]
+    shell: [git log, git show, git diff]
     blocked: [gh release, git tag]
     branch: claude/factory-log
   ops:
@@ -120,8 +98,7 @@ roles:
     tools: [Read, Grep, Glob, Write, Bash]
     write: ['.factory/lessons/**']
     shell: [gh pr view, gh pr list]
-    # Design v1.8: the Coach pushes to, and opens pull requests in, no repository.
-    blocked: [git push, gh pr create]
+    blocked: []
     branch: claude/factory-log
 
 # Paths no role may Write or Edit (FR-6.4, T173): the guardrail files, the station manifest and
@@ -146,11 +123,21 @@ deny_write:
 deny_read:
   - '~/.factory/**'
   - '~/.ssh/**'
+  - '~/.config/gh/**'
+  - '~/.git-credentials'
+  - '~/.netrc'
+  - '~/.npmrc'
+  - '~/.gnupg/**'
+  - '~/.claude/.credentials.json'
   - '**/.env*'
 
 # Commands no role may run, whatever its shell allows: the Owner's own commands, merges,
-# approvals and signing. Label changes and push targets need the command guard's own rules (T084).
+# approvals and signing, any push, and pull request changes the factory makes. Label changes need
+# the command guard's own rules (T084).
 deny_shell:
+  - git push
+  - gh pr create
+  - gh pr ready
   - gh pr merge
   - factory approve
   - factory merge
@@ -158,3 +145,24 @@ deny_shell:
   - factory resume
   - factory keygen
   - ssh-keygen -Y sign
+
+# Claude Code tools denied to every session: none is in any role's tools, and each reaches past
+# the session's clone, to the network, other sessions or the Owner. Checked against the tool
+# names of the Claude Code version the release targets (src/install/settings.ts).
+deny_tools:
+  - WebFetch
+  - WebSearch
+  - NotebookEdit
+  - PowerShell
+  - Monitor
+  - Skill
+  - Workflow
+  - Artifact
+  - CronCreate
+  - RemoteTrigger
+  - EnterWorktree
+  - SendMessage
+  - PushNotification
+  - SendUserFile
+  - ShareOnboardingGuide
+  - AskUserQuestion

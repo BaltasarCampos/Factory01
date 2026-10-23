@@ -1,0 +1,156 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__factory__advance_item",
+      "mcp__factory__log_event",
+      "mcp__factory__request_split"
+    ],
+    "deny": [
+      "WebFetch",
+      "WebSearch",
+      "NotebookEdit",
+      "PowerShell",
+      "Monitor",
+      "Skill",
+      "Workflow",
+      "Artifact",
+      "CronCreate",
+      "RemoteTrigger",
+      "EnterWorktree",
+      "SendMessage",
+      "PushNotification",
+      "SendUserFile",
+      "ShareOnboardingGuide",
+      "AskUserQuestion",
+      "Edit(/.claude/**)",
+      "Edit(/.mcp.json)",
+      "Edit(/.github/workflows/**)",
+      "Edit(/.factory/config)",
+      "Edit(/.factory/lockfile-policy)",
+      "Edit(/.specify/**)",
+      "Edit(**/.gitattributes)",
+      "Edit(**/.gitmodules)",
+      "Edit(**/CLAUDE.md)",
+      "Edit(**/CLAUDE.local.md)",
+      "Edit(**/.station.json)",
+      "Edit(**/events.jsonl)",
+      "Edit(/.factory/events/**)",
+      "Read(~/.factory/**)",
+      "Read(~/.ssh/**)",
+      "Read(~/.config/gh/**)",
+      "Read(~/.git-credentials)",
+      "Read(~/.netrc)",
+      "Read(~/.npmrc)",
+      "Read(~/.gnupg/**)",
+      "Read(~/.claude/.credentials.json)",
+      "Read(**/.env*)",
+      "Bash(git push *)",
+      "Bash(gh pr create *)",
+      "Bash(gh pr ready *)",
+      "Bash(gh pr merge *)",
+      "Bash(factory approve *)",
+      "Bash(factory merge *)",
+      "Bash(factory deploy *)",
+      "Bash(factory resume *)",
+      "Bash(factory keygen *)",
+      "Bash(ssh-keygen -Y sign *)"
+    ],
+    "blockReadsOutsideWorkingDirectories": true
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "factory",
+            "args": ["hook", "session-start"],
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "factory",
+            "args": ["hook", "path-guard"],
+            "onFailure": "block"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "factory",
+            "args": ["hook", "read-guard"],
+            "onFailure": "block"
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "factory",
+            "args": ["hook", "command-guard"],
+            "onFailure": "block"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "factory",
+            "args": ["hook", "post-edit"]
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "factory",
+            "args": ["hook", "log"]
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "factory",
+            "args": ["hook", "stop"]
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "factory",
+            "args": ["hook", "pre-compact"],
+            "onFailure": "block"
+          }
+        ]
+      }
+    ]
+  },
+  "advisorModel": "opus",
+  "availableModels": ["sonnet", "opus"]
+}
