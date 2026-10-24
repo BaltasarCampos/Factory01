@@ -3,9 +3,13 @@
 // redirections, and the operator that follows it. Anything it cannot fully analyse is
 // `Unanalysable`, so the guard fails closed (research.md R6): every expansion, whose value it
 // cannot know; unquoted glob characters, which could expand to a flag; brace expansion; `~user`;
-// subshells, groups and shell keywords; here-documents and process substitution. Plain `~` and
-// `~/…` stay as written, for the guards to treat as home. `&` is parsed, and the guard refuses
-// it. `eval`, `sh -c` and aliases are slice 25b-2's.
+// subshells, groups and shell keywords; here-documents and process substitution. A command is
+// `Unanalysable` too if it runs text the tokenizer cannot see: `eval` or a shell as any of its
+// words, so no wrapper such as `env`, `xargs` or `find -exec` hides one, or, where it starts, a
+// builtin that runs text or a file as code or changes how later commands are read, such as
+// `source`, `trap` or `alias`, or that evaluates a variable name, such as `read` or `printf -v`.
+// Plain `~` and `~/…` stay as written, for the guards to treat as home. `&` is parsed, and the
+// guard refuses it.
 
 export type Operator = ';' | '&&' | '||' | '|' | '|&' | '&';
 
@@ -56,6 +60,23 @@ const KEYWORDS = new Set(
   ]),
 );
 const REDIRECTS = ['&>>', '&>', '>>', '>&', '>|', '<&', '<>', '>', '<'] as const;
+/** Shells, by a word's last path part: `sh -c`, a script or standard input runs unseen text. */
+const SHELLS = new Set(
+  'sh bash rbash dash ash zsh ksh mksh yash posh csh tcsh fish busybox'.split(' '),
+);
+/** Builtins that run text or a file as code, or change how later commands are read or run. */
+const CODE = 'source . trap fc bind compgen complete alias unalias shopt set enable hash';
+/**
+ * Builtins that evaluate a variable name or arithmetic, where a quoted `a[$(…)]` runs a command:
+ * bash 5.2 runs it for `let`, `read`, `test -v`, `printf -v`, `declare`, `typeset` and `local`.
+ */
+const NAMES =
+  'let read test [ printf declare typeset local export readonly unset mapfile readarray' +
+  ' getopts wait';
+const BUILTINS = new Map([
+  ...CODE.split(' ').map((name) => [name, 'runs text as code or changes the shell'] as const),
+  ...NAMES.split(' ').map((name) => [name, 'evaluates variable names'] as const),
+]);
 const QUOTED = '\0';
 
 class Refusal extends Error {}
@@ -145,13 +166,16 @@ function lex(text: string): Token[] {
   return tokens;
 }
 
-/** Reads a redirection at `i`, taking the word before it as its descriptor if it is all digits. */
+/**
+ * Reads a redirection at `i`, taking the word before it as its descriptor if it is all digits
+ * and the operator takes one: bash reads `2&>x` as the word `2` and `&>x`.
+ */
 function redirect(text: string, i: number, word: Word | null, tokens: Token[]): number {
   let fd: number | null = null;
   if (word !== null) {
     // `{name}>file` makes bash put a new descriptor in `name`, and drops the word.
     if (/^\{\w+\}$/.test(word.bare)) refuse(`a named descriptor ${word.text}`);
-    if (/^\d+$/.test(word.bare)) fd = Number(word.text);
+    if (/^\d+$/.test(word.bare) && text.charAt(i) !== '&') fd = Number(word.text);
     else tokens.push({ kind: 'word', word: checked(word) });
   }
   if (text.startsWith('<<<', i)) refuse('a here-string <<<');
@@ -168,6 +192,24 @@ function checked(word: Word): Word {
   if (/\{[^{}]*(,|\.\.)[^{}]*\}/.test(word.bare)) refuse(`a brace expansion in ${word.text}`);
   if (/(^|[=:])~[^/\0]/.test(word.bare)) refuse(`a tilde expansion in ${word.text}`);
   return word;
+}
+
+/** Refuses a command that runs text the tokenizer cannot see, through any wrapper. */
+function checkRuns({ words }: SimpleCommand) {
+  for (const word of words) {
+    const program = word.slice(word.lastIndexOf('/') + 1);
+    if (program === 'eval') refuse(`eval in ${word}, which runs its arguments as a command`);
+    if (SHELLS.has(program)) refuse(`the shell ${word}, which runs a command line of its own`);
+  }
+  // `command` and `builtin` run a builtin too; other wrappers run only programs.
+  let start = 0;
+  while (words[start] === 'command' || words[start] === 'builtin') {
+    start += 1;
+    while (words[start]?.startsWith('-')) start += 1;
+  }
+  const first = words[start] ?? '';
+  const why = BUILTINS.get(first);
+  if (why !== undefined) refuse(`the builtin ${first}, which ${why}`);
 }
 
 const assignment = (word: Word) => /^[A-Za-z_][A-Za-z0-9_]*=/.exec(word.bare)?.[0];
@@ -201,12 +243,16 @@ function parse(tokens: Token[]): SimpleCommand[] {
       if (token.op === '\n' && empty()) continue;
       if (empty()) refuse(`an empty command before ${token.op}`);
       command.then = token.op === '\n' ? ';' : token.op;
+      checkRuns(command);
       commands.push(command);
       command = { assignments: [], words: [], redirections: [], then: null };
     }
   }
   if (pending !== null) refuse('a redirection with no target');
-  if (!empty()) commands.push(command);
+  if (!empty()) {
+    checkRuns(command);
+    commands.push(command);
+  }
   const last = commands.at(-1)?.then;
   if (empty() && last !== undefined && last !== null && last !== ';' && last !== '&')
     refuse(`a command that ends with ${last}`);

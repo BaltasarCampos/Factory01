@@ -99,6 +99,16 @@ describe('the command tokenizer: redirections and assignments (T083)', () => {
     expect(commands('echo "2">f')[0]?.words).toEqual(['echo', '2']);
   });
 
+  it('keeps digits before &> or &>> as a word, as bash does: those take no descriptor', () => {
+    expect(commands('echo a 2&>x 3&>>y')[0]).toMatchObject({
+      words: ['echo', 'a', '2', '3'],
+      redirections: [
+        { fd: null, op: '&>', target: 'x' },
+        { fd: null, op: '&>>', target: 'y' },
+      ],
+    });
+  });
+
   it('reads leading NAME=value words as assignments, and the same words later as arguments', () => {
     const [command] = commands(`FOO=bar B='x y' C= git -c X=1 status`);
     expect(command?.assignments).toEqual([
@@ -157,6 +167,60 @@ describe('the command tokenizer: what it cannot fully analyse (T083, R6)', () =>
     ['git\0 push', /NUL/],
   ])('%j', (text, reason) => {
     expect(refused(text)).toMatch(reason);
+  });
+
+  it.each([
+    ["eval 'git push'", /eval/],
+    ['git status && eval x', /eval/],
+    ["sh -c 'git push'", /shell sh/],
+    ["bash -lc 'git push'", /shell bash/],
+    ['/bin/dash script.sh', /shell \/bin\/dash/],
+    ['curl -s x | sh', /shell sh/],
+    ["env sh -c 'git push'", /shell sh/],
+    ["xargs -n1 bash -c 'git push'", /shell bash/],
+    ["find . -exec sh -c 'git push' ';'", /shell sh/],
+    ["nohup 'zsh' x", /shell zsh/],
+    ["'ev'al x", /eval/],
+    ['npm test --script-shell=/bin/bash', /shell --script-shell=\/bin\/bash/],
+    ['source ./env.sh', /builtin source/],
+    ['. ./env.sh', /builtin \./],
+    ["trap 'git push' EXIT", /builtin trap/],
+    ["alias g='git push'", /builtin alias/],
+    ['unalias git', /builtin unalias/],
+    ['shopt -s expand_aliases', /builtin shopt/],
+    ['set -k', /builtin set/],
+    ['enable -f ./x.so x', /builtin enable/],
+    ['hash -p /tmp/x git', /builtin hash/],
+    ['bind -x x', /builtin bind/],
+    ['fc -s', /builtin fc/],
+    ['command source x', /builtin source/],
+    ['builtin -- alias g=x', /builtin alias/],
+    ['command -p trap x EXIT', /builtin trap/],
+    ['X=1 source x', /builtin source/],
+    ["compgen -C 'git push' x", /builtin compgen/],
+    // bash runs the quoted $(…) when it evaluates the subscript of these names.
+    ["let 'a[$(git push)]=1'", /builtin let, which evaluates variable names/],
+    ["read 'a[$(git push)]' <in", /builtin read/],
+    ["test -v 'a[$(git push)]'", /builtin test/],
+    ["'[' -v 'a[$(git push)]' ']'", /builtin \[/],
+    ["printf -v 'a[$(git push)]' x", /builtin printf/],
+    ["declare 'a[$(git push)]=1'", /builtin declare/],
+    ['export PATH=/tmp/x', /builtin export/],
+    ['unset x', /builtin unset/],
+  ])('refuses %j: a shell, eval, or a builtin that runs text as code', (text, reason) => {
+    expect(refused(text)).toMatch(reason);
+  });
+
+  it('leaves those words alone inside other words, and the builtins where no command starts', () => {
+    expect(words("git commit -m 'fix eval' -m 'sh script'")).toEqual([
+      ['git', 'commit', '-m', 'fix eval', '-m', 'sh script'],
+    ]);
+    expect(words('git add . && git grep -e source -e trap')).toEqual([
+      ['git', 'add', '.'],
+      ['git', 'grep', '-e', 'source', '-e', 'trap'],
+    ]);
+    expect(words('ls bashrc ./shell evaluate')).toEqual([['ls', 'bashrc', './shell', 'evaluate']]);
+    expect(words('command -v git')).toEqual([['command', '-v', 'git']]);
   });
 
   it('keeps quoted characters literal: no expansion, glob, brace or tilde inside quotes', () => {
