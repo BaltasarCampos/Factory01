@@ -131,6 +131,12 @@ describe('the role permission table (T074, T081)', () => {
     }
   });
 
+  it('allows only the leading assignments it names, each with a reason (T084)', () => {
+    expect(Object.keys(policy.assignments)).toEqual(['CI', 'NO_COLOR']);
+    for (const [name, reason] of Object.entries(policy.assignments))
+      expect(reason.length, name).toBeGreaterThan(10);
+  });
+
   it('denies every role writing anything under .git/, at any depth (T183)', () => {
     const denied = (path: string) =>
       deniedWrites(policy, 'builder').some((p) => matchesPath(p, path));
@@ -187,6 +193,16 @@ describe('loadPolicy refuses a table it does not expect (T082)', () => {
       'a kept tool with no reason',
       swap('  ToolSearch: ', "  ToolSearch: ''\n  WasToolSearch: "),
       /keep_tools: ToolSearch has no reason/,
+    ],
+    [
+      'an assignment with no reason',
+      swap('  CI: ', "  CI: ''\n  WasCI: "),
+      /assignments: CI has no reason/,
+    ],
+    [
+      'an assignment that is no variable name',
+      swap('  CI: ', '  CI-X: '),
+      /assignments: CI-X is not a variable name/,
     ],
     [
       'a blank entry',
