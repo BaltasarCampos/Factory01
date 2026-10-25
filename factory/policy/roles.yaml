@@ -179,3 +179,10 @@ keep_tools:
   ToolSearch: loads the factory MCP server's tools, which Claude Code defers until searched
   EndConversation: Claude Code cannot deny it while any other tool remains
   WaitForMcpServers: waits for the factory MCP server while it is still connecting
+
+# Names a command may assign before its program, such as `CI=1 npm test`, each with why; every
+# other leading assignment is refused, since one such as PATH, GIT_DIR or LD_PRELOAD changes what
+# a command runs or which repository it touches (T084).
+assignments:
+  CI: makes test runners run once, without watch mode or prompts
+  NO_COLOR: turns off coloured output, which a session reads as escape codes

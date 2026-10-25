@@ -2,7 +2,8 @@
 // assignments, redirections, `;`, `&&`, `||`, pipes, `&` and newlines come back word for word,
 // and every construct the tokenizer cannot fully analyse, put anywhere in such a command, makes
 // it `Unanalysable`, so the command guard fails closed (research.md R6). The guard's own
-// properties are slice 25c's.
+// properties are slice 25c's. Lines of words are also read by bash itself, and compared.
+import { execFileSync } from 'node:child_process';
 import fc from 'fast-check';
 import { describe, expect, it } from 'vitest';
 import {
@@ -169,6 +170,26 @@ describe('the command tokenizer: properties (T076, T083)', () => {
         expect(tokenize(join([...parts.slice(0, i), it, ...parts.slice(i)])).ok).toBe(false);
       }),
       { numRuns: 1000 },
+    );
+  });
+
+  // Compared with bash itself, so a reading the generator and the tokenizer share by mistake
+  // shows up (Owner decision 2026-10-24, T084). The printf program, since the tokenizer refuses
+  // the builtin, which can assign a variable.
+  it('reads a line of words as bash does', () => {
+    fc.assert(
+      fc.property(fc.array(word, { minLength: 1, maxLength: 5 }), (words) => {
+        const line = `/usr/bin/printf '%s\\0' ${words.map((w) => w.written).join(' ')}`;
+        const out = execFileSync('bash', ['--norc', '--noprofile', '-c', line], {
+          encoding: 'utf8',
+          env: { PATH: process.env.PATH },
+        });
+        const parsed = tokenize(line);
+        expect(parsed.ok && parsed.commands[0]?.words.slice(2)).toEqual(
+          out.split('\0').slice(0, -1),
+        );
+      }),
+      { numRuns: 300 },
     );
   });
 

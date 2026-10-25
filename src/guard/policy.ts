@@ -32,11 +32,13 @@ export interface Policy {
   denyShell: string[];
   /** Claude Code tools open to every session besides each role's own, each with its reason. */
   keepTools: Record<string, string>;
+  /** Names a command may assign before its program, each with its reason (T084). */
+  assignments: Record<string, string>;
 }
 
 const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'network', 'branch'];
 const HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
-const TOP_KEYS = ['roles', 'deny_write', 'deny_read', 'deny_shell', 'keep_tools'];
+const TOP_KEYS = ['roles', 'deny_write', 'deny_read', 'deny_shell', 'keep_tools', 'assignments'];
 
 const refuse = (why: string) => new RefusedError(`roles.yaml: ${why}`);
 const isObject = (v: unknown): v is Record<string, unknown> =>
@@ -121,15 +123,20 @@ export function loadPolicy(text: string): Policy {
     denyWrite: denyWrite(top.deny_write),
     denyRead: strings(top.deny_read, 'deny_read'),
     denyShell: strings(top.deny_shell, 'deny_shell'),
-    keepTools: keepTools(top.keep_tools),
+    keepTools: reasons(top.keep_tools, 'keep_tools'),
+    assignments: reasons(top.assignments, 'assignments'),
   };
 }
 
-function keepTools(value: unknown): Record<string, string> {
-  if (!isObject(value)) throw refuse('keep_tools is not a mapping');
-  for (const [tool, reason] of Object.entries(value))
+/** A mapping of names to reasons; an assignment's name must be a shell variable's. */
+function reasons(value: unknown, where: string): Record<string, string> {
+  if (!isObject(value)) throw refuse(`${where} is not a mapping`);
+  for (const [name, reason] of Object.entries(value)) {
     if (typeof reason !== 'string' || reason.trim() === '')
-      throw refuse(`keep_tools: ${tool} has no reason`);
+      throw refuse(`${where}: ${name} has no reason`);
+    if (where === 'assignments' && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))
+      throw refuse(`assignments: ${name} is not a variable name`);
+  }
   return value as Record<string, string>;
 }
 
