@@ -230,6 +230,15 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['builder', 'npm run x --node-options=--require=y', /^option: /],
     ['builder', 'git grep -O x', /^option: /],
     ['builder', 'git grep --open-files-in-pager=x y', /^option: /],
+    // Short options in a cluster, an attached argument with them, and the same spelled apart.
+    ['security', 'semgrep -qo x', /option: refused: the option -qo, /],
+    ['security', 'semgrep -q -o x', /^option: /],
+    ['security', 'gitleaks detect -vr x', /^option: /],
+    ['security', 'gitleaks detect -v -r x', /^option: /],
+    ['builder', 'git grep -hOless x', /option: refused: the option -hOless, .*runs a program/],
+    ['define', 'git grep -h -O less x', /^option: /],
+    ['builder', 'git log -n5 --oneline', /^allowed$/],
+    ['security', 'semgrep -q --metrics=off x', /^allowed$/],
     // The Owner's commands in any form.
     [
       'builder',
@@ -254,6 +263,15 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['builder', 'git replace a b', /^rewrite: /],
     ['builder', 'git filter-branch', /^rewrite: /],
     ['builder', 'git commit --allow-empty -m x', /^allowed$/],
+    // Named as rewrites, so a wider list later still refuses them.
+    ['builder', 'git branch -f main HEAD~1', /^rewrite: /],
+    ['builder', 'git checkout -B x', /^rewrite: /],
+    ['builder', 'git switch -C x', /^rewrite: /],
+    ['builder', 'git cherry-pick abc', /^rewrite: /],
+    ['define', 'git notes add -m x', /^rewrite: /],
+    // Names an option table has only through its prototype.
+    ['builder', 'git constructor -f x', /^allowlist: /],
+    ['builder', 'git toString -B x', /^allowlist: /],
     // xargs into git or gh.
     ['builder', 'xargs git push', /xargs: refused: xargs git push: xargs into git or gh/],
     ['intake', 'xargs -n1 gh issue close', /^xargs: /],

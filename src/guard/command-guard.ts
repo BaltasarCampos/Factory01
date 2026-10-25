@@ -65,7 +65,15 @@ const REWRITES = new Set([
   'filter-branch',
   'filter-repo',
   'replace',
+  'cherry-pick',
+  'notes',
 ]);
+/** Options that move or recreate a branch, by subcommand. */
+const FORCES: Record<string, string[]> = {
+  branch: ['-f', '--force'],
+  checkout: ['-B'],
+  switch: ['-C', '--force-create'],
+};
 /** Long options that write a file, by part of their name, such as `--outputFile`. */
 const WRITES = /output|outfile|out-?dir|report-?path|reports-?dir/i;
 /** Long options that run a program or read settings from elsewhere; git and npm take a prefix. */
@@ -76,8 +84,11 @@ const RUNS = [
   '--userconfig',
   '--globalconfig',
 ].concat(['--call', '--upload-pack', '--receive-pack', '--exec', '--open-files-in-pager']);
-/** Short options that write a file or run a program, by program; `-o` for every program. */
-const SHORT: Record<string, string[]> = { git: ['-O'], gitleaks: ['-r'], npm: ['-c', '-C'] };
+/**
+ * Short options that write a file or run a program, by program, `o` for every program; any letter
+ * of a cluster such as `-qo` counts, an attached argument such as `-O<program>` with it.
+ */
+const SHORT: Record<string, string> = { git: 'O', gitleaks: 'r', npm: 'cC' };
 const EXCLUDES = [':(exclude)*events.jsonl', ':(exclude).factory/events'];
 /** What to use instead of a command off the role's list, by its first words. */
 const BRANCH = 'nothing: the session stays on the branch the factory checked out';
@@ -222,13 +233,16 @@ function checkLabels(words: string[]) {
 
 /** Options that write a file or run a program, for every program. */
 function checkOptions(words: string[]) {
-  const short = ['-o', ...(SHORT[words[0] ?? ''] ?? [])];
+  const program = words[0] ?? '';
+  const refused = `o${Object.hasOwn(SHORT, program) ? (SHORT[program] ?? '') : ''}`;
   for (const word of words.slice(1)) {
     const name = word.split('=')[0] ?? '';
     const long = name.startsWith('--') && name.length >= 4;
     if ((long && WRITES.test(name)) || (long && '--output'.startsWith(name)))
       refuse('option', `the option ${word}, which writes a file; write files with the Write tool`);
-    if (long ? RUNS.some((run) => run.startsWith(name)) : short.some((s) => word.startsWith(s)))
+    const cluster = word.startsWith('--') ? '' : (/^-([A-Za-z]+)/.exec(word)?.[1] ?? '');
+    const letters = cluster.split('');
+    if (long ? RUNS.some((run) => run.startsWith(name)) : letters.some((l) => refused.includes(l)))
       refuse('option', `the option ${word}, which writes a file or runs a program; leave it out`);
   }
 }
@@ -281,7 +295,10 @@ function checkCommand(policy: Policy, role: RoleName, places: Places, command: S
         `${shown}: no session runs ${prefix}; ${FACTORY_RUNS.has(prefix) ? 'commit your work, and the factory pushes it and opens the pull request' : 'only the Owner runs it'}`,
       );
   const amend = words.some((w) => w.length >= 4 && '--amend'.startsWith(w.split('=')[0] ?? ''));
-  if (words[0] === 'git' && (REWRITES.has(words[1] ?? '') || (words[1] === 'commit' && amend)))
+  const sub = words[1] ?? '';
+  const forces = Object.hasOwn(FORCES, sub) ? (FORCES[sub] ?? []) : [];
+  const forced = words.slice(2).some((word) => forces.includes(word));
+  if (words[0] === 'git' && (REWRITES.has(sub) || (sub === 'commit' && amend) || forced))
     refuse('rewrite', `${shown}: no role rewrites a branch; make a new commit instead`);
   const row = policy.roles[role];
   for (const prefix of row.blocked)
