@@ -58,7 +58,24 @@ describe('the role permission table (T074, T081)', () => {
   it('gives each role with a shell only its prefixes, and a role without Bash none', () => {
     expect(row('intake').shell).toEqual(['gh issue']);
     for (const role of ['spec', 'planner'] as const) expect(row(role).shell, role).toEqual([]);
-    expect(row('define').shell).toEqual(['npm', 'git', 'gh issue']);
+    // Builder's and Define's git and npm as explicit subcommands (T084).
+    const git = ['git status', 'git diff', 'git log', 'git show', 'git add', 'git commit'];
+    const npm = ['npm test', 'npm run', 'npm ci', 'npm install'];
+    expect(row('define').shell).toEqual(
+      [...npm, ...git, 'git restore', 'git rm', 'git mv'].concat([
+        'git ls-files',
+        'git grep',
+        'gh issue',
+      ]),
+    );
+    expect(row('builder').shell).toEqual(
+      expect.arrayContaining([...npm, ...git, 'git merge origin/main', 'git merge --abort']),
+    );
+    for (const role of ['define', 'builder'] as const)
+      expect(
+        row(role).shell.filter((p) => !p.includes(' ')),
+        role,
+      ).toEqual(role === 'builder' ? ['vitest'] : []);
     expect(row('reviewer').shell).toEqual(['git diff', 'gh pr comment']);
     expect(row('security').shell).toEqual(['semgrep', 'gitleaks', 'npm audit']);
     expect(row('release').shell).toEqual(['git log', 'git show', 'git diff']);

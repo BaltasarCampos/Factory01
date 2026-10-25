@@ -7,13 +7,18 @@
 // only to `/dev/null` and descriptor copies such as `2>&1`. Programs by name, never by path. The
 // wrappers it sees through, `env`, `command`, `builtin`, `nohup`, `nice` and `timeout`, only
 // without options but `timeout`'s duration, and git without global options but `--no-pager`, so
-// `git -C`, `-c` or `--git-dir` cannot hide a subcommand. Then `deny_shell` and the role's
-// `blocked` prefixes, and last the role's shell column, by prefix. Every reason says what to do
-// instead, so a session does not retry the same refused shape, and goes through `visible()`, since
-// it quotes the session's own command.
+// `git -C`, `-c` or `--git-dir` cannot hide a subcommand. Then the deny rules: the Owner's commands
+// in any form, `deny_shell`, a rewrite in any form, the role's `blocked` prefixes, `xargs` into git
+// or gh, an `owner:` or `state:` label added or removed or a `pause:` label removed, an option
+// that writes a file or runs a program, any program's, and a path no session may read, `~` after
+// `=` or `:` as home; the Reviewer's `git diff` must leave out the event logs. Last the role's
+// shell column, by prefix. An empty line is refused. Every reason says what to do instead, so a
+// session does not retry the same refused shape, and goes through `visible()`, since it quotes the
+// session's own command.
+import { posix } from 'node:path';
 import { visible } from '../notify/summary.js';
 import { ROLES, type RoleName } from '../model/types.js';
-import type { Policy } from './policy.js';
+import { matchesPath, type Policy } from './policy.js';
 import { tokenize, type Redirection, type SimpleCommand } from './tokenizer.js';
 
 export type CommandRule =
@@ -28,6 +33,14 @@ export type CommandRule =
   | 'git-option'
   | 'deny-shell'
   | 'blocked'
+  | 'empty'
+  | 'owner-only'
+  | 'rewrite'
+  | 'xargs'
+  | 'label'
+  | 'option'
+  | 'read'
+  | 'pathspec'
   | 'allowlist';
 
 export type CommandDecision =
@@ -41,6 +54,50 @@ const NAME_VALUE = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** The `deny_shell` entries the factory runs for a session; the others are the Owner's alone. */
 const FACTORY_RUNS = new Set(['git push', 'gh pr create', 'gh pr ready']);
 const DURATION = /^\d+(?:\.\d+)?[smhd]?$/;
+const OWNER = new Set(['approve', 'merge', 'deploy', 'resume', 'keygen']);
+/** The factory's command, by name, as a package or as its built entry point. */
+const FACTORY = /(^|\/)factory(@[^/]*)?$|(^|\/)cli\/main\.js$/;
+/** git subcommands that rewrite a branch or the repository's refs. */
+const REWRITES = new Set([
+  'rebase',
+  'reset',
+  'update-ref',
+  'filter-branch',
+  'filter-repo',
+  'replace',
+]);
+/** Long options that write a file, by part of their name, such as `--outputFile`. */
+const WRITES = /output|outfile|out-?dir|report-?path|reports-?dir/i;
+/** Long options that run a program or read settings from elsewhere; git and npm take a prefix. */
+const RUNS = [
+  '--script-shell',
+  '--node-options',
+  '--prefix',
+  '--userconfig',
+  '--globalconfig',
+].concat(['--call', '--upload-pack', '--receive-pack', '--exec', '--open-files-in-pager']);
+/** Short options that write a file or run a program, by program; `-o` for every program. */
+const SHORT: Record<string, string[]> = { git: ['-O'], gitleaks: ['-r'], npm: ['-c', '-C'] };
+const EXCLUDES = [':(exclude)*events.jsonl', ':(exclude).factory/events'];
+/** What to use instead of a command off the role's list, by its first words. */
+const BRANCH = 'nothing: the session stays on the branch the factory checked out';
+const SCRIPT = 'npm run, with a script in package.json';
+const USE: [string, string][] = [
+  ['git checkout', 'git restore for a file; the session stays on its branch'],
+  ['git switch', BRANCH],
+  ['git branch', BRANCH],
+  ['git fetch', 'nothing: the factory fetches'],
+  ['git pull', 'nothing: the factory fetches'],
+  ['git config', "nothing: the factory sets git's config"],
+  ['git clean', 'git rm or git restore'],
+  ['npm i', 'npm install'],
+  ['npm t', 'npm test'],
+  ['npm run-script', 'npm run'],
+  ['npm exec', SCRIPT],
+  ['npm x', SCRIPT],
+  ['npx', SCRIPT],
+  ['npm init', 'the Write tool for package.json'],
+];
 
 /** What to do instead of each construct the tokenizer refuses, by the start of its reason. */
 const INSTEAD: [RegExp, string][] = [
@@ -83,7 +140,7 @@ function checkAssignment(policy: Policy, name: string, written: string) {
 function checkRedirection({ fd, op, target }: Redirection) {
   const written = `${fd ?? ''}${op}${target}`;
   if (op === '>&' || op === '<&') {
-    if (/^(\d+|-)$/.test(target)) return;
+    if (/^(\d+|-)$/.test(target) || (op === '>&' && target === '/dev/null')) return;
   } else if (target === '/dev/null' && op !== '<>') return;
   if (/^\/dev\/(tcp|udp)\//.test(target))
     refuse('redirection', `the redirection ${written}, which opens a network connection`);
@@ -124,7 +181,77 @@ function gitWords(words: string[]): string[] {
   return ['git', ...rest];
 }
 
-function checkCommand(policy: Policy, role: RoleName, command: SimpleCommand) {
+/** Where the session runs: the hook input's `cwd`, and the home folder `~` stands for. */
+interface Places {
+  cwd: string;
+  home: string;
+}
+
+/** The Owner's commands in any form: `npx factory approve`, `node dist/cli/main.js merge`. */
+function checkOwner(words: string[]) {
+  const at = words.findIndex((word) => FACTORY.test(word));
+  const command = words.slice(at + 1).find((word) => OWNER.has(word));
+  if (at >= 0 && command !== undefined)
+    refuse('owner-only', `factory ${command}: only the Owner runs it`);
+  const keygen = words.findIndex((word) => /(^|\/)ssh-keygen$/.test(word));
+  const rest = words.slice(keygen + 1);
+  if (keygen >= 0 && rest.some((w, i) => w === '-Ysign' || (w === '-Y' && rest[i + 1] === 'sign')))
+    refuse('owner-only', 'ssh-keygen -Y sign: only the Owner signs');
+}
+
+/** A label change the factory and the Owner make: `owner:` and `state:`, or removing `pause:`. */
+function checkLabels(words: string[]) {
+  if (words[0] !== 'gh') return;
+  const why = 'only the factory and the Owner change owner:, state: and pause: labels';
+  if (words[1] === 'api' && words.some((word) => /labels/i.test(word)))
+    refuse('label', `gh api on labels; ${why}`);
+  // Only `list` filters by label; options before the subcommand, `-R <repo>` too, are skipped.
+  let at = 2;
+  while (words[at]?.startsWith('-')) at += words[at] === '-R' || words[at] === '--repo' ? 2 : 1;
+  if (words[at] === 'list') return;
+  words.forEach((word, i) => {
+    const option =
+      /^(--add-label|--remove-label|--label|-l)(?:=(.*))?$/.exec(word) ?? /^(-l)(.+)$/.exec(word);
+    if (option === null) return;
+    const removing = option[1] === '--remove-label';
+    for (const label of (option[2] ?? words[i + 1] ?? '').split(',').map((l) => l.trim()))
+      if (/^(owner|state):/i.test(label) || (removing && /^pause:/i.test(label)))
+        refuse('label', `${removing ? 'removing' : 'adding'} the label ${label}; ${why}`);
+  });
+}
+
+/** Options that write a file or run a program, for every program. */
+function checkOptions(words: string[]) {
+  const short = ['-o', ...(SHORT[words[0] ?? ''] ?? [])];
+  for (const word of words.slice(1)) {
+    const name = word.split('=')[0] ?? '';
+    const long = name.startsWith('--') && name.length >= 4;
+    if ((long && WRITES.test(name)) || (long && '--output'.startsWith(name)))
+      refuse('option', `the option ${word}, which writes a file; write files with the Write tool`);
+    if (long ? RUNS.some((run) => run.startsWith(name)) : short.some((s) => word.startsWith(s)))
+      refuse('option', `the option ${word}, which writes a file or runs a program; leave it out`);
+  }
+}
+
+/** A path no session may read, in a word or after its `=` or `:`, `~` there as home. */
+function checkReads(policy: Policy, { cwd, home }: Places, words: string[]) {
+  for (const word of words.slice(1))
+    for (const part of [word, ...word.split(/[=:]/).slice(1)]) {
+      if (part === '') continue;
+      const tilde = part === '~' || part.startsWith('~/');
+      const path = tilde ? home + part.slice(1) : posix.resolve(cwd, part);
+      const fromHome = posix.relative(home, path);
+      const denied = policy.denyRead.find((pattern) =>
+        pattern.startsWith('~/')
+          ? !fromHome.startsWith('..') && matchesPath(pattern.slice(2), fromHome)
+          : matchesPath(pattern, path.slice(1)),
+      );
+      if (denied !== undefined)
+        refuse('read', `${word}, a path no session may read (${denied}); leave it out`);
+    }
+}
+
+function checkCommand(policy: Policy, role: RoleName, places: Places, command: SimpleCommand) {
   if (command.then === '&')
     refuse('background', 'a command run in the background with &; run it in the foreground');
   for (const { name, value } of command.assignments)
@@ -146,12 +273,16 @@ function checkCommand(policy: Policy, role: RoleName, command: SimpleCommand) {
     refuse('path', `the program ${program} by its path; run it by its name`);
   if (program === 'git') words = gitWords(words);
   const shown = words.join(' ');
+  checkOwner(words);
   for (const prefix of policy.denyShell)
     if (startsWith(words, prefix))
       refuse(
         'deny-shell',
         `${shown}: no session runs ${prefix}; ${FACTORY_RUNS.has(prefix) ? 'commit your work, and the factory pushes it and opens the pull request' : 'only the Owner runs it'}`,
       );
+  const amend = words.some((w) => w.length >= 4 && '--amend'.startsWith(w.split('=')[0] ?? ''));
+  if (words[0] === 'git' && (REWRITES.has(words[1] ?? '') || (words[1] === 'commit' && amend)))
+    refuse('rewrite', `${shown}: no role rewrites a branch; make a new commit instead`);
   const row = policy.roles[role];
   for (const prefix of row.blocked)
     if (startsWith(words, prefix))
@@ -159,17 +290,32 @@ function checkCommand(policy: Policy, role: RoleName, command: SimpleCommand) {
         'blocked',
         `${shown}: the ${role} role may not run ${prefix}${/^git (rebase|reset|commit --amend)/.test(prefix) ? '; no role rewrites a branch, so make a new commit instead' : ''}`,
       );
-  if (!row.shell.some((prefix) => startsWith(words, prefix)))
+  if (words[0] === 'xargs' && words.some((word) => /(^|\/)(git|gh)$/.test(word)))
+    refuse('xargs', `${shown}: xargs into git or gh; run the git or gh command itself`);
+  checkLabels(words);
+  checkOptions(words);
+  checkReads(policy, places, words);
+  if (role === 'reviewer' && startsWith(words, 'git diff')) {
+    const after = words.slice(words.indexOf('--') + 1);
+    if (!words.includes('--') || !EXCLUDES.every((pathspec) => after.includes(pathspec)))
+      refuse(
+        'pathspec',
+        `${shown}: the Reviewer's git diff leaves out the event logs; end it with -- ':(exclude)*events.jsonl' ':(exclude).factory/events'`,
+      );
+  }
+  if (!row.shell.some((prefix) => startsWith(words, prefix))) {
+    const use = USE.find(([start]) => startsWith(words, start))?.[1];
     refuse(
       'allowlist',
-      `${shown || 'a command with no program'}: not a command the ${role} role's shell runs; it runs ${row.shell.join(', ')}`,
+      `${shown || 'a command with no program'}: not a command the ${role} role's shell runs; ${use === undefined ? '' : `use ${use}; `}it runs ${row.shell.join(', ')}`,
     );
+  }
 }
 
 /** Whether `role`'s session may run `command`, and if not, the rule that refused it and why. */
 export function checkBash(
   policy: Policy,
-  input: { role: string; command: string },
+  input: { role: string; command: string } & Places,
 ): CommandDecision {
   const role = input.role as RoleName;
   try {
@@ -182,7 +328,9 @@ export function checkBash(
         'write the command out plainly';
       return refuse('unanalysable', `${result.reason}, which the guard cannot check; ${instead}`);
     }
-    for (const command of result.commands) checkCommand(policy, role, command);
+    if (result.commands.length === 0)
+      refuse('empty', 'an empty command, with nothing to run; send the command itself');
+    for (const command of result.commands) checkCommand(policy, role, input, command);
     return { allowed: true };
   } catch (error) {
     if (!(error instanceof Refused)) throw error;
