@@ -237,6 +237,20 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['security', 'gitleaks detect -v -r x', /^option: /],
     ['builder', 'git grep -hOless x', /option: refused: the option -hOless, .*runs a program/],
     ['define', 'git grep -h -O less x', /^option: /],
+    // Digits in a cluster, which git reads on past, as click and pflag may.
+    ['builder', 'git grep -3Oecho x', /^option: /],
+    ['define', 'git grep -n3Oecho x', /^option: /],
+    ['security', 'semgrep -1o x', /^option: /],
+    ['security', 'gitleaks detect -5r x', /^option: /],
+    // A refused letter after another letter: perhaps a value, so the reason says to split it.
+    [
+      'builder',
+      'git log -Sfoo',
+      /option: .*put the option's value in a separate word, such as git log -S foo$/,
+    ],
+    ['builder', 'git commit -m x -docs', /put the option's value in a separate word/],
+    ['builder', 'git grep -O x', /option: .*runs a program; leave it out$/],
+    ['builder', 'git log -S foo', /^allowed$/],
     ['builder', 'git log -n5 --oneline', /^allowed$/],
     ['security', 'semgrep -q --metrics=off x', /^allowed$/],
     // The Owner's commands in any form.
@@ -269,6 +283,16 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['builder', 'git switch -C x', /^rewrite: /],
     ['builder', 'git cherry-pick abc', /^rewrite: /],
     ['define', 'git notes add -m x', /^rewrite: /],
+    // The force options in a cluster, and in git's shortened long forms, no shorter than git takes.
+    ['builder', 'git branch -vf x y', /^rewrite: /],
+    ['builder', 'git checkout -qB x', /^rewrite: /],
+    ['builder', 'git switch -qC x', /^rewrite: /],
+    ['builder', 'git branch --forc x y', /^rewrite: /],
+    ['builder', 'git branch --force x y', /^rewrite: /],
+    ['builder', 'git switch --force- x', /^rewrite: /],
+    ['builder', 'git switch --force-c x', /^rewrite: /],
+    ['builder', 'git branch --for x y', /^allowlist: /],
+    ['builder', 'git switch --force x', /^allowlist: /],
     // Names an option table has only through its prototype.
     ['builder', 'git constructor -f x', /^allowlist: /],
     ['builder', 'git toString -B x', /^allowlist: /],

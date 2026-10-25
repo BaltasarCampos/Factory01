@@ -68,12 +68,18 @@ const REWRITES = new Set([
   'cherry-pick',
   'notes',
 ]);
-/** Options that move or recreate a branch, by subcommand. */
-const FORCES: Record<string, string[]> = {
-  branch: ['-f', '--force'],
-  checkout: ['-B'],
-  switch: ['-C', '--force-create'],
+/**
+ * Options that move or recreate a branch, by subcommand: the letter, in any cluster, and the long
+ * form with the shortest prefix git accepts (`--forc`, since `--for` could be `--format`).
+ */
+const FORCES: Record<string, { letter: string; long?: string; shortest?: number }> = {
+  branch: { letter: 'f', long: '--force', shortest: 6 },
+  checkout: { letter: 'B' },
+  switch: { letter: 'C', long: '--force-create', shortest: 8 },
 };
+/** A word's cluster of short options: git reads on past digits, as in `-3O<program>`. */
+const cluster = (word: string) =>
+  word.startsWith('--') ? '' : (/^-([A-Za-z0-9]+)/.exec(word)?.[1] ?? '');
 /** Long options that write a file, by part of their name, such as `--outputFile`. */
 const WRITES = /output|outfile|out-?dir|report-?path|reports-?dir/i;
 /** Long options that run a program or read settings from elsewhere; git and npm take a prefix. */
@@ -240,10 +246,14 @@ function checkOptions(words: string[]) {
     const long = name.startsWith('--') && name.length >= 4;
     if ((long && WRITES.test(name)) || (long && '--output'.startsWith(name)))
       refuse('option', `the option ${word}, which writes a file; write files with the Write tool`);
-    const cluster = word.startsWith('--') ? '' : (/^-([A-Za-z]+)/.exec(word)?.[1] ?? '');
-    const letters = cluster.split('');
-    if (long ? RUNS.some((run) => run.startsWith(name)) : letters.some((l) => refused.includes(l)))
-      refuse('option', `the option ${word}, which writes a file or runs a program; leave it out`);
+    const at = cluster(word)
+      .split('')
+      .findIndex((letter) => refused.includes(letter));
+    if (long ? RUNS.some((run) => run.startsWith(name)) : at >= 0)
+      refuse(
+        'option',
+        `the option ${word}, which writes a file or runs a program; ${at > 0 ? "put the option's value in a separate word, such as git log -S foo" : 'leave it out'}`,
+      );
   }
 }
 
@@ -296,8 +306,14 @@ function checkCommand(policy: Policy, role: RoleName, places: Places, command: S
       );
   const amend = words.some((w) => w.length >= 4 && '--amend'.startsWith(w.split('=')[0] ?? ''));
   const sub = words[1] ?? '';
-  const forces = Object.hasOwn(FORCES, sub) ? (FORCES[sub] ?? []) : [];
-  const forced = words.slice(2).some((word) => forces.includes(word));
+  const force = Object.hasOwn(FORCES, sub) ? FORCES[sub] : undefined;
+  const forced =
+    force !== undefined &&
+    words.slice(2).some((word) => {
+      const name = word.split('=')[0] ?? '';
+      const prefix = name.length >= (force.shortest ?? 0) && force.long?.startsWith(name) === true;
+      return cluster(word).includes(force.letter) || prefix;
+    });
   if (words[0] === 'git' && (REWRITES.has(sub) || (sub === 'commit' && amend) || forced))
     refuse('rewrite', `${shown}: no role rewrites a branch; make a new commit instead`);
   const row = policy.roles[role];
