@@ -15,10 +15,10 @@
 // shell column, by prefix. An empty line is refused. Every reason says what to do instead, so a
 // session does not retry the same refused shape, and goes through `visible()`, since it quotes the
 // session's own command.
-import { posix } from 'node:path';
 import { visible } from '../notify/summary.js';
 import { ROLES, type RoleName } from '../model/types.js';
-import { matchesPath, type Policy } from './policy.js';
+import { absolute, deniedRead } from './paths.js';
+import type { Policy } from './policy.js';
 import { tokenize, type Redirection, type SimpleCommand } from './tokenizer.js';
 
 export type CommandRule =
@@ -261,15 +261,7 @@ function checkOptions(words: string[]) {
 function checkReads(policy: Policy, { cwd, home }: Places, words: string[]) {
   for (const word of words.slice(1))
     for (const part of [word, ...word.split(/[=:]/).slice(1)]) {
-      if (part === '') continue;
-      const tilde = part === '~' || part.startsWith('~/');
-      const path = tilde ? home + part.slice(1) : posix.resolve(cwd, part);
-      const fromHome = posix.relative(home, path);
-      const denied = policy.denyRead.find((pattern) =>
-        pattern.startsWith('~/')
-          ? !fromHome.startsWith('..') && matchesPath(pattern.slice(2), fromHome)
-          : matchesPath(pattern, path.slice(1)),
-      );
+      const denied = part === '' ? undefined : deniedRead(policy, home, absolute(part, cwd, home));
       if (denied !== undefined)
         refuse('read', `${word}, a path no session may read (${denied}); leave it out`);
     }
