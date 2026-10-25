@@ -1,6 +1,7 @@
 // The guards over a table of cases (T075). The command guard (T084): each role's shell runs only
 // its own commands, and the guard fails closed on whatever it cannot check, with a reason that
-// says what to do instead. The path and read guards' cases are slice 25f's.
+// says what to do instead; the deny rules come first. The path and read guards' cases are slice
+// 25f's.
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { checkBash, WRAPPERS } from '../../src/guard/command-guard.js';
@@ -10,7 +11,9 @@ import { ROLES } from '../../src/model/types.js';
 const policy = loadPolicy(
   readFileSync(new URL('../../factory/policy/roles.yaml', import.meta.url), 'utf8'),
 );
-const check = (role: string, command: string) => checkBash(policy, { role, command });
+const PLACES = { cwd: '/w/clone', home: '/home/o' };
+const check = (role: string, command: string) => checkBash(policy, { role, command, ...PLACES });
+const EXCLUDE = "-- ':(exclude)*events.jsonl' ':(exclude).factory/events'";
 const refusal = (role: string, command: string) => {
   const decision = check(role, command);
   return decision.allowed ? 'allowed' : `${decision.rule}: ${decision.reason}`;
@@ -29,7 +32,7 @@ describe('the command guard: each role runs its own commands (T084, T075)', () =
     ['builder', 'timeout 300 npm test'],
     ['builder', 'npm test | npx vitest --help'],
     ['test', 'npm run test -- --reporter=dot'],
-    ['reviewer', 'git diff origin/main'],
+    ['reviewer', `git diff origin/main ${EXCLUDE}`],
     ['reviewer', 'gh pr comment 7 --body-file reports/verify.md'],
     ['integrator', 'git merge origin/main'],
     ['integrator', 'git merge --abort'],
@@ -44,12 +47,13 @@ describe('the command guard: each role runs its own commands (T084, T075)', () =
   });
 
   it.each([
+    ['intake', 'cat .env', /read: refused: \.env, a path no session may read \(\*\*\/\.env\*\)/],
     [
       'intake',
-      'cat .env',
-      /allowlist: refused: cat \.env: not a command the intake role's shell runs; it runs gh issue/,
+      'cat notes.md',
+      /allowlist: refused: cat notes\.md: not a command the intake role's shell runs; it runs gh issue/,
     ],
-    ['builder', 'cat .env', /allowlist: .*it runs npm, npx vitest, vitest, git/],
+    ['builder', 'cat notes.md', /allowlist: .*it runs npm test, npm run, npm ci, npm install, npx/],
     ['builder', 'ls', /allowlist/],
     [
       'reviewer',
@@ -77,8 +81,8 @@ describe('the command guard: each role runs its own commands (T084, T075)', () =
         /deny-shell: .*commit your work, and the factory pushes it/,
       );
       expect(refusal(role, 'gh pr create --draft'), role).toMatch(/deny-shell/);
-      expect(refusal(role, 'factory approve 12'), role).toMatch(/deny-shell: .*only the Owner/);
-      expect(refusal(role, 'ssh-keygen -Y sign -f k -n file x'), role).toMatch(/deny-shell/);
+      expect(refusal(role, 'factory approve 12'), role).toMatch(/owner-only: .*only the Owner/);
+      expect(refusal(role, 'ssh-keygen -Y sign -f k -n file x'), role).toMatch(/owner-only/);
     }
   });
 
@@ -87,11 +91,11 @@ describe('the command guard: each role runs its own commands (T084, T075)', () =
       expect(refusal(role, 'git status'), role).toMatch(/^no-shell: .*has no shell; use the Read/);
   });
 
-  it('refuses no-rewrite prefixes with what to do instead', () => {
+  it('refuses a rewrite with what to do instead', () => {
     expect(refusal('builder', 'git reset --hard HEAD~1')).toMatch(
-      /blocked: .*no role rewrites a branch, so make a new commit instead/,
+      /rewrite: .*no role rewrites a branch; make a new commit instead/,
     );
-    expect(refusal('define', 'git rebase origin/main')).toMatch(/blocked/);
+    expect(refusal('define', 'git rebase origin/main')).toMatch(/^rewrite: /);
   });
 });
 
@@ -173,7 +177,7 @@ describe('the command guard: what it refuses before the allowlist (T084, T075)',
     expect(refusal('builder', 'env git push')).toMatch(/^deny-shell: refused: git push: /);
     expect(refusal('builder', 'command nohup timeout 5 git push')).toMatch(/^deny-shell: /);
     expect(refusal('builder', 'nice builtin git --no-pager push')).toMatch(/^deny-shell: /);
-    expect(refusal('builder', 'git -P reset --hard')).toMatch(/^blocked: /);
+    expect(refusal('builder', 'git -P reset --hard')).toMatch(/^rewrite: /);
     expect(refusal('integrator', 'git --no-pager merge origin/main')).toBe('allowed');
     expect(refusal('builder', 'env')).toMatch(/allowlist: refused: a command with no program/);
     expect(WRAPPERS).toEqual(['env', 'command', 'builtin', 'nohup', 'nice', 'timeout']);
@@ -182,7 +186,7 @@ describe('the command guard: what it refuses before the allowlist (T084, T075)',
   it('checks every command of a line, and refuses the line for any one', () => {
     expect(refusal('builder', 'npm test && git status && git push')).toMatch(/^deny-shell: /);
     expect(refusal('builder', 'git status\ncurl -s x')).toMatch(/allowlist: refused: curl -s x/);
-    expect(refusal('builder', 'npm test || cat .env')).toMatch(/allowlist: refused: cat \.env/);
+    expect(refusal('builder', 'npm test || cat x')).toMatch(/allowlist: refused: cat x/);
   });
 
   it("shows the session's own text in a reason only through visible()", () => {
@@ -191,5 +195,141 @@ describe('the command guard: what it refuses before the allowlist (T084, T075)',
     if (decision.allowed) return;
     expect(decision.reason).toContain('a\\u{1b}[2Jb\\u{202e}');
     expect(decision.reason).not.toMatch(/[\u001b‮]/);
+  });
+});
+
+describe('the command guard: the deny rules, and what to use instead (T084, T075)', () => {
+  it.each([
+    // An empty line, and >&/dev/null, the same as &>/dev/null.
+    ['builder', '', /^empty: refused: an empty command, with nothing to run/],
+    ['builder', '  \n\t\n', /^empty: /],
+    ['builder', '# only a comment', /^empty: /],
+    ['builder', 'npm test >&/dev/null', /^allowed$/],
+    // Options that write a file, any program's.
+    [
+      'reviewer',
+      `git diff --output=.station.json HEAD ${EXCLUDE}`,
+      /option: refused: the option --output=\.station\.json, which writes a file; write files with the Write tool/,
+    ],
+    ['release', 'git log --output=/tmp/x', /^option: .*writes a file/],
+    ['security', 'semgrep --output x', /^option: .*writes a file/],
+    ['security', 'gitleaks detect --report-path x', /^option: .*writes a file/],
+    ['security', 'semgrep -o x', /^option: /],
+    ['security', 'semgrep --sarif-output=x', /^option: .*writes a file/],
+    ['security', 'gitleaks detect -r x', /^option: /],
+    ['builder', 'git log --outp=x', /^option: .*writes a file/],
+    ['builder', 'git format-patch -o out HEAD~1', /^option: /],
+    ['builder', 'git diff --output-directory=x', /^option: .*writes a file/],
+    ['builder', 'npx vitest run --outputFile=x.json', /^option: .*writes a file/],
+    ['test', 'npm test -- --coverage.reportsDirectory=x', /^option: .*writes a file/],
+    // Options that run a program or read settings from elsewhere, shortened too.
+    ['builder', 'npm test --script-shell=python3', /option: .*runs a program; leave it out/],
+    ['builder', 'npm test --script-sh=python3', /^option: /],
+    ['builder', 'npm --prefix ../other test', /^option: /],
+    ['builder', 'npm -C ../other test', /^option: /],
+    ['builder', 'npm run x --node-options=--require=y', /^option: /],
+    ['builder', 'git grep -O x', /^option: /],
+    ['builder', 'git grep --open-files-in-pager=x y', /^option: /],
+    // The Owner's commands in any form.
+    [
+      'builder',
+      'npx factory approve 3',
+      /owner-only: refused: factory approve: only the Owner runs it/,
+    ],
+    ['builder', 'npm exec factory merge 3', /^owner-only: /],
+    ['builder', 'npx factory@1.2.0 resume', /^owner-only: /],
+    ['builder', 'node dist/cli/main.js deploy', /^owner-only: /],
+    ['intake', 'gh issue view 1 && npx --yes factory keygen', /^owner-only: /],
+    [
+      'builder',
+      'ssh-keygen -f k -Y sign -n file x',
+      /owner-only: refused: ssh-keygen -Y sign: only the Owner signs/,
+    ],
+    ['builder', 'ssh-keygen -Ysign x', /^owner-only: /],
+    // Rewrites in any form, shortened options too.
+    ['builder', 'git commit -a --amend', /^rewrite: /],
+    ['builder', 'git commit --amen -m x', /^rewrite: /],
+    ['builder', 'git commit --am', /^rewrite: /],
+    ['builder', 'git update-ref refs/heads/x HEAD', /^rewrite: /],
+    ['builder', 'git replace a b', /^rewrite: /],
+    ['builder', 'git filter-branch', /^rewrite: /],
+    ['builder', 'git commit --allow-empty -m x', /^allowed$/],
+    // xargs into git or gh.
+    ['builder', 'xargs git push', /xargs: refused: xargs git push: xargs into git or gh/],
+    ['intake', 'xargs -n1 gh issue close', /^xargs: /],
+    // Labels the factory and the Owner change.
+    [
+      'intake',
+      'gh issue edit 1 --add-label state:approved',
+      /label: refused: adding the label state:approved; only the factory and the Owner/,
+    ],
+    ['ops', 'gh issue edit 1 --add-label=Owner:me', /^label: /],
+    [
+      'ops',
+      'gh issue edit 1 --remove-label pause:line',
+      /label: refused: removing the label pause:line/,
+    ],
+    ['ops', 'gh issue edit 1 --remove-label state:x', /^label: /],
+    ['define', 'gh issue create -t x -b y -l state:x', /^label: /],
+    ['define', 'gh issue create -t x -b y -lSTATE:x', /^label: /],
+    ['define', 'gh issue create -t x -b y --label bug,state:x', /^label: /],
+    [
+      'intake',
+      "gh api repos/o/r/issues/1/labels -f 'labels[]=x'",
+      /label: refused: gh api on labels/,
+    ],
+    ['ops', 'gh issue edit 1 --add-label pause:line', /^allowed$/],
+    ['ops', 'gh issue edit 1 --add-label bug', /^allowed$/],
+    ['ops', 'gh issue -R o/r edit 1 --add-label state:x', /^label: /],
+    ['ops', 'gh issue --repo o/r edit 1 --add-label=owner:x', /^label: /],
+    ['intake', 'gh issue list --label state:approved', /^allowed$/],
+    ['intake', 'gh issue -R o/r list -l state:approved', /^allowed$/],
+    // Paths no session may read, ~ after = or : as home.
+    ['builder', 'git show HEAD:.env', /read: refused: HEAD:\.env, a path no session may read/],
+    [
+      'builder',
+      'git diff --no-index ~/.factory/keys/approve_ed25519 x',
+      /read: .*\(~\/\.factory\/\*\*\)/,
+    ],
+    ['builder', 'git diff a=~/.gitconfig', /^read: /],
+    ['builder', 'git log x:~/.ssh/id_ed25519', /^read: /],
+    ['builder', 'git grep x -- ../../home/o/.ssh/id_ed25519', /^read: .*\(~\/\.ssh\/\*\*\)/],
+    ['builder', 'git add src/.env.local', /^read: /],
+    ['builder', 'git show HEAD:src/env.ts', /^allowed$/],
+    // The Reviewer's git diff leaves out the event logs.
+    [
+      'reviewer',
+      'git diff origin/main',
+      /pathspec: .*end it with -- ':\(exclude\)\*events\.jsonl' ':\(exclude\)\.factory\/events'/,
+    ],
+    ['reviewer', "git diff origin/main -- ':(exclude)*events.jsonl'", /^pathspec: /],
+    [
+      'reviewer',
+      "git diff origin/main ':(exclude)*events.jsonl' ':(exclude).factory/events'",
+      /^pathspec: /,
+    ],
+    // A command off the list, with what to use instead.
+    [
+      'builder',
+      'git checkout -- src/a.ts',
+      /allowlist: .*use git restore for a file; the session stays on its branch; it runs/,
+    ],
+    ['builder', 'git switch -c x', /use nothing: the session stays on the branch/],
+    ['builder', 'git fetch origin main', /use nothing: the factory fetches/],
+    ['builder', 'git config alias.x status', /use nothing: the factory sets git's config/],
+    ['builder', 'npm i left-pad', /use npm install;/],
+    ['builder', 'npx tsc', /use npm run, with a script in package\.json;/],
+  ])('%s: %j', (role, command, expected) => {
+    expect(refusal(role, command)).toMatch(expected);
+  });
+
+  it('refuses each program that runs a string of its own, for the Builder and Define', () => {
+    for (const role of ['builder', 'define'])
+      for (const command of [
+        "env -S 'git status'",
+        "npm exec -c 'git status'",
+        "npm x -c 'git status'",
+      ].concat(["npx -c 'git status'", 'npm exec -- npm test']))
+        expect(check(role, command).allowed, `${role}: ${command}`).toBe(false);
   });
 });

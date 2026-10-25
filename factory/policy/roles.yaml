@@ -21,7 +21,24 @@ roles:
   define:
     tools: [Read, Write, Edit, Bash, Grep, Glob]
     write: ['**']
-    shell: [npm, git, gh issue]
+    # Explicit subcommands, so a shortened name or a form that runs a string never matches (T084).
+    shell:
+      - npm test
+      - npm run
+      - npm ci
+      - npm install
+      - git status
+      - git diff
+      - git log
+      - git show
+      - git add
+      - git commit
+      - git restore
+      - git rm
+      - git mv
+      - git ls-files
+      - git grep
+      - gh issue
     blocked: [git rebase, git reset, git commit --amend]
     network: [registry.npmjs.org, api.github.com]
     branch: claude/define
@@ -56,7 +73,28 @@ roles:
     tools: [Read, Write, Edit, Bash, Grep, Glob, Agent]
     # Never tasks.md, even when a task lists it: the dispatcher ticks it (T174).
     write: ['{task}']
-    shell: [npm, npx vitest, vitest, git]
+    # Explicit subcommands, as Define's, with what a conflict session needs: the merges (T084).
+    shell:
+      - npm test
+      - npm run
+      - npm ci
+      - npm install
+      - npx vitest
+      - vitest
+      - git status
+      - git diff
+      - git log
+      - git show
+      - git add
+      - git commit
+      - git restore
+      - git rm
+      - git mv
+      - git stash
+      - git ls-files
+      - git grep
+      - git merge origin/main
+      - git merge --abort
     blocked: [git rebase, git reset, git commit --amend]
     network: [registry.npmjs.org]
     branch: item
