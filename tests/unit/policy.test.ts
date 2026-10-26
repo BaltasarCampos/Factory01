@@ -222,6 +222,11 @@ describe('loadPolicy refuses a table it does not expect (T082)', () => {
       /assignments: CI-X is not a variable name/,
     ],
     [
+      'a shell naming a shell function of Claude Code (T081)',
+      swap('shell: [gh issue]', 'shell: [gh issue, grep -r]'),
+      /intake: shell names grep -r, a shell function of Claude Code's own/,
+    ],
+    [
       'a blank entry',
       swap('shell: [gh issue]', "shell: ['gh issue', ' ']"),
       /intake: shell has a blank or padded entry/,

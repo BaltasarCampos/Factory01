@@ -258,7 +258,8 @@ describe('factory hook entry: fail closed (contracts/hooks.md)', () => {
     expect((await hook('log', '[]')).stderr).toMatch(/not a JSON object/);
   });
 
-  it.each(['path-guard', 'read-guard', 'command-guard', 'session-start', 'pre-compact', 'nope'])(
+  // The guard hooks are in tests/integration/guard-hooks.test.ts (slice 28-1).
+  it.each(['session-start', 'pre-compact', 'nope'])(
     '%s is not in this build, so it blocks',
     async (event) => {
       const r = await hook(event, input(workingCopy()));

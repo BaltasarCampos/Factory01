@@ -37,6 +37,8 @@ export interface Policy {
 }
 
 const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'network', 'branch'];
+/** Names Claude Code defines as shell functions of its own in some sessions (T081). */
+const CLAUDE_FUNCTIONS = ['find', 'grep', 'rg', 'pkill'];
 const HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
 const TOP_KEYS = ['roles', 'deny_write', 'deny_read', 'deny_shell', 'keep_tools', 'assignments'];
 
@@ -68,6 +70,9 @@ function rolePolicy(role: RoleName, value: unknown): RolePolicy {
     if (!(TOOLS as readonly string[]).includes(tool)) throw refuse(`${role}: unknown tool ${tool}`);
   const write = strings(row.write, `${role}: write`);
   const shell = strings(row.shell, `${role}: shell`);
+  const shadowed = shell.find((prefix) => CLAUDE_FUNCTIONS.includes(prefix.split(' ')[0] ?? ''));
+  if (shadowed !== undefined)
+    throw refuse(`${role}: shell names ${shadowed}, a shell function of Claude Code's own`);
   if (write.length > 0 && !tools.includes('Write') && !tools.includes('Edit'))
     throw refuse(`${role}: writes without Write or Edit`);
   if (shell.length > 0 !== tools.includes('Bash'))
