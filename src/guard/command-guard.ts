@@ -72,10 +72,11 @@ const REWRITES = new Set([
  * Options that move or recreate a branch, by subcommand: the letter, in any cluster, and the long
  * form with the shortest prefix git accepts (`--forc`, since `--for` could be `--format`).
  */
-const FORCES: Record<string, { letter: string; long?: string; shortest?: number }> = {
-  branch: { letter: 'f', long: '--force', shortest: 6 },
-  checkout: { letter: 'B' },
-  switch: { letter: 'C', long: '--force-create', shortest: 8 },
+const FORCES: Record<string, { letters: string; long?: string; shortest?: number }> = {
+  // -M and -C rename and copy over an existing branch; their long forms add --force.
+  branch: { letters: 'fMC', long: '--force', shortest: 6 },
+  checkout: { letters: 'B' },
+  switch: { letters: 'C', long: '--force-create', shortest: 8 },
 };
 /** A word's cluster of short options: git reads on past digits, as in `-3O<program>`. */
 const cluster = (word: string) =>
@@ -252,7 +253,7 @@ function checkOptions(words: string[]) {
     if (long ? RUNS.some((run) => run.startsWith(name)) : at >= 0)
       refuse(
         'option',
-        `the option ${word}, which writes a file or runs a program; ${at > 0 ? "put the option's value in a separate word, such as git log -S foo" : 'leave it out'}`,
+        `the option ${word}, which writes a file or runs a program; ${at > 0 ? "if this is the option's value, put it in a separate word, such as git log -S foo; otherwise leave the option out" : 'leave it out'}`,
       );
   }
 }
@@ -304,7 +305,11 @@ function checkCommand(policy: Policy, role: RoleName, places: Places, command: S
     words.slice(2).some((word) => {
       const name = word.split('=')[0] ?? '';
       const prefix = name.length >= (force.shortest ?? 0) && force.long?.startsWith(name) === true;
-      return cluster(word).includes(force.letter) || prefix;
+      return (
+        cluster(word)
+          .split('')
+          .some((l) => force.letters.includes(l)) || prefix
+      );
     });
   if (words[0] === 'git' && (REWRITES.has(sub) || (sub === 'commit' && amend) || forced))
     refuse('rewrite', `${shown}: no role rewrites a branch; make a new commit instead`);

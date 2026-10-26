@@ -50,6 +50,9 @@ export function checkRead(policy: Policy, input: ReadInput): GuardDecision<ReadR
         `${shown}: it holds ${held}, which no session reads; search inside the repository`,
       );
     const glob = input.tool === 'Grep' ? (input.glob ?? '') : '';
+    // The glob is compared as text, so braces, which Grep expands, are refused.
+    if (/[{}]/.test(glob))
+      refuse('secret', `the glob ${glob} has braces; give one pattern without braces`);
     const globbed = policy.denyRead.find((p) => !p.startsWith('~/') && matchesPath(p, glob));
     if (globbed !== undefined)
       refuse('secret', `the glob ${glob} names files no session reads (${globbed})`);
