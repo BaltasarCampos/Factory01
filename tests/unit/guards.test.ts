@@ -1,10 +1,15 @@
 // The guards over a table of cases (T075). The command guard (T084): each role's shell runs only
 // its own commands, and the guard fails closed on whatever it cannot check, with a reason that
-// says what to do instead; the deny rules come first. The path and read guards' cases are slice
-// 25f's.
-import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+// says what to do instead; the deny rules come first. The path and read guards (T085): writes only
+// to the role's own files inside the clone, never a protected one, and no read of a secret, by the
+// path named or the file it resolves to.
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterAll, describe, expect, it } from 'vitest';
 import { checkBash, WRAPPERS } from '../../src/guard/command-guard.js';
+import { checkWrite } from '../../src/guard/path-guard.js';
+import { checkRead, type ReadInput } from '../../src/guard/read-guard.js';
 import { loadPolicy } from '../../src/guard/policy.js';
 import { ROLES } from '../../src/model/types.js';
 
@@ -230,6 +235,29 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['builder', 'npm run x --node-options=--require=y', /^option: /],
     ['builder', 'git grep -O x', /^option: /],
     ['builder', 'git grep --open-files-in-pager=x y', /^option: /],
+    // Short options in a cluster, an attached argument with them, and the same spelled apart.
+    ['security', 'semgrep -qo x', /option: refused: the option -qo, /],
+    ['security', 'semgrep -q -o x', /^option: /],
+    ['security', 'gitleaks detect -vr x', /^option: /],
+    ['security', 'gitleaks detect -v -r x', /^option: /],
+    ['builder', 'git grep -hOless x', /option: refused: the option -hOless, .*runs a program/],
+    ['define', 'git grep -h -O less x', /^option: /],
+    // Digits in a cluster, which git reads on past, as click and pflag may.
+    ['builder', 'git grep -3Oecho x', /^option: /],
+    ['define', 'git grep -n3Oecho x', /^option: /],
+    ['security', 'semgrep -1o x', /^option: /],
+    ['security', 'gitleaks detect -5r x', /^option: /],
+    // A refused letter after another letter: perhaps a value, so the reason says to split it.
+    [
+      'builder',
+      'git log -Sfoo',
+      /option: .*put the option's value in a separate word, such as git log -S foo$/,
+    ],
+    ['builder', 'git commit -m x -docs', /put the option's value in a separate word/],
+    ['builder', 'git grep -O x', /option: .*runs a program; leave it out$/],
+    ['builder', 'git log -S foo', /^allowed$/],
+    ['builder', 'git log -n5 --oneline', /^allowed$/],
+    ['security', 'semgrep -q --metrics=off x', /^allowed$/],
     // The Owner's commands in any form.
     [
       'builder',
@@ -254,6 +282,25 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['builder', 'git replace a b', /^rewrite: /],
     ['builder', 'git filter-branch', /^rewrite: /],
     ['builder', 'git commit --allow-empty -m x', /^allowed$/],
+    // Named as rewrites, so a wider list later still refuses them.
+    ['builder', 'git branch -f main HEAD~1', /^rewrite: /],
+    ['builder', 'git checkout -B x', /^rewrite: /],
+    ['builder', 'git switch -C x', /^rewrite: /],
+    ['builder', 'git cherry-pick abc', /^rewrite: /],
+    ['define', 'git notes add -m x', /^rewrite: /],
+    // The force options in a cluster, and in git's shortened long forms, no shorter than git takes.
+    ['builder', 'git branch -vf x y', /^rewrite: /],
+    ['builder', 'git checkout -qB x', /^rewrite: /],
+    ['builder', 'git switch -qC x', /^rewrite: /],
+    ['builder', 'git branch --forc x y', /^rewrite: /],
+    ['builder', 'git branch --force x y', /^rewrite: /],
+    ['builder', 'git switch --force- x', /^rewrite: /],
+    ['builder', 'git switch --force-c x', /^rewrite: /],
+    ['builder', 'git branch --for x y', /^allowlist: /],
+    ['builder', 'git switch --force x', /^allowlist: /],
+    // Names an option table has only through its prototype.
+    ['builder', 'git constructor -f x', /^allowlist: /],
+    ['builder', 'git toString -B x', /^allowlist: /],
     // xargs into git or gh.
     ['builder', 'xargs git push', /xargs: refused: xargs git push: xargs into git or gh/],
     ['intake', 'xargs -n1 gh issue close', /^xargs: /],
@@ -331,5 +378,201 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
         "npm x -c 'git status'",
       ].concat(["npx -c 'git status'", 'npm exec -- npm test']))
         expect(check(role, command).allowed, `${role}: ${command}`).toBe(false);
+  });
+});
+
+// A clone and a home folder on disk, so the symlinks are real.
+const root = mkdtempSync(join(tmpdir(), 'guards-'));
+const home = join(root, 'home');
+const clone = join(home, 'factory-work', 'repo', '12-x');
+for (const folder of ['src', 'tests', 'specs/12-x', '.factory/events'])
+  mkdirSync(join(clone, folder), { recursive: true });
+for (const folder of ['.ssh', '.factory/keys', 'project'])
+  mkdirSync(join(home, folder), { recursive: true });
+for (const file of ['.ssh/id_ed25519', '.factory/keys/approve_ed25519', 'project/x.ts'])
+  writeFileSync(join(home, file), 'x');
+for (const file of ['src/a.ts', '.env', 'specs/12-x/events.jsonl'])
+  writeFileSync(join(clone, file), 'x');
+symlinkSync(join(home, 'project'), join(clone, 'linked'));
+symlinkSync(join(home, '.ssh/id_ed25519'), join(clone, 'src/key.ts'));
+symlinkSync(join(home, 'nowhere'), join(clone, 'src/dangling.ts'));
+afterAll(() => {
+  rmSync(root, { recursive: true, force: true });
+});
+
+const FILES = [
+  'src/a.ts',
+  'tests/a.test.ts',
+  'specs/12-x/tasks.md',
+  '.github/workflows/x.yml',
+].concat(['src/.env.local', 'linked/x.ts', 'src/key.ts', 'src/dangling.ts', 'src/**']);
+const write = (role: string, path: string, files = FILES) => {
+  const decision = checkWrite(policy, {
+    role,
+    path,
+    cwd: clone,
+    clone,
+    home,
+    feature: 'specs/12-x',
+    files,
+  });
+  return decision.allowed ? 'allowed' : `${decision.rule}: ${decision.reason}`;
+};
+const read = (role: string, tool: ReadInput['tool'], path?: string, glob?: string) => {
+  const input = {
+    role,
+    tool,
+    cwd: clone,
+    clone,
+    home,
+    ...(path === undefined ? {} : { path }),
+    ...(glob === undefined ? {} : { glob }),
+  };
+  const decision = checkRead(policy, input);
+  return decision.allowed ? 'allowed' : `${decision.rule}: ${decision.reason}`;
+};
+
+describe('the path guard: each role writes only its own files, inside the clone (T085, T075)', () => {
+  it.each([
+    ['builder', 'src/a.ts', /^allowed$/],
+    ['builder', join(clone, 'src/a.ts'), /^allowed$/],
+    ['builder', 'tests/a.test.ts', /^allowed$/],
+    ['test', 'tests/a.test.ts', /^allowed$/],
+    ['spec', 'specs/12-x/spec.md', /^allowed$/],
+    ['reviewer', 'specs/12-x/reports/verify.md', /^allowed$/],
+    ['define', '.factory/brief.md', /^allowed$/],
+    ['release', '.factory/releases/v1.md', /^allowed$/],
+    // Off the role's files.
+    ['intake', 'src/a.ts', /^no-write: refused: the intake role writes no files$/],
+    ['nobody', 'src/a.ts', /^no-write: /],
+    [
+      'builder',
+      'src/b.ts',
+      /not-writable: refused: src\/b\.ts: not a file the builder role writes; it writes src\/a\.ts, /,
+    ],
+    ['builder', 'src/x/y.ts', /^not-writable: /],
+    ['test', 'src/a.ts', /^not-writable: /],
+    [
+      'spec',
+      'src/a.ts',
+      /not-writable: .*it writes specs\/12-x\/spec\.md, specs\/12-x\/checklists/,
+    ],
+    ['reviewer', 'specs/12-x/reports/security.md', /^not-writable: /],
+    // Protected, even when the task lists it, in any letter case.
+    ['builder', 'specs/12-x/tasks.md', /protected: .*the dispatcher ticks tasks\.md/],
+    ['builder', 'specs/12-X/TASKS.md', /^protected: /],
+    [
+      'builder',
+      '.github/workflows/x.yml',
+      /protected: refused: \.github\/workflows\/x\.yml: no session writes it/,
+    ],
+    ['define', '.github/workflows/x.yml', /^protected: /],
+    ['define', 'specs/12-x/.station.json', /^protected: /],
+    ['define', 'specs/12-x/events.jsonl', /^protected: /],
+    ['define', '.factory/events/a.jsonl', /^protected: /],
+    ['define', 'docs/Claude.MD', /^protected: /],
+    ['define', '.specify/memory/constitution.md', /^protected: /],
+    ['define', '.git/config', /^protected: /],
+    ['define', '.env', /protected: .*\(\*\*\/\.env\*\)/],
+    ['builder', 'src/.env.local', /^protected: /],
+    ['builder', '.factory/brief.md', /^protected: /],
+    // Outside the clone, by the path named or by where it resolves.
+    [
+      'define',
+      '/tmp/x',
+      /outside: refused: \/tmp\/x: outside the repository; write only inside it/,
+    ],
+    ['define', '../other/x', /^outside: /],
+    ['define', '~/.factory/verified/ledger', /^outside: /],
+    ['define', '.', /^outside: /],
+    ['builder', 'linked/x.ts', /^outside: /],
+    ['builder', 'src/key.ts', /^outside: /],
+    ['builder', 'src/dangling.ts', /unresolved: refused: .*dangling\.ts is a symlink to nothing/],
+  ])('%s writes %j', (role, path, expected) => {
+    expect(write(role, path)).toMatch(expected);
+  });
+
+  it("compares the task's files as written, never as patterns", () => {
+    expect(write('builder', 'src/b.ts', ['src/**', '**'])).toMatch(/^not-writable: /);
+    expect(write('builder', 'src/a.ts', ['./src/a.ts'])).toBe('allowed');
+  });
+});
+
+describe('the read guard: no secret, by the path named or the file it resolves to (T085, T075)', () => {
+  it.each([
+    ['builder', 'Read', 'src/a.ts', undefined, /^allowed$/],
+    ['nobody', 'Read', 'src/a.ts', undefined, /^allowed$/],
+    ['builder', 'Grep', 'src', '*.ts', /^allowed$/],
+    ['builder', 'Read', 'specs/12-x/events.jsonl', undefined, /^allowed$/],
+    ['builder', 'Grep', undefined, undefined, /^allowed$/],
+    // The approval key, secret stores and .env files, also through a symlink (AC-074).
+    [
+      'builder',
+      'Read',
+      '~/.factory/keys/approve_ed25519',
+      undefined,
+      /secret: refused: ~\/\.factory\/keys\/approve_ed25519: no session reads it \(~\/\.factory\/\*\*\)/,
+    ],
+    ['reviewer', 'Grep', join(home, '.factory'), undefined, /^secret: /],
+    ['builder', 'Glob', '~/.ssh', undefined, /^secret: /],
+    ['builder', 'Read', '.env', undefined, /^secret: /],
+    [
+      'builder',
+      'Read',
+      'src/key.ts',
+      undefined,
+      /secret: refused: src\/key\.ts: no session reads it \(~\/\.ssh\/\*\*\)/,
+    ],
+    ['builder', 'Read', 'src/dangling.ts', undefined, /^unresolved: /],
+    // A search folder that holds a secret, and a Grep glob that names one.
+    [
+      'builder',
+      'Glob',
+      '~',
+      undefined,
+      /search: refused: ~: it holds ~\/\.factory\/\*\*, which no session reads; search inside the repository/,
+    ],
+    ['builder', 'Grep', join(home, '.config'), undefined, /^search: /],
+    ['builder', 'Grep', '/', undefined, /^search: /],
+    [
+      'builder',
+      'Grep',
+      'src',
+      '.env*',
+      /secret: refused: the glob \.env\* names files no session reads/,
+    ],
+    ['builder', 'Grep', undefined, '**/.env.local', /^secret: /],
+    // The Reviewer and the event logs.
+    [
+      'reviewer',
+      'Read',
+      'specs/12-x/events.jsonl',
+      undefined,
+      /events: refused: specs\/12-x\/events\.jsonl: the Reviewer does not read the event logs/,
+    ],
+    ['reviewer', 'Read', '.factory/events/a.jsonl', undefined, /^events: /],
+    [
+      'reviewer',
+      'Grep',
+      undefined,
+      undefined,
+      /events: refused: a Grep over .* reads the event logs/,
+    ],
+    ['reviewer', 'Grep', 'specs', undefined, /^events: /],
+    ['reviewer', 'Grep', 'specs/12-x', undefined, /^events: /],
+    ['reviewer', 'Grep', '.factory', undefined, /^events: /],
+    ['reviewer', 'Grep', 'src', 'events.jsonl', /^events: /],
+    ['reviewer', 'Grep', 'src', undefined, /^allowed$/],
+    ['reviewer', 'Glob', undefined, '**/*.ts', /^allowed$/],
+  ] as [string, ReadInput['tool'], string | undefined, string | undefined, RegExp][])(
+    '%s: %s %j %j',
+    (role, tool, path, glob, expected) => {
+      expect(read(role, tool, path, glob)).toMatch(expected);
+    },
+  );
+
+  it("shows the session's path in a reason only through visible()", () => {
+    expect(read('builder', 'Read', '.env\u001b[2J')).toContain('.env\\u{1b}[2J');
+    expect(write('builder', 'src/\u202eb.ts')).toContain('src/\\u{202e}b.ts');
   });
 });

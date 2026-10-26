@@ -15,10 +15,10 @@
 // shell column, by prefix. An empty line is refused. Every reason says what to do instead, so a
 // session does not retry the same refused shape, and goes through `visible()`, since it quotes the
 // session's own command.
-import { posix } from 'node:path';
 import { visible } from '../notify/summary.js';
 import { ROLES, type RoleName } from '../model/types.js';
-import { matchesPath, type Policy } from './policy.js';
+import { absolute, deniedRead } from './paths.js';
+import type { Policy } from './policy.js';
 import { tokenize, type Redirection, type SimpleCommand } from './tokenizer.js';
 
 export type CommandRule =
@@ -65,7 +65,21 @@ const REWRITES = new Set([
   'filter-branch',
   'filter-repo',
   'replace',
+  'cherry-pick',
+  'notes',
 ]);
+/**
+ * Options that move or recreate a branch, by subcommand: the letter, in any cluster, and the long
+ * form with the shortest prefix git accepts (`--forc`, since `--for` could be `--format`).
+ */
+const FORCES: Record<string, { letter: string; long?: string; shortest?: number }> = {
+  branch: { letter: 'f', long: '--force', shortest: 6 },
+  checkout: { letter: 'B' },
+  switch: { letter: 'C', long: '--force-create', shortest: 8 },
+};
+/** A word's cluster of short options: git reads on past digits, as in `-3O<program>`. */
+const cluster = (word: string) =>
+  word.startsWith('--') ? '' : (/^-([A-Za-z0-9]+)/.exec(word)?.[1] ?? '');
 /** Long options that write a file, by part of their name, such as `--outputFile`. */
 const WRITES = /output|outfile|out-?dir|report-?path|reports-?dir/i;
 /** Long options that run a program or read settings from elsewhere; git and npm take a prefix. */
@@ -76,8 +90,11 @@ const RUNS = [
   '--userconfig',
   '--globalconfig',
 ].concat(['--call', '--upload-pack', '--receive-pack', '--exec', '--open-files-in-pager']);
-/** Short options that write a file or run a program, by program; `-o` for every program. */
-const SHORT: Record<string, string[]> = { git: ['-O'], gitleaks: ['-r'], npm: ['-c', '-C'] };
+/**
+ * Short options that write a file or run a program, by program, `o` for every program; any letter
+ * of a cluster such as `-qo` counts, an attached argument such as `-O<program>` with it.
+ */
+const SHORT: Record<string, string> = { git: 'O', gitleaks: 'r', npm: 'cC' };
 const EXCLUDES = [':(exclude)*events.jsonl', ':(exclude).factory/events'];
 /** What to use instead of a command off the role's list, by its first words. */
 const BRANCH = 'nothing: the session stays on the branch the factory checked out';
@@ -222,14 +239,21 @@ function checkLabels(words: string[]) {
 
 /** Options that write a file or run a program, for every program. */
 function checkOptions(words: string[]) {
-  const short = ['-o', ...(SHORT[words[0] ?? ''] ?? [])];
+  const program = words[0] ?? '';
+  const refused = `o${Object.hasOwn(SHORT, program) ? (SHORT[program] ?? '') : ''}`;
   for (const word of words.slice(1)) {
     const name = word.split('=')[0] ?? '';
     const long = name.startsWith('--') && name.length >= 4;
     if ((long && WRITES.test(name)) || (long && '--output'.startsWith(name)))
       refuse('option', `the option ${word}, which writes a file; write files with the Write tool`);
-    if (long ? RUNS.some((run) => run.startsWith(name)) : short.some((s) => word.startsWith(s)))
-      refuse('option', `the option ${word}, which writes a file or runs a program; leave it out`);
+    const at = cluster(word)
+      .split('')
+      .findIndex((letter) => refused.includes(letter));
+    if (long ? RUNS.some((run) => run.startsWith(name)) : at >= 0)
+      refuse(
+        'option',
+        `the option ${word}, which writes a file or runs a program; ${at > 0 ? "put the option's value in a separate word, such as git log -S foo" : 'leave it out'}`,
+      );
   }
 }
 
@@ -237,15 +261,7 @@ function checkOptions(words: string[]) {
 function checkReads(policy: Policy, { cwd, home }: Places, words: string[]) {
   for (const word of words.slice(1))
     for (const part of [word, ...word.split(/[=:]/).slice(1)]) {
-      if (part === '') continue;
-      const tilde = part === '~' || part.startsWith('~/');
-      const path = tilde ? home + part.slice(1) : posix.resolve(cwd, part);
-      const fromHome = posix.relative(home, path);
-      const denied = policy.denyRead.find((pattern) =>
-        pattern.startsWith('~/')
-          ? !fromHome.startsWith('..') && matchesPath(pattern.slice(2), fromHome)
-          : matchesPath(pattern, path.slice(1)),
-      );
+      const denied = part === '' ? undefined : deniedRead(policy, home, absolute(part, cwd, home));
       if (denied !== undefined)
         refuse('read', `${word}, a path no session may read (${denied}); leave it out`);
     }
@@ -281,7 +297,16 @@ function checkCommand(policy: Policy, role: RoleName, places: Places, command: S
         `${shown}: no session runs ${prefix}; ${FACTORY_RUNS.has(prefix) ? 'commit your work, and the factory pushes it and opens the pull request' : 'only the Owner runs it'}`,
       );
   const amend = words.some((w) => w.length >= 4 && '--amend'.startsWith(w.split('=')[0] ?? ''));
-  if (words[0] === 'git' && (REWRITES.has(words[1] ?? '') || (words[1] === 'commit' && amend)))
+  const sub = words[1] ?? '';
+  const force = Object.hasOwn(FORCES, sub) ? FORCES[sub] : undefined;
+  const forced =
+    force !== undefined &&
+    words.slice(2).some((word) => {
+      const name = word.split('=')[0] ?? '';
+      const prefix = name.length >= (force.shortest ?? 0) && force.long?.startsWith(name) === true;
+      return cluster(word).includes(force.letter) || prefix;
+    });
+  if (words[0] === 'git' && (REWRITES.has(sub) || (sub === 'commit' && amend) || forced))
     refuse('rewrite', `${shown}: no role rewrites a branch; make a new commit instead`);
   const row = policy.roles[role];
   for (const prefix of row.blocked)
