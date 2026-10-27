@@ -282,6 +282,33 @@ describe("the read guard on a Glob's pattern (T085)", () => {
     });
   });
 
+  it('refuse a pattern that is not plain: a backslash, a group, a leading ! or nothing', async () => {
+    const at = setUp();
+    for (const pattern of ['..\\/*', '\\.e*', '@(..)/*', '+(src)/*', 'src/(a)', '!src/*', '']) {
+      const result = await glob(at, { pattern });
+      expect(result, pattern).toMatchObject({ code: 2 });
+      expect(result.stderr, pattern).toMatch(/give a plain pattern/);
+    }
+    // A ! later in the pattern is an ordinary character.
+    expect(await glob(at, { pattern: 'src/a!.ts' })).toMatchObject({ code: 0 });
+  });
+
+  it('refuse every Grep glob, which reaches gitignored and hidden files, and log the session id', async () => {
+    const at = setUp();
+    for (const g of ['*', '*.ts', '?env*']) {
+      const result = await hook('read-guard', at, 'Grep', { pattern: 'x', path: 'src', glob: g });
+      expect(result, g).toMatchObject({ code: 2 });
+      expect(result.stderr, g).toMatch(
+        /narrow the search with type \(such as ts\) or path instead/,
+      );
+    }
+    expect(
+      await hook('read-guard', at, 'Grep', { pattern: 'x', path: 'src', type: 'ts' }),
+    ).toMatchObject({ code: 0 });
+    const logged = events(sessionLog(at.home));
+    expect(logged.map((e) => [e.session, e.tool])).toEqual(Array(3).fill([SESSION, 'Grep']));
+  });
+
   it("refuse a pattern a relative deny_read pattern matches, and check the pattern's leading folder", async () => {
     const at = setUp();
     expect((await glob(at, { pattern: '**/.env*' })).stderr).toMatch(

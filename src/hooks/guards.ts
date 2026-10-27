@@ -46,15 +46,15 @@ const refuse = (rule: string, why: string): Decision => ({
 });
 
 /** Refuses a session the session-start hook has not passed, or a call out of `dontAsk`. */
-function started(home: string, input: HookInput): Decision | undefined {
+function started(home: string, session: string, input: HookInput): Decision | undefined {
   let passed: unknown;
   try {
-    const path = passedPath(home, sessionId(input.session_id));
+    const path = passedPath(home, session);
     passed = (JSON.parse(readFileSync(path, 'utf8')) as { session?: unknown }).session;
   } catch {
     passed = undefined;
   }
-  if (passed !== input.session_id)
+  if (passed !== session)
     return refuse(
       'session-start',
       'the session-start check has not passed for this session; no tool call runs',
@@ -110,10 +110,11 @@ export const guardHook =
   (kind: GuardKind) =>
   async (input: HookInput, ctx: HookContext): Promise<HookResult> => {
     const home = ctx.env?.HOME ?? homedir();
-    const record = readSessionRecord(home, input.session_id);
+    const session = sessionId(input.session_id);
+    const record = readSessionRecord(home, session);
     let decision: Decision;
     try {
-      decision = started(home, input) ?? decide(kind, record, input, home);
+      decision = started(home, session, input) ?? decide(kind, record, input, home);
     } catch (error) {
       const why = visible(error instanceof Error ? error.message : String(error));
       decision = {
@@ -127,7 +128,6 @@ export const guardHook =
       tool: text(input.tool_name) ?? 'unknown',
       input_summary: `${decision.rule}: ${summarise(input.tool_input)}`,
     };
-    const session = text(input.session_id) ?? '';
     const unlogged = await logBlocked(record, home, session, fields, ctx.now);
     return { block: true, reason: decision.reason + visible(unlogged) };
   };
