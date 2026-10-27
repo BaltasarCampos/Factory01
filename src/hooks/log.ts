@@ -91,7 +91,7 @@ function stationManifest(cwd: string, role: RoleName) {
 }
 
 /** The role file's `model:` and its version (release tag + file hash). */
-async function roleIdentity(cwd: string, role: RoleName) {
+export async function roleIdentity(cwd: string, role: RoleName) {
   const config = await loadConfig(join(cwd, '.factory', 'config'));
   const path = join(cwd, '.claude', 'agents', `${role}.md`);
   if (!existsSync(path)) throw new HookError(`role file .claude/agents/${role}.md not found`);

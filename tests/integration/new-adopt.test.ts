@@ -25,8 +25,10 @@ import { createRepo } from '../../src/github/repo.js';
 import { render } from '../../src/install/render.js';
 import {
   buildManifest,
+  coversHashed,
   fetchPinnedManifest,
   importsOutside,
+  isHashed,
   isProtected,
   ManifestError,
   serialiseManifest,
@@ -315,8 +317,19 @@ describe('guardrail manifest (AC-003)', { timeout: 30_000 }, () => {
       'src/deep/.gitattributes',
       'vendor/.gitmodules',
       './.claude/settings.json',
+      // In any letter case, as a disk that ignores case opens them (T077).
+      '.MCP.json',
+      '.Claude/settings.local.json',
+      '.GitHub/Workflows/ci.yml',
+      '.Specify/memory/constitution.md',
+      '.Factory/Lockfile-Policy',
+      '.factory/CONFIG',
     ])
       expect(isProtected(path), path).toBe(true);
+    for (const path of ['.MCP.json', '.Claude/settings.local.json', '.SPECIFY/x'])
+      expect(isHashed(path) && coversHashed(path), path).toBe(true);
+    expect(coversHashed('.CLAUDE')).toBe(true);
+    expect(isProtected('.Factory/Brief.md', { define: true })).toBe(false);
     for (const path of [
       'src/app.ts',
       '.factory/events/2026-10.jsonl',

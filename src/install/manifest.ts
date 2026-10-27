@@ -40,21 +40,27 @@ function normalise(path: string): string {
   return posix.normalize(path.replaceAll('\\', '/')).replace(/^\.\//, '');
 }
 
+/**
+ * The path in lower case, as the protected set is matched: a disk that ignores case, as macOS's
+ * does by default, opens `.mcp.json` for a committed `.MCP.json` (the Owner's review of 2026-10-08).
+ */
+const lowered = (path: string) => normalise(path).toLowerCase();
+
 export function isHashed(path: string): boolean {
-  const p = normalise(path);
+  const p = lowered(path);
   return HASHED_FILES.includes(p) || HASHED_DIRS.some((dir) => p.startsWith(`${dir}/`));
 }
 
 /** True for a hashed path or a folder holding one: a symlink there would redirect the guards. */
 export function coversHashed(path: string): boolean {
-  const p = normalise(path);
+  const p = lowered(path);
   const roots = [...HASHED_DIRS, ...HASHED_FILES];
   return isHashed(p) || roots.some((root) => root === p || root.startsWith(`${p}/`));
 }
 
 /** True for every path an item pull request, or with `define` Define's, may not touch. */
 export function isProtected(path: string, { define = false } = {}): boolean {
-  const p = normalise(path);
+  const p = lowered(path);
   if (p === BRIEF_PATH) return !define;
   const name = posix.basename(p).toLowerCase();
   return isHashed(p) || UNHASHED_FILES.includes(p) || UNHASHED_NAMES.includes(name);

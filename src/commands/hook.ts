@@ -2,6 +2,7 @@
 // Exit 0 allows, exit 2 blocks with the reason on stderr. Every failure blocks (fail closed),
 // including hooks this build does not have yet.
 import type { CommandContext } from '../cli/commands.js';
+import { guardHook } from '../hooks/guards.js';
 import { runLog, type HookContext, type HookInput, type HookResult } from '../hooks/log.js';
 import { runPostEdit } from '../hooks/post-edit.js';
 import { runStop } from '../hooks/stop.js';
@@ -14,6 +15,9 @@ const HOOKS: Readonly<Record<string, (input: HookInput, ctx: HookContext) => Pro
     log: runLog,
     'post-edit': runPostEdit,
     stop: (input, ctx) => runStop(input, ctx),
+    'path-guard': guardHook('path-guard'),
+    'read-guard': guardHook('read-guard'),
+    'command-guard': guardHook('command-guard'),
   };
 
 export async function hook(ctx: CommandContext): Promise<number> {

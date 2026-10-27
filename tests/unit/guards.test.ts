@@ -251,9 +251,14 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     [
       'builder',
       'git log -Sfoo',
-      /option: .*put the option's value in a separate word, such as git log -S foo$/,
+      /option: .*if this is the option's value, put it in a separate word, such as git log -S foo; otherwise leave the option out$/,
     ],
-    ['builder', 'git commit -m x -docs', /put the option's value in a separate word/],
+    [
+      'builder',
+      'git commit -m x -docs',
+      /if this is the option's value, put it in a separate word/,
+    ],
+    ['security', 'semgrep -qo x', /option: .*; otherwise leave the option out$/],
     ['builder', 'git grep -O x', /option: .*runs a program; leave it out$/],
     ['builder', 'git log -S foo', /^allowed$/],
     ['builder', 'git log -n5 --oneline', /^allowed$/],
@@ -298,6 +303,14 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['builder', 'git switch --force-c x', /^rewrite: /],
     ['builder', 'git branch --for x y', /^allowlist: /],
     ['builder', 'git switch --force x', /^allowlist: /],
+    // Forced rename and copy, alone, in a cluster, and spelled long with --force.
+    ['builder', 'git branch -M x y', /^rewrite: /],
+    ['builder', 'git branch -C x y', /^rewrite: /],
+    ['builder', 'git branch -vM x y', /^rewrite: /],
+    ['builder', 'git branch -qC x y', /^rewrite: /],
+    ['builder', 'git branch --move --forc x y', /^rewrite: /],
+    ['builder', 'git branch --copy --force x y', /^rewrite: /],
+    ['builder', 'git branch -m x y', /^allowlist: /],
     // Names an option table has only through its prototype.
     ['builder', 'git constructor -f x', /^allowlist: /],
     ['builder', 'git toString -B x', /^allowlist: /],
@@ -542,6 +555,14 @@ describe('the read guard: no secret, by the path named or the file it resolves t
       /secret: refused: the glob \.env\* names files no session reads/,
     ],
     ['builder', 'Grep', undefined, '**/.env.local', /^secret: /],
+    [
+      'builder',
+      'Grep',
+      'src',
+      '{.env,x}',
+      /secret: refused: the glob \{\.env,x\} has braces; give one pattern without braces/,
+    ],
+    ['builder', 'Grep', 'src', '*.{ts,js}', /^secret: /],
     // The Reviewer and the event logs.
     [
       'reviewer',
