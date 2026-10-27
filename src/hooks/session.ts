@@ -7,6 +7,7 @@
 // code copies them into the feature's log or the factory log afterwards (slice 28-5).
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { appendEvent } from '../events/append.js';
 import { ROLES, type RoleName, type Station } from '../model/types.js';
 import { HookError } from './log.js';
 
@@ -36,9 +37,19 @@ export const sessionFolder = (home: string, session: string) =>
 export const sessionEvents = (home: string, session: string) =>
   join(sessionFolder(home, session), 'events.jsonl');
 
-export function readSessionRecord(home: string, session: unknown): SessionRecord {
+/** The session-start hook's record that the session's start was checked and passed. */
+export const passedPath = (home: string, session: string) =>
+  join(sessionFolder(home, session), 'passed.json');
+
+/** The hook input's `session_id`, when it is a session id and so names no other folder. */
+export function sessionId(session: unknown): string {
   if (typeof session !== 'string' || !UUID.test(session))
     throw new HookError(`hook input session_id ${JSON.stringify(session)} is not a session id`);
+  return session;
+}
+
+export function readSessionRecord(home: string, given: unknown): SessionRecord {
+  const session = sessionId(given);
   const path = join(sessionFolder(home, session), 'session.json');
   let value: unknown;
   try {
@@ -62,4 +73,22 @@ export function readSessionRecord(home: string, session: unknown): SessionRecord
   const problem = checks.find(([, ok]) => !ok)?.[0];
   if (problem !== undefined) throw new HookError(`the session's record ${path}: bad ${problem}`);
   return r as unknown as SessionRecord;
+}
+
+/** Appends a `blocked` event to the session's own log; says why when it cannot. */
+export async function logBlocked(
+  r: SessionRecord,
+  home: string,
+  session: string,
+  fields: { tool: string; input_summary: string },
+  now: () => Date,
+): Promise<string> {
+  try {
+    const base = { item: r.item, station: r.station, role: r.role, session };
+    const event = { ...base, role_version: r.role_version, model: r.model };
+    await appendEvent(sessionEvents(home, session), { ...event, kind: 'blocked', ...fields }, now);
+    return '';
+  } catch (error) {
+    return ` (the blocked event was not written: ${error instanceof Error ? error.message : String(error)})`;
+  }
 }

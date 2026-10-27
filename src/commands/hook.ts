@@ -5,6 +5,7 @@ import type { CommandContext } from '../cli/commands.js';
 import { guardHook } from '../hooks/guards.js';
 import { runLog, type HookContext, type HookInput, type HookResult } from '../hooks/log.js';
 import { runPostEdit } from '../hooks/post-edit.js';
+import { runSessionStart } from '../hooks/session-start.js';
 import { runStop } from '../hooks/stop.js';
 
 const ALLOW = 0;
@@ -18,6 +19,7 @@ const HOOKS: Readonly<Record<string, (input: HookInput, ctx: HookContext) => Pro
     'path-guard': guardHook('path-guard'),
     'read-guard': guardHook('read-guard'),
     'command-guard': guardHook('command-guard'),
+    'session-start': runSessionStart,
   };
 
 export async function hook(ctx: CommandContext): Promise<number> {

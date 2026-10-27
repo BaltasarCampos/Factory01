@@ -3,19 +3,26 @@
 // from its record (src/hooks/session.ts) and the factory's own role table, never the clone's. A
 // refusal blocks and appends a `blocked` event whose `input_summary` starts with the rule; a crash
 // in a guard blocks too, its event naming an internal error, and never allows. An event that
-// cannot be written still blocks, the reason saying why it was not written. The hooks run outside
+// cannot be written still blocks, the reason saying why it was not written. Every call is refused
+// until the session-start hook has passed the session (src/hooks/session-start.ts), and every call
+// out of `dontAsk`, so a mode changed during the session is refused too. The hooks run outside
 // the sandbox, so they read nothing from the clone but the paths the guards resolve, and write
 // their events to the session's own log under `~/.factory/`, never into the clone.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { appendEvent } from '../events/append.js';
 import { checkBash } from '../guard/command-guard.js';
 import { checkWrite } from '../guard/path-guard.js';
 import { loadPolicy, type Policy } from '../guard/policy.js';
 import { checkRead } from '../guard/read-guard.js';
 import { visible } from '../notify/summary.js';
 import { summarise, type HookContext, type HookInput, type HookResult } from './log.js';
-import { readSessionRecord, sessionEvents, type SessionRecord } from './session.js';
+import {
+  logBlocked,
+  passedPath,
+  readSessionRecord,
+  sessionId,
+  type SessionRecord,
+} from './session.js';
 
 export type GuardKind = 'path-guard' | 'read-guard' | 'command-guard';
 type Decision = { allowed: true } | { allowed: false; rule: string; reason: string };
@@ -32,6 +39,34 @@ let policy: Policy | undefined;
 const FIELDS = ['command', 'file_path', 'path', 'glob', 'pattern'];
 
 const text = (value: unknown) => (typeof value === 'string' ? value : undefined);
+const refuse = (rule: string, why: string): Decision => ({
+  allowed: false,
+  rule,
+  reason: visible(`refused: ${why}`),
+});
+
+/** Refuses a session the session-start hook has not passed, or a call out of `dontAsk`. */
+function started(home: string, input: HookInput): Decision | undefined {
+  let passed: unknown;
+  try {
+    const path = passedPath(home, sessionId(input.session_id));
+    passed = (JSON.parse(readFileSync(path, 'utf8')) as { session?: unknown }).session;
+  } catch {
+    passed = undefined;
+  }
+  if (passed !== input.session_id)
+    return refuse(
+      'session-start',
+      'the session-start check has not passed for this session; no tool call runs',
+    );
+  const mode = input.permission_mode;
+  if (mode !== 'dontAsk')
+    return refuse(
+      'permission-mode',
+      `permission_mode ${mode === undefined ? 'unset' : JSON.stringify(mode)} is not dontAsk; no tool call runs`,
+    );
+  return undefined;
+}
 
 function decide(kind: GuardKind, r: SessionRecord, input: HookInput, home: string): Decision {
   policy ??= loadPolicy(readFileSync(POLICY, 'utf8'));
@@ -39,11 +74,6 @@ function decide(kind: GuardKind, r: SessionRecord, input: HookInput, home: strin
   const given = input.tool_input;
   const t = (typeof given === 'object' && given !== null ? given : {}) as Record<string, unknown>;
   const cwd = text(input.cwd) ?? r.clone;
-  const refuse = (rule: string, why: string): Decision => ({
-    allowed: false,
-    rule,
-    reason: visible(`refused: ${why}`),
-  });
   const missing = (field: string) => refuse('input', `the ${tool} call has no ${field}`);
   if (!TOOLS[kind].includes(tool)) return refuse('tool', `${kind} does not check ${tool}`);
   const odd = FIELDS.find((field) => t[field] !== undefined && typeof t[field] !== 'string');
@@ -76,28 +106,6 @@ function decide(kind: GuardKind, r: SessionRecord, input: HookInput, home: strin
   });
 }
 
-/** Appends the `blocked` event to the session's own log; says why when it cannot. */
-async function logBlocked(
-  r: SessionRecord,
-  input: HookInput,
-  rule: string,
-  ctx: HookContext,
-  home: string,
-) {
-  try {
-    const session = text(input.session_id) ?? '';
-    const tool = text(input.tool_name) ?? 'unknown';
-    const summary = `${rule}: ${summarise(input.tool_input)}`;
-    const base = { item: r.item, station: r.station, role: r.role, session };
-    const event = { ...base, role_version: r.role_version, model: r.model };
-    const fields = { ...event, kind: 'blocked', tool, input_summary: summary } as const;
-    await appendEvent(sessionEvents(home, session), fields, ctx.now);
-    return '';
-  } catch (error) {
-    return ` (the blocked event was not written: ${error instanceof Error ? error.message : String(error)})`;
-  }
-}
-
 export const guardHook =
   (kind: GuardKind) =>
   async (input: HookInput, ctx: HookContext): Promise<HookResult> => {
@@ -105,7 +113,7 @@ export const guardHook =
     const record = readSessionRecord(home, input.session_id);
     let decision: Decision;
     try {
-      decision = decide(kind, record, input, home);
+      decision = started(home, input) ?? decide(kind, record, input, home);
     } catch (error) {
       const why = visible(error instanceof Error ? error.message : String(error));
       decision = {
@@ -115,6 +123,11 @@ export const guardHook =
       };
     }
     if (decision.allowed) return { block: false };
-    const unlogged = await logBlocked(record, input, decision.rule, ctx, home);
+    const fields = {
+      tool: text(input.tool_name) ?? 'unknown',
+      input_summary: `${decision.rule}: ${summarise(input.tool_input)}`,
+    };
+    const session = text(input.session_id) ?? '';
+    const unlogged = await logBlocked(record, home, session, fields, ctx.now);
     return { block: true, reason: decision.reason + visible(unlogged) };
   };

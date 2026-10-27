@@ -1,7 +1,8 @@
 // The guard hooks (T086): `factory hook path-guard`, `read-guard` and `command-guard` run the
 // guards with the session's facts from its record under `~/.factory/sessions/<id>/`, never from the
 // clone's `.station.json` or the hook input's `agent_type`; every refusal and every crash blocks
-// and appends a `blocked` event with its rule.
+// and appends a `blocked` event with its rule. `factory hook session-start` checks the session
+// against its record and writes the "passed" record, without which every guard refuses every call.
 import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
@@ -25,7 +26,7 @@ const FEATURE = 'specs/42-add-login';
 const VERSION = 'v1.0.0+0123456789ab';
 
 /** A home folder holding the session's record, and a clone, with no git. */
-function setUp(record: Record<string, unknown> = {}) {
+function setUp(record: Record<string, unknown> = {}, { passed = true } = {}) {
   const home = tempDir();
   const clone = join(home, 'factory-work', 'project', '42-add-login');
   const write = (path: string, text: string) => {
@@ -52,8 +53,11 @@ function setUp(record: Record<string, unknown> = {}) {
     join(home, '.factory/sessions', SESSION, 'session.json'),
     JSON.stringify({ ...fields, clone, ...record }),
   );
+  if (passed) write(passedRecord(home), JSON.stringify({ session: SESSION, source: 'startup' }));
   return { home, clone };
 }
+
+const passedRecord = (home: string) => join(home, '.factory/sessions', SESSION, 'passed.json');
 
 /** The session's own event log, under `~/.factory/sessions/<id>/`. */
 const sessionLog = (home: string) => join(home, '.factory/sessions', SESSION, 'events.jsonl');
@@ -73,6 +77,7 @@ async function hook(
     tool_name: tool,
     tool_input: toolInput,
     agent_type: 'builder',
+    permission_mode: 'dontAsk',
     ...extra,
   };
   const code = await runCli(['hook', event], {
@@ -290,5 +295,230 @@ describe("the read guard on a Glob's pattern (T085)", () => {
     const linked = await glob(at, { pattern: 'keys/*' });
     expect(linked).toMatchObject({ code: 2 });
     expect(linked.stderr).toMatch(/no session reads it \(~\/\.ssh\/\*\*\)/);
+  });
+});
+
+/** The launcher's variables for the Builder's session in `setUp`. */
+const LAUNCHED = { FACTORY_ROLE: 'builder', FACTORY_ITEM: '42', FACTORY_STATION: '4' };
+
+async function start(
+  { home, clone }: { home: string; clone: string },
+  extra: Record<string, unknown> = {},
+  env: Record<string, string | undefined> = LAUNCHED,
+) {
+  const err: string[] = [];
+  const stdin = {
+    session_id: SESSION,
+    cwd: clone,
+    hook_event_name: 'SessionStart',
+    source: 'startup',
+    agent_type: 'builder',
+    permission_mode: 'dontAsk',
+    ...extra,
+  };
+  const code = await runCli(['hook', 'session-start'], {
+    stdout: { write: () => undefined },
+    stderr: { write: (s: string) => void err.push(s) },
+    env: { PATH: process.env.PATH ?? '', HOME: home, ...env },
+    stdinIsTTY: false,
+    unreadAlerts: () => Promise.reject(new Error('hooks must not read the inbox')),
+    readStdin: () => Promise.resolve(JSON.stringify(stdin)),
+  });
+  return { code, stderr: err.join('') };
+}
+
+describe('the session-start hook (T086, T078)', () => {
+  it('writes the passed record when the session matches its record, and the guards then allow', async () => {
+    const at = setUp({}, { passed: false });
+    const before = await hook('command-guard', at, 'Bash', { command: 'npm test' });
+    expect(before.code).toBe(2);
+    expect(before.stderr).toMatch(/refused: the session-start check has not passed/);
+    expect(await start(at)).toEqual({ code: 0, stderr: '' });
+    expect(JSON.parse(readFileSync(passedRecord(at.home), 'utf8'))).toMatchObject({
+      session: SESSION,
+      source: 'startup',
+    });
+    expect(await hook('command-guard', at, 'Bash', { command: 'npm test' })).toMatchObject({
+      code: 0,
+    });
+    expect(events(sessionLog(at.home))).toEqual([
+      expect.objectContaining({ kind: 'blocked', input_summary: 'session-start: npm test' }),
+    ]);
+  });
+
+  it('a fixed-branch role starts with no item, Define and Intake included', async () => {
+    for (const [role, station, item] of [
+      ['release', 7, 0],
+      ['define', 0, 0],
+      ['intake', 1, 42],
+    ] as const) {
+      const at = setUp({ role, station, item, feature: '', files: [] }, { passed: false });
+      const env = {
+        FACTORY_ROLE: role,
+        FACTORY_STATION: String(station),
+        ...(item > 0 ? { FACTORY_ITEM: String(item) } : {}),
+      };
+      expect(await start(at, { agent_type: role }, env), role).toEqual({ code: 0, stderr: '' });
+      expect(existsSync(passedRecord(at.home)), role).toBe(true);
+    }
+  });
+
+  it.each([
+    [
+      'FACTORY_ROLE another role',
+      {},
+      { FACTORY_ROLE: 'reviewer' },
+      /FACTORY_ROLE "reviewer" is not the session's role builder/,
+      'role',
+    ],
+    [
+      'FACTORY_ROLE unset',
+      {},
+      { FACTORY_ROLE: undefined },
+      /FACTORY_ROLE unset is not the session's role builder/,
+      'role',
+    ],
+    [
+      'FACTORY_ITEM another item',
+      {},
+      { FACTORY_ITEM: '43' },
+      /FACTORY_ITEM "43" is not the session's item "42"/,
+      'item',
+    ],
+    [
+      'FACTORY_ITEM unset',
+      {},
+      { FACTORY_ITEM: undefined },
+      /FACTORY_ITEM unset is not the session's item "42"/,
+      'item',
+    ],
+    [
+      'FACTORY_STATION another station',
+      {},
+      { FACTORY_STATION: '5' },
+      /FACTORY_STATION "5" is not the session's station "4"/,
+      'station',
+    ],
+    [
+      'agent_type another role',
+      { agent_type: 'reviewer' },
+      {},
+      /agent_type "reviewer" is not the session's role builder/,
+      'agent',
+    ],
+    [
+      'agent_type missing',
+      { agent_type: undefined },
+      {},
+      /agent_type unset is not the session's role builder/,
+      'agent',
+    ],
+    [
+      'permission_mode default',
+      { permission_mode: 'default' },
+      {},
+      /permission_mode "default" is not dontAsk/,
+      'permission-mode',
+    ],
+    [
+      'permission_mode bypassPermissions',
+      { permission_mode: 'bypassPermissions' },
+      {},
+      /permission_mode "bypassPermissions" is not dontAsk/,
+      'permission-mode',
+    ],
+    [
+      'permission_mode missing',
+      { permission_mode: undefined },
+      {},
+      /permission_mode unset is not dontAsk/,
+      'permission-mode',
+    ],
+  ] as const)(
+    'blocks %s, records it, and writes no passed record',
+    async (_name, extra, env, reason, rule) => {
+      const at = setUp({}, { passed: false });
+      const result = await start(at, extra, { ...LAUNCHED, ...env });
+      expect(result.code).toBe(2);
+      expect(result.stderr).toMatch(reason);
+      expect(existsSync(passedRecord(at.home))).toBe(false);
+      expect(events(sessionLog(at.home))).toEqual([
+        expect.objectContaining({
+          kind: 'blocked',
+          tool: 'SessionStart',
+          input_summary: expect.stringMatching(new RegExp(`^${rule}: `)) as string,
+        }),
+      ]);
+      expect((await hook('command-guard', at, 'Bash', { command: 'npm test' })).code).toBe(2);
+    },
+  );
+
+  it('blocks FACTORY_ITEM for a session with no item', async () => {
+    const at = setUp(
+      { role: 'release', station: 7, item: 0, feature: '', files: [] },
+      { passed: false },
+    );
+    const env = { FACTORY_ROLE: 'release', FACTORY_STATION: '7', FACTORY_ITEM: '42' };
+    const result = await start(at, { agent_type: 'release' }, env);
+    expect(result.stderr).toMatch(/FACTORY_ITEM "42" is not the session's item unset/);
+    expect(existsSync(passedRecord(at.home))).toBe(false);
+  });
+
+  it('removes the passed record when the check fails again after a compaction or a resume', async () => {
+    const at = setUp();
+    expect((await start(at, { source: 'compact' })).code).toBe(0);
+    expect(JSON.parse(readFileSync(passedRecord(at.home), 'utf8'))).toMatchObject({
+      source: 'compact',
+    });
+    expect((await start(at, { source: 'resume', permission_mode: 'acceptEdits' })).code).toBe(2);
+    expect(existsSync(passedRecord(at.home))).toBe(false);
+    expect((await hook('read-guard', at, 'Read', { file_path: 'src/login.ts' })).stderr).toMatch(
+      /the session-start check has not passed/,
+    );
+  });
+
+  it('blocks a missing or malformed record and a session id that is none, removing a stale passed record', async () => {
+    const at = setUp();
+    writeFileSync(join(at.home, '.factory/sessions', SESSION, 'session.json'), '{"role": 5}');
+    const malformed = await start(at);
+    expect(malformed.code).toBe(2);
+    expect(malformed.stderr).toMatch(/session\.json: bad role/);
+    expect(existsSync(passedRecord(at.home))).toBe(false);
+    const other = await start(at, { session_id: '1b6c7f3e-2a4d-4c1e-9f00-1234567890ab' });
+    expect(other.stderr).toMatch(/the session's record .* could not be read/);
+    expect((await start(at, { session_id: '../x' })).stderr).toMatch(/is not a session id/);
+  });
+});
+
+describe('the guards on the session-start record (T086)', () => {
+  it('refuse every call out of dontAsk, even after a passed start', async () => {
+    const at = setUp();
+    for (const mode of ['default', 'acceptEdits', 'bypassPermissions', 'auto', undefined]) {
+      const result = await hook(
+        'read-guard',
+        at,
+        'Read',
+        { file_path: 'src/login.ts' },
+        { permission_mode: mode },
+      );
+      expect(result.code, String(mode)).toBe(2);
+      expect(result.stderr, String(mode)).toMatch(/is not dontAsk; no tool call runs/);
+    }
+    expect(events(sessionLog(at.home))[0]).toMatchObject({
+      input_summary: 'permission-mode: src/login.ts',
+    });
+  });
+
+  it("refuse a passed record that is another session's or cannot be read", async () => {
+    const at = setUp();
+    writeFileSync(
+      passedRecord(at.home),
+      JSON.stringify({ session: '1b6c7f3e-2a4d-4c1e-9f00-1234567890ab' }),
+    );
+    expect((await hook('command-guard', at, 'Bash', { command: 'npm test' })).stderr).toMatch(
+      /the session-start check has not passed/,
+    );
+    writeFileSync(passedRecord(at.home), 'not json');
+    expect((await hook('command-guard', at, 'Bash', { command: 'npm test' })).code).toBe(2);
   });
 });
