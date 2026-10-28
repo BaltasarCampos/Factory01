@@ -12,8 +12,8 @@ Any internal error → block (fail closed).
 | `PreToolUse` (Read, Grep, Glob) | `factory hook read-guard` | Never a path `deny_read` names (approval-key path, `.env*`, secret stores, `~/.factory/`), by the named path or its real location; never a search folder holding a home path it names; every Grep that gives a `glob` refused, since ripgrep's `--glob` overrides its ignore and hidden-file rules; a Glob's `pattern` checked too: its leading part without glob characters, from `path` or `cwd`, checked as the search folder, and refused when not plain (a backslash, `(` or `)`, a leading `!`, empty), absolute (`/` or `~`), leaving the clone with `..`, holding `..` after a glob character or braces, or matched by a relative `deny_read` pattern; the Reviewer never reads the event logs nor greps a folder holding them | AC-074, T085 |
 | `PreToolUse` (Bash) | `factory hook command-guard` | Role allowlist; deny: push to main / other branch, `gh pr merge`, `owner:`/`state:` label add/remove, `pause:` label removal, secret reads, any invocation of `factory approve\|merge\|deploy\|resume\|keygen` (any path or wrapper) or `ssh-keygen -Y sign`, unparseable constructs | AC-022, AC-067, AC-080 |
 | `PostToolUse` (Write, Edit) | `factory hook post-edit` | Format (Prettier) and type-check touched TS file; report errors to the session | FR-021 |
-| `PostToolUse` (all) | `factory hook log` | Append one Event | FR-021, AC-048 |
-| `Stop` | `factory hook stop` | Station output exists and passes its completeness check; else block stop | AC-063 |
+| `PostToolUse` (all) | `factory hook log` | Append one Event to the session's own log, its facts from the session's record; a missing or malformed record blocks | FR-021, AC-048 |
+| `Stop` | `factory hook stop` | The record's station's output, in the record's clone, exists and passes its completeness check, Intake's against the record's repository and item; else block stop and log it in the session's log | AC-063 |
 | `PreCompact` | `factory hook pre-compact` | Log, call request_split path, instruct stop | AC-037 |
 
 Every block writes a `blocked` Event with role, tool, and the rule that fired.

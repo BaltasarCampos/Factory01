@@ -16,6 +16,7 @@ import { seedState, type FakeIssue } from '../helpers/fake-gh.js';
 import { makeRepo, mergeIntoMain, type Files, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
+import { recordSession, SESSION_ID } from '../helpers/session.js';
 
 const REPO = 'owner/project';
 const DEFINE = 'claude/define';
@@ -248,8 +249,9 @@ describe('Define output check: questions first (AC-004, AC-056)', { timeout: 60_
     const r = project();
     ask(r);
     r.push(DEFINE);
-    const input = { agent_type: 'define', session_id: 's1', hook_event_name: 'Stop' };
-    const ctx = { cwd: r.path, now: () => new Date() };
+    const record = { role: 'define', station: 0, item: 0, feature: '', clone: r.path };
+    const input = { session_id: SESSION_ID, hook_event_name: 'Stop' };
+    const ctx = { cwd: r.path, now: () => new Date(), env: recordSession(record).env };
     expect(await runStop(input, ctx)).toEqual({ block: false });
     output(r);
     r.push(DEFINE);

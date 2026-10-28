@@ -6,9 +6,10 @@
 // guards' do (src/hooks/session.ts), never from the clone. A hook reads the session id from its
 // input; an MCP server has no such input, so the launcher passes it, and the role, as
 // `FACTORY_SESSION` and `FACTORY_ROLE`. Every call is refused unless the id is a session id, its
-// record reads, the role is the record's and the session-start check passed. The tools' events
-// go to the session's own log. Like every event, they are telemetry (data-model.md § Event),
-// never a gate input.
+// record reads, the role is the record's and the session-start check passed; once the record
+// reads, a refusal is logged as `blocked`, so a session the launcher misnamed leaves a trace. The
+// tools' events go to the session's own log. Like every event, they are telemetry (data-model.md
+// § Event), never a gate input.
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
@@ -21,7 +22,13 @@ import {
 import { homedir } from 'node:os';
 import { RefusedError } from '../cli/env.js';
 import { appendEvent } from '../events/append.js';
-import { hasPassed, readSessionRecord, sessionEvents, sessionId } from '../hooks/session.js';
+import {
+  hasPassed,
+  logBlocked,
+  readSessionRecord,
+  sessionEvents,
+  sessionId,
+} from '../hooks/session.js';
 import { advanceItem } from './tools/advance-item.js';
 import {
   InvalidInput,
@@ -45,19 +52,24 @@ export function launchedAs(env: NodeJS.ProcessEnv): { role: string; session: str
   return { role, session };
 }
 
-/** The session from its record, checked on every call: the record is written before launch. */
-function toolSession(ctx: McpContext): ToolSession {
+/**
+ * The session from its record, checked on every call: the record is written before launch. Throws
+ * while there is no record to log against; after that, says why the call is refused.
+ */
+async function toolSession(ctx: McpContext, tool: string): Promise<ToolSession | string> {
   const launched = launchedAs(ctx.env);
   const home = ctx.env.HOME ?? homedir();
   const session = sessionId(launched.session);
   const record = readSessionRecord(home, session);
-  if (launched.role !== record.role)
-    throw new RefusedError(
-      `FACTORY_ROLE ${JSON.stringify(launched.role)} is not the session's role ${record.role}`,
-    );
-  if (!hasPassed(home, session))
-    throw new RefusedError('the session-start check has not passed for this session');
-  return { record, session, log: sessionEvents(home, session) };
+  const refused =
+    launched.role !== record.role
+      ? `FACTORY_ROLE ${JSON.stringify(launched.role)} is not the session's role ${record.role}`
+      : !hasPassed(home, session)
+        ? 'the session-start check has not passed for this session'
+        : undefined;
+  if (refused === undefined) return { record, session, log: sessionEvents(home, session) };
+  const fields = { tool: toolName(tool), input_summary: refused };
+  return refused + (await logBlocked(record, home, session, fields, ctx.now));
 }
 
 const result = (value: unknown, isError = false): CallToolResult => ({
@@ -78,12 +90,13 @@ export function createServer(ctx: McpContext): McpServer {
   }));
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args = {} } = request.params;
-    let s: ToolSession;
+    let s: ToolSession | string;
     try {
-      s = toolSession(ctx);
+      s = await toolSession(ctx, name);
     } catch (err) {
       return result({ error: err instanceof Error ? err.message : String(err) }, true);
     }
+    if (typeof s === 'string') return result({ error: s }, true);
     try {
       const tool = TOOLS.find((t) => t.name === name);
       if (tool === undefined) throw new InvalidInput([`unknown tool ${name}`]);

@@ -1,10 +1,11 @@
 // `factory release <tag>` and release-tag verification (T131, AC-083), with temp repos and real
 // `ssh-keygen`: the Owner confirms, the manifest goes into the signed tag, and a tag that is
 // unsigned, signed by an unknown or revoked key, or moved is refused.
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { chmodSync, copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { ownerKeyPath } from '../../src/approvals/sign.js';
 import { runCli } from '../../src/cli/commands.js';
 import { signedTag } from '../../src/git/sign.js';
@@ -210,6 +211,41 @@ describe('verifyReleaseTag (AC-083)', { timeout: 60_000 }, () => {
         verifyReleaseTag(repo.path, tag, target, keys);
       }, what).toThrow(ReleaseTagError);
     }
+  });
+
+  it("runs only ssh-keygen, whatever signing program the Owner's global config names", () => {
+    const dir = tempDir();
+    const marker = join(dir, 'evil-ran');
+    const evil = join(dir, 'evil.sh');
+    writeFileSync(evil, `#!/bin/sh\ntouch '${marker}'\nexit 0\n`);
+    chmodSync(evil, 0o755);
+    const config = join(dir, 'gitconfig');
+    writeFileSync(
+      config,
+      `[gpg]\n\tformat = openpgp\n\tprogram = ${evil}\n[gpg "ssh"]\n\tprogram = ${evil}\n`,
+    );
+    const { repo, sha } = tagged(makeOtherKeys());
+    // The same config runs it in a plain verify-tag.
+    const keys = writeKeyFiles([owner()]);
+    const plain = [
+      '-c',
+      `include.path=${config}`,
+      '-c',
+      `gpg.ssh.allowedSignersFile=${keys.allowedSigners}`,
+    ];
+    spawnSync('git', [...plain, 'verify-tag', 'v1.0.0'], { cwd: repo.path, env: gitEnv });
+    expect(existsSync(marker)).toBe(true);
+    rmSync(marker);
+
+    vi.stubEnv('GIT_CONFIG_GLOBAL', config);
+    try {
+      expect(() => {
+        verifyReleaseTag(repo.path, 'v1.0.0', sha, keys);
+      }).toThrow(/not signed by a listed/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(existsSync(marker)).toBe(false);
   });
 
   it('AC-083: a tag re-made on another commit by the Owner is refused for the old pin', () => {

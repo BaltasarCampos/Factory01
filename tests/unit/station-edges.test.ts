@@ -20,6 +20,7 @@ import {
 } from '../../src/stations/edges.js';
 import { makeRepo } from '../helpers/git-repo.js';
 import { tempDir } from '../helpers/keys.js';
+import { recordSession, SESSION_ID } from '../helpers/session.js';
 
 const BRANCH = 'claude/42-add-login';
 const verified = (gate: 'approved' | 'spec-approved'): Verdict => ({
@@ -505,22 +506,17 @@ describe('stop check (AC-063)', () => {
       },
       'manifest',
     );
-    const input = {
-      session_id: 's1',
-      cwd: r.path,
-      hook_event_name: 'Stop',
-      agent_type: 'reviewer',
-    };
-    const stop = () => runStop(input, { cwd: r.path, now: () => new Date() });
+    const { env } = recordSession({ role: 'reviewer', station: 5, clone: r.path });
+    const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
+    const ctx = { cwd: r.path, now: () => new Date(), env };
+    const stop = () => runStop(input, ctx);
     expect(await stop()).toEqual({
       block: true,
       reason:
         'station verify output is incomplete: specs/42-add-login/reports/verify.md: not committed',
     });
     // Only after one forced continuation may the session end; nothing advances without the file.
-    expect(
-      await runStop({ ...input, stop_hook_active: true }, { cwd: r.path, now: () => new Date() }),
-    ).toEqual({ block: false });
+    expect(await runStop({ ...input, stop_hook_active: true }, ctx)).toEqual({ block: false });
     expect((await stop()).block).toBe(true);
   });
 });

@@ -10,7 +10,9 @@ const hex = (length: number) => fc.stringMatching(new RegExp(`^[0-9a-f]{${String
 const slug = fc
   .array(fc.stringMatching(/^[a-z0-9]{1,6}$/), { minLength: 1, maxLength: 4 })
   .map((parts) => parts.join('-'));
-const name = fc.stringMatching(/^[A-Za-z0-9-]{1,12}$/);
+// GitHub's owner names, single inner hyphens only, and repository names (src/model/config.ts).
+const owner = fc.stringMatching(/^[A-Za-z0-9]{1,6}(?:-[A-Za-z0-9]{1,6}){0,2}$/);
+const name = fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9._-]{0,11}$/);
 const issue = fc.integer({ min: 1, max: 99_999 });
 const tier = fc.constantFrom<Tier>(1, 2, 3);
 const timestamp = fc
@@ -22,7 +24,7 @@ const timestamp = fc
   .map((d) => d.toISOString().replace(/\.\d{3}Z$/, 'Z'));
 
 const common = fc.record({
-  repo: fc.tuple(name, name).map(([owner, repo]) => `${owner}/${repo}`),
+  repo: fc.tuple(owner, name).map(([o, repo]) => `${o}/${repo}`),
   timestamp,
   nonce: hex(32),
 });

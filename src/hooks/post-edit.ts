@@ -4,7 +4,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { HookError, type HookContext, type HookInput, type HookResult } from './log.js';
+import type { HookContext, HookInput, HookResult } from './log.js';
+import { HookError } from './session.js';
 
 const TS_FILE = /\.(ts|tsx|mts|cts)$/;
 

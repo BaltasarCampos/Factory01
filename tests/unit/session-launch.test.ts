@@ -12,7 +12,6 @@ import {
   type Runner,
 } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, type LaunchRequest } from '../../src/dispatcher/launcher/types.js';
-import { resolveSession } from '../../src/hooks/log.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
 import type { GuardrailManifest, ReleasePin } from '../../src/model/types.js';
 import { ReleaseTagError } from '../../src/release/tag.js';
@@ -199,33 +198,26 @@ describe('LocalLauncher (research R8, R9)', () => {
   it.each([
     ['not on origin yet', false],
     ['already on origin', true],
-  ])(
-    'launches Define, whose branch is %s, with a station and no item, and its hooks resolve the session',
-    async (_name, pushed) => {
-      const t = setup();
-      if (pushed) {
-        t.repo.checkout(DEFINE_BRANCH, { create: true });
-        t.repo.commit({ '.factory/brief.md': '# Brief\n' }, 'Define: brief');
-        t.repo.push(DEFINE_BRANCH);
-        t.repo.checkout('main');
-      }
-      const define = { role: 'define', station: 0, item: 0, branch: DEFINE_BRANCH } as const;
+  ])('launches Define, whose branch is %s, with a station and no item', async (_name, pushed) => {
+    const t = setup();
+    if (pushed) {
+      t.repo.checkout(DEFINE_BRANCH, { create: true });
+      t.repo.commit({ '.factory/brief.md': '# Brief\n' }, 'Define: brief');
+      t.repo.push(DEFINE_BRANCH);
+      t.repo.checkout('main');
+    }
+    const define = { role: 'define', station: 0, item: 0, branch: DEFINE_BRANCH } as const;
 
-      await t.launch({ ...define, prompt: 'Station 0 (define).' });
+    await t.launch({ ...define, prompt: 'Station 0 (define).' });
 
-      const launch = t.sessions().at(-1);
-      const clone = work(t.home, 'define');
-      expect(launch?.cwd).toBe(clone);
-      expect(launch?.env.FACTORY_ITEM).toBeUndefined();
-      expect(launch?.env.FACTORY_STATION).toBe('0');
-      const at = pushed ? `origin/${DEFINE_BRANCH}` : 'origin/main';
-      expect(runGit(clone, ['rev-parse', 'HEAD'])).toBe(t.repo.revParse(at));
-      // Hooks see the launcher's environment: the session resolves as Define, for the project.
-      const ctx = { cwd: clone, now: () => new Date(), env: launch?.env ?? {} };
-      const input = { agent_type: 'define', session_id: 's-define' };
-      await expect(resolveSession(input, ctx)).resolves.toMatchObject({ station: 0, item: 0 });
-    },
-  );
+    const launch = t.sessions().at(-1);
+    const clone = work(t.home, 'define');
+    expect(launch?.cwd).toBe(clone);
+    expect(launch?.env.FACTORY_ITEM).toBeUndefined();
+    expect(launch?.env.FACTORY_STATION).toBe('0');
+    const at = pushed ? `origin/${DEFINE_BRANCH}` : 'origin/main';
+    expect(runGit(clone, ['rev-parse', 'HEAD'])).toBe(t.repo.revParse(at));
+  });
 
   it('runs one session at a time', async () => {
     let finish: () => void = () => undefined;

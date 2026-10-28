@@ -119,8 +119,18 @@ describe('.factory/config loading (AC-002)', () => {
       expect(problems(yaml({ ...base, repo: undefined }))).toEqual(['repo: required']);
     });
 
-    it.each(['sample', 'owner/', '/sample', 'a/b/c', 'owner/sam ple'])('rejects %s', (repo) => {
+    it.each([
+      ...['sample', 'owner/', '/sample', 'a/b/c', 'owner/sam ple'],
+      // Never an option to gh, nor a path part: no leading `-`, no `.` or `..`.
+      ...['-owner/sample', 'owner/-sample', './sample', '../sample', 'owner/.', 'owner/..'],
+      // GitHub's owner names, which unitName relies on: no `--`, no `-` at the end.
+      ...['own--er/sample', 'owner-/sample'],
+    ])('rejects %s', (repo) => {
       expect(problems(yaml({ ...base, repo: `"${repo}"` }))).toEqual(['repo: must be owner/name']);
+    });
+
+    it.each(['owner/.github', 'my-org/a.b_c-d', 'o/..x', 'o/x..'])('accepts %s', (repo) => {
+      expect(parseConfig(yaml({ ...base, repo: `"${repo}"` })).repo).toBe(repo);
     });
   });
 

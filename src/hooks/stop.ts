@@ -5,10 +5,13 @@
 //
 // After one forced continuation (`stop_hook_active`) the session may end: the dispatcher reads
 // the station output from the branch, so a session that stops early still advances nothing.
-import { join } from 'node:path';
-import { appendEvent } from '../events/append.js';
-import { loadConfig } from '../model/config.js';
+//
+// The role, station, item, clone and repository come from the session's record
+// (src/hooks/session.ts), never from the clone, and a blocked stop is logged in the session's own
+// log, Define's and Intake's included.
+import { homedir } from 'node:os';
 import { STATIONS, type Station } from '../model/types.js';
+import { visible } from '../notify/summary.js';
 import { buildStopCheck } from '../stations/checks/build.js';
 import { defineStopCheck } from '../stations/checks/define.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
@@ -16,14 +19,8 @@ import { planStopCheck } from '../stations/checks/plan.js';
 import { securityStopCheck } from '../stations/checks/security.js';
 import { specStopCheck } from '../stations/checks/spec.js';
 import { verifyStopCheck } from '../stations/checks/verify.js';
-import {
-  eventInput,
-  resolveSession,
-  type HookContext,
-  type HookInput,
-  type HookResult,
-  type Session,
-} from './log.js';
+import type { HookContext, HookInput, HookResult } from './log.js';
+import { logBlocked, readSessionRecord, sessionId, type SessionRecord } from './session.js';
 
 export interface CheckResult {
   complete: boolean;
@@ -33,36 +30,30 @@ export interface CheckResult {
   waiting?: boolean;
 }
 
-export type StationChecker = (
-  session: Session,
-  ctx: HookContext,
-) => CheckResult | Promise<CheckResult>;
+export type StationChecker = (r: SessionRecord) => CheckResult | Promise<CheckResult>;
 
 /**
- * Intake has no `.station.json`: its item comes from the launcher's `FACTORY_ITEM` (slice 16b).
- * Without it the item is unknown and the stop is blocked. The hook cannot verify the Owner's
- * record, so it checks against tier 1 (no lowering check); the dispatcher checks the confirmed
- * tier before `new → triaged`.
+ * Intake checks its item's labels in the record's repository; a record with no item blocks the
+ * stop. The hook cannot verify the Owner's record, so it checks against tier 1 (no lowering
+ * check); the dispatcher checks the confirmed tier before `new → triaged`.
  */
-async function intakeStopCheck(session: Session, ctx: HookContext): Promise<CheckResult> {
-  if (session.item === 0)
-    return { complete: false, missing: ['no FACTORY_ITEM: the session does not know its item'] };
-  const config = await loadConfig(join(ctx.cwd, '.factory', 'config'));
-  return checkIntakeIssue(config.repo, session.item, 1);
+function intakeStopCheck(r: SessionRecord): CheckResult | Promise<CheckResult> {
+  if (r.item === 0) return { complete: false, missing: ["the session's record names no item"] };
+  return checkIntakeIssue(r.repo, r.item, 1);
 }
 
 /**
- * Output checkers by station; a station without one fails closed. Verify has two outputs, so the
- * session's role picks Security's report or the review (T168).
+ * Output checkers by station, each reading the record's clone; a station without one fails
+ * closed. Verify has two outputs, so the record's role picks Security's report or the review
+ * (T168).
  */
 export const CHECKERS: Partial<Record<Station, StationChecker>> = {
-  0: (_session, ctx) => defineStopCheck(ctx.cwd),
+  0: (r) => defineStopCheck(r.clone),
   1: intakeStopCheck,
-  2: (_session, ctx) => specStopCheck(ctx.cwd),
-  3: (_session, ctx) => planStopCheck(ctx.cwd),
-  4: (_session, ctx) => buildStopCheck(ctx.cwd),
-  5: (session, ctx) =>
-    session.role === 'security' ? securityStopCheck(ctx.cwd) : verifyStopCheck(ctx.cwd),
+  2: (r) => specStopCheck(r.clone),
+  3: (r) => planStopCheck(r.clone),
+  4: (r) => buildStopCheck(r.clone),
+  5: (r) => (r.role === 'security' ? securityStopCheck(r.clone) : verifyStopCheck(r.clone)),
 };
 
 export async function runStop(
@@ -71,22 +62,23 @@ export async function runStop(
   checkers: Partial<Record<Station, StationChecker>> = CHECKERS,
 ): Promise<HookResult> {
   if (input.stop_hook_active === true) return { block: false };
-  const session = await resolveSession(input, ctx);
-  const checker = checkers[session.station];
-  const name = STATIONS[session.station];
+  const home = ctx.env?.HOME ?? homedir();
+  const session = sessionId(input.session_id);
+  const record = readSessionRecord(home, session);
+  const checker = checkers[record.station];
+  const name = STATIONS[record.station];
   let reason: string | undefined;
   if (checker === undefined) {
-    reason = `no output checker for station ${String(session.station)} (${name}) in this build; the session cannot confirm its output`;
+    reason = `no output checker for station ${String(record.station)} (${name}) in this build; the session cannot confirm its output`;
   } else {
-    const result = await checker(session, ctx);
+    const result = await checker(record);
     if (!result.complete) {
       reason = `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
     }
   }
   if (reason === undefined) return { block: false };
-  if (typeof session.log !== 'string') {
-    const fields = { kind: 'blocked', tool: 'Stop', input_summary: reason } as const;
-    await appendEvent(session.log, eventInput(session, fields), ctx.now);
-  }
-  return { block: true, reason };
+  const fields = { tool: 'Stop', input_summary: reason };
+  const unlogged = await logBlocked(record, home, session, fields, ctx.now);
+  // The check's text can quote the clone's files.
+  return { block: true, reason: visible(reason) + visible(unlogged) };
 }

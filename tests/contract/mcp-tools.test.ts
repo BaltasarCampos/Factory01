@@ -139,8 +139,23 @@ describe('factory MCP server (contracts/mcp-tools.md)', () => {
       'a FACTORY_ROLE that is not the record’s role',
       () => launched(),
       { FACTORY_ROLE: 'reviewer' },
-      /FACTORY_ROLE \\"reviewer\\" is not the session's role builder/,
+      /FACTORY_ROLE "reviewer" is not the session's role builder/,
     ],
+  ])('refuses every call of %s, logging one blocked event', async (_name, home, env, why) => {
+    github('building');
+    const dir = home();
+    const { call } = await connect(dir, env);
+    const r = await call('advance_item', { item: 42, from_state: 'building', evidence: 'x' });
+    const { error } = r.value as { error: string };
+    expect(r.isError).toBe(true);
+    expect(error).toMatch(why);
+    const tool = 'mcp__factory__advance_item';
+    expect(events(dir)).toEqual([
+      expect.objectContaining({ ...SESSION_FIELDS, kind: 'blocked', tool, input_summary: error }),
+    ]);
+  });
+
+  it.each<[string, () => string, NodeJS.ProcessEnv, RegExp]>([
     [
       'a FACTORY_SESSION that is no session id',
       () => launched(),
