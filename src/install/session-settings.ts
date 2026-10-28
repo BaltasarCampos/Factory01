@@ -41,8 +41,15 @@ export interface SessionInput {
 const rulePath = (path: string, clone: string) =>
   path.startsWith('~/') || path.startsWith('**/') ? path : `/${clone}/${path}`;
 
+/** A relative path in the clone with no `..` part and no character a rule reads as a pattern. */
+const PLAIN = /^(?![/~])(?!(?:.*\/)?\.\.(?:\/|$))[^*?[\]{}]+$/;
+
 /** The role's write column with the session's feature folder and files filled in. */
 function writable(policy: Policy, { role, feature, files }: SessionInput): string[] {
+  // The task's files come from tasks.md, which the Planner writes.
+  const bad = files.find((file) => !PLAIN.test(file));
+  if (bad !== undefined)
+    throw new RefusedError(`task file ${JSON.stringify(bad)} is not a plain path`);
   return policy.roles[role].write.flatMap((pattern) => {
     if (pattern === '{task}') return [...files];
     if (pattern === '{task:tests}') return files.filter((file) => isTestFile(file));

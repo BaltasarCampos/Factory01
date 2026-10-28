@@ -73,6 +73,11 @@ describe('the per-session settings (T061, T082)', () => {
     expect(edits('builder', { files: [] })).toEqual([]);
   });
 
+  it("refuses a task file that is no plain path in the clone, since tasks.md is the Planner's", () => {
+    for (const file of ['**', 'src/*.ts', '/etc/passwd', '~/.bashrc', 'src/../../x', '..'])
+      expect(() => render('builder', { files: [file] }), file).toThrow(/is not a plain path/);
+  });
+
   it('refuses a feature folder for a role that writes in one when the session has none', () => {
     expect(() => render('spec', { feature: '' })).toThrow(/spec writes in a feature folder/);
   });
