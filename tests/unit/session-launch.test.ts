@@ -278,6 +278,13 @@ describe("LocalLauncher: the branch's history, checked in the factory's own clon
     expect(t.sessions()).toEqual([]);
   });
 
+  it('shows a protected path the branch names through visible(), whatever it holds', async () => {
+    const t = setup({ branchFiles: { 'src/x\u001b[2J/CLAUDE.md': 'x\n' } });
+    const refused = await error(t.launch(REQUEST));
+    expect(refused).toMatchObject({ urgent: true, message: /x\\u\{1b\}\[2J\/CLAUDE\.md/ });
+    expect((refused as Error).message).not.toContain('\u001b');
+  });
+
   it("lets Define's own commits change the brief, and nothing else protected", async () => {
     const t = setup();
     t.repo.checkout(DEFINE_BRANCH, { create: true });

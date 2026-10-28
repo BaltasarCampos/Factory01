@@ -28,6 +28,7 @@ import { buildManifest, coversHashed } from '../../install/manifest.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
 import { pathRule } from '../../merge/rules.js';
 import { configOnMain } from '../../model/config.js';
+import { visible } from '../../notify/summary.js';
 import type { GuardrailManifest, ReleasePin } from '../../model/types.js';
 import { ReleaseTagError } from '../../release/tag.js';
 import { git } from '../branch.js';
@@ -260,7 +261,7 @@ export class LocalLauncher implements SessionLauncher {
     const problems = pathRule(changes, branch === DEFINE_BRANCH);
     if (problems.length > 0)
       throw new LaunchRefused(
-        `no local session started: ${branch}'s own commits change ${problems.join('; ')}`,
+        `no local session started: ${branch}'s own commits change ${problems.map(visible).join('; ')}`,
         true,
       );
     const pin = step(`the release pinned at ${base}`, () => configOnMain(project, base));
