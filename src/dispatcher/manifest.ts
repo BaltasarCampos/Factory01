@@ -8,6 +8,7 @@
 import { EnvironmentError } from '../cli/env.js';
 import { fileAt } from '../git/answers.js';
 import type { RoleName, Station, StationManifest } from '../model/types.js';
+import { taskFiles } from '../stations/checks/plan.js';
 import {
   commitAndPush,
   conflictedPaths,
@@ -89,13 +90,8 @@ export function tickTask(ctx: BranchContext, item: ItemRef, task: string, head: 
 export function nextTask(tasks: string): { task: string; files: string[] } | undefined {
   const m = /^\s*- \[ \] (T\d+)\b(.*)$/m.exec(tasks);
   if (m === null) return undefined;
-  const list = /·\s*Files:(.*)$/.exec(m[2] ?? '')?.[1] ?? '';
-  const files = list
-    .replace(/\([^)]*\)/g, '')
-    .split(',')
-    .map((f) => f.trim().replace(/^`|`$/g, ''))
-    .filter((f) => f !== '' && !/\s/.test(f));
-  return { task: m[1] ?? '', files };
+  // Plan's check refuses a path that is not plain, and the session's settings refuse it again.
+  return { task: m[1] ?? '', files: taskFiles(m[2] ?? '') };
 }
 
 /** The manifest on the branch tip, if the tip is the dispatcher's manifest commit. */

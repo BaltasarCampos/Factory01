@@ -5,6 +5,15 @@ export const SLUG_MAX = 40;
 const SLUG = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const RELEASE_PIN = /^(v\d+\.\d+\.\d+)@([0-9a-f]{40})$/;
 
+const SEGMENT = /^[A-Za-z0-9._@+-]+$/;
+
+/**
+ * A plain path in a repository: segments of letters, digits and `._@+-` joined by single
+ * slashes, none `.` or `..`, so a rule built from it names that one file and nothing more.
+ */
+export const isPlainPath = (path: string) =>
+  path.split('/').every((part) => SEGMENT.test(part) && part !== '.' && part !== '..');
+
 /** Kebab-case slug of an issue title, at most 40 characters. */
 export function slugify(title: string): string {
   const slug = title

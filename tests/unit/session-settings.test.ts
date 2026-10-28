@@ -21,19 +21,61 @@ const paths = { home: HOME, clone: CLONE, tmp: '/tmp/factory-42-a1b2c3', tools: 
 const FEATURE = 'specs/42-add-login';
 const FILES = ['src/login.ts', 'tests/login.test.ts'];
 
+/** The factory MCP tools each role file names (factory/roles/<role>.md). */
+const named = (role: RoleName) => {
+  const file = readFileSync(new URL(`../../factory/roles/${role}.md`, import.meta.url), 'utf8');
+  const tools = (/^tools: (.*)$/m.exec(file)?.[1] ?? '').split(', ');
+  return tools.filter((tool) => tool.startsWith('mcp__factory__'));
+};
+
 const render = (role: RoleName, more: { feature?: string; files?: string[] } = {}) =>
   renderSessionSettings(policy, {
     role,
     paths,
     feature: more.feature ?? FEATURE,
     files: more.files ?? FILES,
-    hooks: project.hooks,
+    factory: project,
+    mcp: named(role),
   });
 
 describe('the per-session settings (T061, T082)', () => {
   it("carries the factory's full hook set, from the installed factory's own settings", () => {
     for (const role of ROLES) expect(render(role).hooks, role).toEqual(project.hooks);
     expect(project.hooks.PreToolUse[0]?.matcher).toBe('*');
+  });
+
+  it("carries every key of the installed factory's settings, its permissions merged with the role's", () => {
+    for (const role of ROLES) {
+      const settings = render(role) as unknown as Record<string, unknown>;
+      for (const [key, value] of Object.entries(project)) {
+        if (key !== 'permissions') {
+          expect(settings[key], `${role} ${key}`).toEqual(value);
+          continue;
+        }
+        const { allow, deny } = render(role).permissions;
+        expect(allow, role).toEqual(expect.arrayContaining(project.permissions.allow));
+        expect(deny, role).toEqual(expect.arrayContaining(project.permissions.deny));
+        expect(new Set(allow).size, role).toBe(allow.length);
+        expect(new Set(deny).size, role).toBe(deny.length);
+      }
+    }
+  });
+
+  it('denies every factory MCP tool the role file does not name', () => {
+    const mcp = (role: RoleName) => {
+      const { deny } = render(role).permissions;
+      return ['advance_item', 'log_event', 'request_split'].map((tool) => [
+        tool,
+        deny.includes(`mcp__factory__${tool}`) ? 'denied' : 'allowed',
+      ]);
+    };
+    expect(mcp('reviewer')).toEqual([
+      ['advance_item', 'denied'],
+      ['log_event', 'denied'],
+      ['request_split', 'allowed'],
+    ]);
+    expect(render('reviewer').permissions.allow).toContain('mcp__factory__request_split');
+    expect(mcp('intake').map(([, verdict]) => verdict)).toEqual(['denied', 'denied', 'denied']);
   });
 
   it("allows each role's own tools and the factory's MCP tools, never relying on the project's allow list", () => {
@@ -74,8 +116,13 @@ describe('the per-session settings (T061, T082)', () => {
   });
 
   it("refuses a task file that is no plain path in the clone, since tasks.md is the Planner's", () => {
-    for (const file of ['**', 'src/*.ts', '/etc/passwd', '~/.bashrc', 'src/../../x', '..'])
+    const shapes = ['**', 'src/*.ts', '/etc/passwd', '~/.bashrc', 'src/../../x', '..', '.', './'];
+    shapes.push(...['src/', 'src/.', 'src//x.ts', './src/x.ts', 'src/a b.ts', 'src/a\nb.ts']);
+    shapes.push(...['src/a).ts', 'src/a!.ts', 'src\\x.ts', 'src/#x.ts', '']);
+    for (const file of shapes)
       expect(() => render('builder', { files: [file] }), file).toThrow(/is not a plain path/);
+    const plain = ['src/login.ts', 'tests/a-b_c.test.ts', '@types/x.d.ts'];
+    expect(() => render('builder', { files: plain })).not.toThrow();
   });
 
   it('refuses a feature folder for a role that writes in one when the session has none', () => {
@@ -135,7 +182,7 @@ describe('the per-session settings (T061, T082)', () => {
     expect(() =>
       renderSessionSettings(policy, {
         ...{ role: 'builder', paths: inFactory, feature: FEATURE, files: FILES },
-        hooks: project.hooks,
+        ...{ factory: project, mcp: named('builder') },
       }),
     ).toThrow(/under the denied read ~\/\.factory/);
   });

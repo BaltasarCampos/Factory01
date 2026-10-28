@@ -186,6 +186,21 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(existsSync(tmp)).toBe(false);
   });
 
+  it.each<[string, Partial<LaunchRequest>]>([
+    ['another item’s folder', { feature: 'specs/43-add-login' }],
+    ['a folder outside specs/', { feature: 'src/42-add-login' }],
+    ['a path past the folder', { feature: 'specs/42-add-login/..' }],
+    ['no folder for an item role', { feature: '' }],
+    ['the clone itself', { feature: '.' }],
+    ['a folder for Intake, on a fixed branch', { role: 'intake', station: 1, branch: 'main' }],
+  ])('refuses a feature folder that is not the item branch’s: %s', async (_name, over) => {
+    const t = setup();
+    const refused = t.launch({ ...REQUEST, ...over });
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(/feature folder/);
+    expect(t.sessions()).toEqual([]);
+  });
+
   it('refuses a launch whose session folder already exists, running nothing', async () => {
     const t = setup();
     const folder = dirname(sessionFiles(t.home).settings);
@@ -204,7 +219,7 @@ describe('LocalLauncher (research R8, R9)', () => {
   it('runs Intake in a detached clone of main, with its item and station', async () => {
     const t = setup();
 
-    await t.launch({ ...REQUEST, role: 'intake', station: 1, branch: 'main' });
+    await t.launch({ ...REQUEST, role: 'intake', station: 1, branch: 'main', feature: '' });
 
     const launch = t.sessions().at(-1);
     expect(launch?.cwd).toBe(work(t.home, 'main'));
@@ -422,7 +437,7 @@ describe("LocalLauncher: the branch's history, checked in the factory's own clon
     t.repo.commit({ 'specs/43-after/spec.md': '# Spec\n' }, 's');
     t.repo.push('claude/43-after');
     t.repo.checkout('main');
-    await t.launch({ ...REQUEST, item: 43, branch: 'claude/43-after' });
+    await t.launch({ ...REQUEST, item: 43, branch: 'claude/43-after', feature: 'specs/43-after' });
     expect(pins).toEqual(['v1.0.0', 'v1.1.0']);
     expect(t.sessions()).toHaveLength(2);
   });

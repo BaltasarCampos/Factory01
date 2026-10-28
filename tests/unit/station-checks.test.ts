@@ -332,6 +332,27 @@ describe('Plan output check (AC-011)', () => {
     expect(why(plan({ tasks: empty }).missing)).toMatch(/T004 has no · Files: list/);
   });
 
+  // The dispatcher turns a Build task's files into the session's Edit rules (T061): `.` would
+  // allow the whole clone, so Plan's own check refuses any path that is not plain.
+  it.each([
+    ...['.', './', 'src/', 'src/.', 'src//x.ts', './src/x.ts', 'src/a b.ts', 'src/a).ts'],
+    ...['src/a!.ts', 'src\\x.ts', 'src/#x.ts', '**', '/etc/passwd', '~/x', 'src/../x', 'src/*.ts'],
+  ])('AC-011: refuses a task listing %j, which is no plain path', (file) => {
+    const tasks = TASKS.replace(
+      'src/auth/login.ts, src/auth/lockout.ts',
+      `src/auth/login.ts, ${file}`,
+    );
+    expect(why(plan({ tasks }).missing)).toContain(
+      `tasks.md: T004 lists ${JSON.stringify(file)}, not a plain path in the repository`,
+    );
+  });
+
+  it('AC-011: accepts plain task paths', () => {
+    const files = 'src/login.ts, tests/a-b_c.test.ts, @types/x.d.ts';
+    const tasks = TASKS.replace('src/auth/login.ts, src/auth/lockout.ts', files);
+    expect(plan({ tasks })).toEqual({ complete: true, missing: [] });
+  });
+
   it('AC-011: refuses tasks.md without tasks', () => {
     expect(why(plan({ tasks: '# Tasks\n' }).missing)).toMatch(/tasks.md: no tasks/);
   });

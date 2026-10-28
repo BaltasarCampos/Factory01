@@ -51,6 +51,7 @@ import { renderSessionSettings } from '../../install/session-settings.js';
 import type { Settings } from '../../install/settings.js';
 import { pathRule } from '../../merge/rules.js';
 import { parseConfig } from '../../model/config.js';
+import { branchFeatureDir } from '../../model/naming.js';
 import { visible } from '../../notify/summary.js';
 import type { GuardrailManifest, ProjectConfig, ReleasePin } from '../../model/types.js';
 import { ReleaseTagError } from '../../release/tag.js';
@@ -101,6 +102,19 @@ export const localInvocation = (request: LaunchRequest, files: SessionFiles): re
 ];
 
 const FACTORY = new URL('../../../factory/', import.meta.url);
+/** A file of the installed factory, never the release a branch pins. */
+const factoryFile = (path: string) => readFileSync(new URL(path, FACTORY), 'utf8');
+const factoryPolicy = () => loadPolicy(factoryFile('policy/roles.yaml'));
+
+/**
+ * The feature folder a session must have: its item branch's, `specs/<issue>-<slug>`, for a role on
+ * an item branch, and none for a role on a fixed branch; it becomes the session's Edit rules.
+ */
+function expectedFeature(request: LaunchRequest): string | undefined {
+  if (factoryPolicy().roles[request.role].branch !== 'item') return '';
+  const dir = branchFeatureDir(request.branch);
+  return dir?.startsWith(`specs/${String(request.item)}-`) === true ? dir : undefined;
+}
 
 type Unavailable = Extract<Availability, { ok: false }>;
 
@@ -369,6 +383,10 @@ export class LocalLauncher implements SessionLauncher {
       throw new LaunchRefused(
         `no local session started: ${request.branch} is not a session branch`,
       );
+    if (request.feature !== expectedFeature(request))
+      throw new LaunchRefused(
+        `no local session started: ${JSON.stringify(request.feature)} is not the feature folder of ${request.role} on ${request.branch}`,
+      );
     if (this.running) throw new LaunchRefused('a local session is already running');
     this.running = true;
     try {
@@ -462,9 +480,10 @@ export class LocalLauncher implements SessionLauncher {
     files: SessionFiles,
     at: { clone: string; tmp: string },
   ) {
-    const policy = loadPolicy(readFileSync(new URL('policy/roles.yaml', FACTORY), 'utf8'));
-    const project = readFileSync(new URL('settings/settings.json', FACTORY), 'utf8');
-    const { hooks } = JSON.parse(project) as Settings;
+    const policy = factoryPolicy();
+    const factory = JSON.parse(factoryFile('settings/settings.json')) as Settings;
+    const tools = /^tools: (.*)$/m.exec(factoryFile(`roles/${request.role}.md`))?.[1] ?? '';
+    const mcp = tools.split(', ').filter((tool) => tool.startsWith('mcp__factory__'));
     // The roles whose shell runs npm read node's own folder, which may lie under home.
     const npm = policy.roles[request.role].shell.some((prefix) => /^(npm|npx)\b/.test(prefix));
     const node = dirname(dirname(realpathSync(process.execPath)));
@@ -473,7 +492,8 @@ export class LocalLauncher implements SessionLauncher {
       tools: npm ? [node] : [],
     };
     const { role, feature, files: task } = request;
-    const settings = renderSessionSettings(policy, { role, paths, feature, files: task, hooks });
+    const input = { role, paths, feature, files: task, factory, mcp };
+    const settings = renderSessionSettings(policy, input);
     const write = { flag: 'wx', mode: 0o600 } as const;
     writeFileSync(files.settings, `${JSON.stringify(settings, null, 2)}\n`, write);
     writeFileSync(files.mcp, MCP_JSON, write);

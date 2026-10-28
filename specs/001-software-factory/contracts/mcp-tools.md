@@ -20,7 +20,8 @@ part of its name. An `item` other than the session's is invalid input.
 With `--agent` a session has exactly its role file's `tools`, so each role file names, as
 `mcp__factory__<tool>`, exactly the tools its body tells the role to call (T070): today
 `request_split` for Spec, Planner, Builder, Test, Reviewer and Security. No role file tells a
-session to call `advance_item` or `log_event`, so no role names them.
+session to call `advance_item` or `log_event`, so no role names them. Each session's own settings also deny the
+factory tools its role file does not name (T061).
 
 ## `advance_item`
 

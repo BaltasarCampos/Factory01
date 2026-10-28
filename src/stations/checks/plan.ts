@@ -1,12 +1,14 @@
 // Plan output check (AC-011; data-model.md § State machine, spec-approved → planned):
 // `plan.md` estimates its changed lines within the size limit and its Constitution Check has no
-// failing row; in `tasks.md` every task lists the files it may touch, every acceptance criterion
+// failing row; in `tasks.md` every task lists the files it may touch, each a plain path, since
+// they become the Build session's Edit rules (T061), every acceptance criterion
 // of the spec maps to a test task, and in every phase the test tasks come before the
 // implementation tasks. A test task is one under a `### Tests …` heading, as in the template.
 // Plan's own questions wait for the Owner as the spec's do (T180). As the template has them,
 // `## Clarifications` holds a question or is deleted, and `## Assumptions` is there (T173).
 import type { CheckResult } from '../../hooks/stop.js';
 import { parseConfig } from '../../model/config.js';
+import { isPlainPath } from '../../model/naming.js';
 import { committed, featureFiles } from './feature.js';
 import { questionsIn } from './questions.js';
 import { checkSpec, committedAnswers, section, withQuestions } from './spec.js';
@@ -77,6 +79,16 @@ export function parseTasks(tasks: string): Task[] {
   return parsed;
 }
 
+/** The paths of a task's `· Files:` list, its parenthesised notes dropped. */
+export function taskFiles(text: string): string[] {
+  const list = /·\s*Files:(.*)$/.exec(text)?.[1] ?? '';
+  return list
+    .replace(/\([^)]*\)/g, '')
+    .split(',')
+    .map((f) => f.trim().replace(/^`|`$/g, ''))
+    .filter((f) => f !== '');
+}
+
 export function checkPlan(input: PlanInput): CheckResult & { missing: string[] } {
   const missing = planProblems(input.plan, input.sizeLimit);
   const tasks = parseTasks(input.tasks);
@@ -86,6 +98,10 @@ export function checkPlan(input: PlanInput): CheckResult & { missing: string[] }
   const tested = new Set<string>();
   for (const t of tasks) {
     if (!/·\s*Files:\s*\S/.test(t.text)) missing.push(`tasks.md: ${t.id} has no · Files: list`);
+    for (const file of taskFiles(t.text).filter((f) => !isPlainPath(f)))
+      missing.push(
+        `tasks.md: ${t.id} lists ${JSON.stringify(file)}, not a plain path in the repository`,
+      );
     if (!t.test) {
       lastImpl.set(t.phase, t.id);
       continue;
