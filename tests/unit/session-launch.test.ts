@@ -10,7 +10,6 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentError } from '../../src/cli/env.js';
 import { runLoop } from '../../src/commands/run.js';
@@ -29,7 +28,7 @@ import type { GuardrailManifest, ReleasePin } from '../../src/model/types.js';
 import { ReleaseTagError } from '../../src/release/tag.js';
 import { gitEnv, makeRepo, runGit } from '../helpers/git-repo.js';
 import { HOOKED_SETTINGS, manifestOf } from '../helpers/guardrails.js';
-import { tempDir } from '../helpers/keys.js';
+import { homeDir, tempDir } from '../helpers/keys.js';
 
 const BRANCH = 'claude/42-add-login';
 const REQUEST = {
@@ -94,7 +93,7 @@ function setup(
   repo.push(BRANCH);
   repo.checkout('main');
   repo.git(['fetch', '-q', 'origin']);
-  const home = tempDir('factory-home-', HOMES);
+  const home = homeDir();
   const runner = fakeRunner();
   const launcher = new LocalLauncher({
     ...{ home, env: options.env ?? gitEnv },
@@ -113,12 +112,6 @@ function setup(
   const available = () => launcher.available(repo.path);
   return { repo, home, launch, available, sessions, owner };
 }
-/**
- * The Owner's home, outside every shared temporary folder, which the sandbox denies: a clone
- * there is refused. Under `node_modules/`, which git ignores.
- */
-const HOMES = fileURLToPath(new URL('../../node_modules/.cache/factory-homes/', import.meta.url));
-mkdirSync(HOMES, { recursive: true });
 const FACTORY_SETTINGS = new URL('../../factory/settings/settings.json', import.meta.url);
 const work = (home: string, name: string) =>
   join(realpathSync(home), 'factory-work', 'owner', 'project', name);
