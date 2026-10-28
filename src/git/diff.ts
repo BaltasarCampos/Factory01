@@ -43,7 +43,8 @@ const SYMLINK = '120000';
 const GITLINK = '160000';
 
 /**
- * Git without the global and system config, attributes files or an external diff. Every
+ * Git without the global and system config, attributes files, hooks, submodule recursion or an
+ * external diff. Every
  * inherited `GIT_*` variable is dropped first: `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT`
  * add config past `GIT_CONFIG_GLOBAL`, `GIT_DIFF_OPTS` overrides `-U`, and `GIT_DIR`,
  * `GIT_INDEX_FILE` or `GIT_OBJECT_DIRECTORY` could point at another repository. Dropping the
@@ -65,6 +66,7 @@ export function safeGit(
     'git',
     [
       ...['-c', `safe.directory=${realpathSync(repo)}`, '-c', 'core.attributesFile=/dev/null'],
+      ...['-c', 'core.hooksPath=/dev/null', '-c', 'submodule.recurse=false'],
       ...['-c', 'core.quotePath=false', ...args],
     ],
     {

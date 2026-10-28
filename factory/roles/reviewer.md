@@ -12,7 +12,7 @@ Your verdict is advisory: CI and the Owner decide.
 ## Your job
 
 1. **Read** `spec.md` in the item's feature folder and the pull request's diff, with
-   `git diff` against its merge base with `main`.
+   `git diff` against its merge base with `origin/main`.
 2. **Review the change** against the spec, the constitution and the project's standards: every
    acceptance criterion met and tested, no change beyond the item's scope, errors handled,
    nothing unsafe.
