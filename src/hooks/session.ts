@@ -11,7 +11,11 @@ import { isAbsolute, join } from 'node:path';
 import { appendEvent, type EventInput } from '../events/append.js';
 import { REPO } from '../model/config.js';
 import { ROLES, type RoleName, type Station } from '../model/types.js';
-import { HookError } from './log.js';
+
+/** A hook cannot determine what it needs; the caller blocks. */
+export class HookError extends Error {
+  override name = 'HookError';
+}
 
 export interface SessionRecord {
   role: RoleName;

@@ -9,6 +9,7 @@ import { checkPlan } from '../../src/stations/checks/plan.js';
 import { parseAnswers } from '../../src/stations/checks/questions.js';
 import { checkSpec, criterionLines, specStopCheck } from '../../src/stations/checks/spec.js';
 import { makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
+import { recordSession, SESSION_ID } from '../helpers/session.js';
 
 const SPEC = `# Feature Specification: Add login
 
@@ -416,8 +417,9 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
       },
       'station output',
     );
-    const input = { session_id: 's1', cwd: r.path, hook_event_name: 'Stop', agent_type: agent };
-    return { r, stop: () => runStop(input, { cwd: r.path, now: () => new Date() }) };
+    const { env } = recordSession({ role: agent, station, clone: r.path });
+    const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
+    return { r, stop: () => runStop(input, { cwd: r.path, now: () => new Date(), env }) };
   }
 
   it('AC-063: Specify may stop once a complete spec.md is committed', async () => {
@@ -521,9 +523,12 @@ describe("Build's stop check for a task session (T174)", () => {
     const r = issued();
     build(r);
     build(r, { 'tests/login.test.ts': 't2\n' });
-    const input = { session_id: 's1', cwd: r.path, hook_event_name: 'Stop', agent_type: 'builder' };
+    const { env } = recordSession({ role: 'builder', station: 4, clone: r.path });
+    const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
 
-    expect(await runStop(input, { cwd: r.path, now: () => new Date() })).toEqual({ block: false });
+    expect(await runStop(input, { cwd: r.path, now: () => new Date(), env })).toEqual({
+      block: false,
+    });
   });
 
   it.each<[string, (r: TestRepo) => void, RegExp]>([
