@@ -16,6 +16,11 @@ included, go to the session's own log, `events.jsonl` beside the record. A `bloc
 names its tool as `mcp__factory__<tool>` for one of the three tools below, or `unknown`, never
 by the name the session sent. An `item` other than the session's is invalid input.
 
+With `--agent` a session has exactly its role file's `tools`, so each role file names, as
+`mcp__factory__<tool>`, exactly the tools its body tells the role to call (T070): today
+`request_split` for Spec, Planner, Builder, Test, Reviewer and Security. No role file tells a
+session to call `advance_item` or `log_event`, so no role names them.
+
 ## `advance_item`
 
 Request that the dispatcher move an item to its next `state:`. Never moves labels itself.

@@ -1,7 +1,7 @@
 ---
 name: security
 description: Station 5. Scans the item's change for vulnerabilities, secrets and dependency issues, triages the findings and re-checks fixes.
-tools: Read, Grep, Glob, Bash, Write
+tools: Read, Grep, Glob, Bash, Write, mcp__factory__request_split
 model: sonnet
 version: 1
 ---

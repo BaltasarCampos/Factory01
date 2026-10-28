@@ -1,7 +1,7 @@
 ---
 name: reviewer
 description: Station 5. Independent, advisory review of the item's diff against its spec and the project's standards.
-tools: Read, Grep, Glob, Bash, Write
+tools: Read, Grep, Glob, Bash, Write, mcp__factory__request_split
 model: sonnet
 version: 1
 ---
