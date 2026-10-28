@@ -258,15 +258,12 @@ describe('factory hook entry: fail closed (contracts/hooks.md)', () => {
     expect((await hook('log', '[]')).stderr).toMatch(/not a JSON object/);
   });
 
-  // The guard hooks are in tests/integration/guard-hooks.test.ts (slice 28-1).
-  it.each(['session-start', 'pre-compact', 'nope'])(
-    '%s is not in this build, so it blocks',
-    async (event) => {
-      const r = await hook(event, input(workingCopy()));
-      expect(r.code).toBe(2);
-      expect(r.stderr).toMatch(/not available/);
-    },
-  );
+  // The guard and session-start hooks are in tests/integration/guard-hooks.test.ts (slice 28-1).
+  it.each(['pre-compact', 'nope'])('%s is not in this build, so it blocks', async (event) => {
+    const r = await hook(event, input(workingCopy()));
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/not available/);
+  });
 });
 
 describe('factory hook stop (AC-063)', () => {

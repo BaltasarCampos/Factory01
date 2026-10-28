@@ -515,7 +515,7 @@ describe('the read guard: no secret, by the path named or the file it resolves t
   it.each([
     ['builder', 'Read', 'src/a.ts', undefined, /^allowed$/],
     ['nobody', 'Read', 'src/a.ts', undefined, /^allowed$/],
-    ['builder', 'Grep', 'src', '*.ts', /^allowed$/],
+    ['builder', 'Grep', 'src', undefined, /^allowed$/],
     ['builder', 'Read', 'specs/12-x/events.jsonl', undefined, /^allowed$/],
     ['builder', 'Grep', undefined, undefined, /^allowed$/],
     // The approval key, secret stores and .env files, also through a symlink (AC-074).
@@ -547,22 +547,18 @@ describe('the read guard: no secret, by the path named or the file it resolves t
     ],
     ['builder', 'Grep', join(home, '.config'), undefined, /^search: /],
     ['builder', 'Grep', '/', undefined, /^search: /],
+    // Any Grep glob: an include glob overrides ripgrep's ignore and hidden-file rules.
     [
       'builder',
       'Grep',
       'src',
-      '.env*',
-      /secret: refused: the glob \.env\* names files no session reads/,
+      '*',
+      /search: refused: a Grep glob also searches gitignored and hidden files, such as \.env\*; narrow the search with type \(such as ts\) or path instead/,
     ],
-    ['builder', 'Grep', undefined, '**/.env.local', /^secret: /],
-    [
-      'builder',
-      'Grep',
-      'src',
-      '{.env,x}',
-      /secret: refused: the glob \{\.env,x\} has braces; give one pattern without braces/,
-    ],
-    ['builder', 'Grep', 'src', '*.{ts,js}', /^secret: /],
+    ...['.env*', '**/.env.local', '{.env,x}', '*.ts', '?env*', '[.]env*', '\\.env*', '*.local'].map(
+      (glob) => ['builder', 'Grep', 'src', glob, /^search: refused: a Grep glob/],
+    ),
+    ['builder', 'Grep', 'src', '', /^search: refused: a Grep glob/],
     // The Reviewer and the event logs.
     [
       'reviewer',
@@ -582,7 +578,7 @@ describe('the read guard: no secret, by the path named or the file it resolves t
     ['reviewer', 'Grep', 'specs', undefined, /^events: /],
     ['reviewer', 'Grep', 'specs/12-x', undefined, /^events: /],
     ['reviewer', 'Grep', '.factory', undefined, /^events: /],
-    ['reviewer', 'Grep', 'src', 'events.jsonl', /^events: /],
+    ['reviewer', 'Grep', 'src', 'events.jsonl', /^search: refused: a Grep glob/],
     ['reviewer', 'Grep', 'src', undefined, /^allowed$/],
     ['reviewer', 'Glob', undefined, '**/*.ts', /^allowed$/],
   ] as [string, ReadInput['tool'], string | undefined, string | undefined, RegExp][])(

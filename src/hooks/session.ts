@@ -1,10 +1,13 @@
 // The session's record (T086): what the launcher issued a session, written before launch under
 // `~/.factory/sessions/<session_id>/session.json`, where no session can read or write (slice 28-4).
-// The hooks take the role, item, station, feature folder, task files and clone from it, never from
-// the clone's `.station.json`, which a session's shell can change, nor from the hook input's
-// `agent_type`. A missing or malformed record is an error, and the caller blocks.
+// The hooks take the role, item, station, feature folder, task files, clone, model and role version
+// from it, never from the clone's `.station.json`, config or role files, which a session's shell can
+// change, nor from the hook input's `agent_type`. A missing or malformed record is an error, and the
+// caller blocks. The session's events go to `events.jsonl` beside it, never into the clone; factory
+// code copies them into the feature's log or the factory log afterwards (slice 28-5).
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { appendEvent } from '../events/append.js';
 import { ROLES, type RoleName, type Station } from '../model/types.js';
 import { HookError } from './log.js';
 
@@ -19,6 +22,9 @@ export interface SessionRecord {
   files: string[];
   /** The session's clone, by its real path. */
   clone: string;
+  /** The role's model and role version as launched, for the session's events. */
+  model: string;
+  role_version: string;
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -27,9 +33,23 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 export const sessionFolder = (home: string, session: string) =>
   join(home, '.factory', 'sessions', session);
 
-export function readSessionRecord(home: string, session: unknown): SessionRecord {
+/** The session's own event log, beside its record. */
+export const sessionEvents = (home: string, session: string) =>
+  join(sessionFolder(home, session), 'events.jsonl');
+
+/** The session-start hook's record that the session's start was checked and passed. */
+export const passedPath = (home: string, session: string) =>
+  join(sessionFolder(home, session), 'passed.json');
+
+/** The hook input's `session_id`, when it is a session id and so names no other folder. */
+export function sessionId(session: unknown): string {
   if (typeof session !== 'string' || !UUID.test(session))
     throw new HookError(`hook input session_id ${JSON.stringify(session)} is not a session id`);
+  return session;
+}
+
+export function readSessionRecord(home: string, given: unknown): SessionRecord {
+  const session = sessionId(given);
   const path = join(sessionFolder(home, session), 'session.json');
   let value: unknown;
   try {
@@ -47,8 +67,28 @@ export function readSessionRecord(home: string, session: unknown): SessionRecord
     ['feature', typeof r.feature === 'string'],
     ['files', Array.isArray(r.files) && r.files.every((f) => typeof f === 'string')],
     ['clone', typeof r.clone === 'string' && isAbsolute(r.clone)],
+    ['model', typeof r.model === 'string' && r.model !== ''],
+    ['role_version', typeof r.role_version === 'string' && r.role_version !== ''],
   ];
   const problem = checks.find(([, ok]) => !ok)?.[0];
   if (problem !== undefined) throw new HookError(`the session's record ${path}: bad ${problem}`);
   return r as unknown as SessionRecord;
+}
+
+/** Appends a `blocked` event to the session's own log; says why when it cannot. */
+export async function logBlocked(
+  r: SessionRecord,
+  home: string,
+  session: string,
+  fields: { tool: string; input_summary: string },
+  now: () => Date,
+): Promise<string> {
+  try {
+    const base = { item: r.item, station: r.station, role: r.role, session };
+    const event = { ...base, role_version: r.role_version, model: r.model };
+    await appendEvent(sessionEvents(home, session), { ...event, kind: 'blocked', ...fields }, now);
+    return '';
+  } catch (error) {
+    return ` (the blocked event was not written: ${error instanceof Error ? error.message : String(error)})`;
+  }
 }
