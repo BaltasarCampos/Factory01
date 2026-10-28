@@ -71,6 +71,8 @@ function setUp(record: Record<string, unknown> = {}, { passed = true } = {}) {
     files: ['src/login.ts'],
     model: 'sonnet',
     role_version: VERSION,
+    repo: 'owner/project',
+    inbox_issue: 1,
   };
   write(
     join(home, '.factory/sessions', SESSION, 'session.json'),
@@ -248,6 +250,8 @@ describe('the guard hooks (T086)', () => {
       ['clone', 'relative/clone'],
       ['model', ''],
       ['role_version', 5],
+      ['repo', 'owner/project/../x'],
+      ['inbox_issue', 0],
     ] as const) {
       const at = setUp({ [field]: value });
       const result = await hook('command-guard', at, 'Bash', { command: 'npm test' });

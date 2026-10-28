@@ -1,22 +1,25 @@
 // What every factory MCP tool shares (contracts/mcp-tools.md): the session it runs for and the
 // checks on its caller's arguments. A tool rejects bad input with InvalidInput, which the server
 // turns into an MCP error and a `blocked` event.
-import type { LogTarget } from '../../events/append.js';
-import type { Session } from '../../hooks/log.js';
+import type { EventInput } from '../../events/append.js';
+import { recordEvent, type SessionRecord } from '../../hooks/session.js';
 
 export interface McpContext {
-  /** The session's working copy. */
-  cwd: string;
   /** The session's environment, set by the launcher; also passed to `gh`. */
   env: NodeJS.ProcessEnv;
   now: () => Date;
 }
 
-/** A session whose events have somewhere to go. */
+/** The session a tool runs for: its record, its id and its own event log. */
 export interface ToolSession {
-  session: Session;
-  log: LogTarget;
+  record: SessionRecord;
+  session: string;
+  log: string;
 }
+
+/** An event of the tool's session. */
+export const toolEvent = (s: ToolSession, fields: Pick<EventInput, 'kind'> & Partial<EventInput>) =>
+  recordEvent(s.record, s.session, fields);
 
 export type Args = Record<string, unknown>;
 
@@ -51,8 +54,8 @@ export function check(args: Args, keys: readonly string[], s: ToolSession, more:
     .map((key) => `${key}: unknown field`);
   const { item } = args;
   if (!Number.isSafeInteger(item)) problems.push('item: issue number required');
-  else if (item !== s.session.item)
-    problems.push(`item ${String(item)} is not this session's item ${String(s.session.item)}`);
+  else if (item !== s.record.item)
+    problems.push(`item ${String(item)} is not this session's item ${String(s.record.item)}`);
   problems.push(...more);
   if (problems.length > 0) throw new InvalidInput(problems);
 }
