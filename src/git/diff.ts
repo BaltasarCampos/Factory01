@@ -44,13 +44,12 @@ const GITLINK = '160000';
 
 /**
  * Git without the global and system config, attributes files, hooks, submodule recursion or an
- * external diff. Every
- * inherited `GIT_*` variable is dropped first: `GIT_CONFIG_PARAMETERS` and `GIT_CONFIG_COUNT`
- * add config past `GIT_CONFIG_GLOBAL`, `GIT_DIFF_OPTS` overrides `-U`, and `GIT_DIR`,
- * `GIT_INDEX_FILE` or `GIT_OBJECT_DIRECTORY` could point at another repository. Dropping the
- * global config also drops a CI runner's `safe.directory`, so the repository is named on the
- * command line, which git counts as protected configuration. `index` is a temporary index file
- * the factory made, set after the drop.
+ * external diff. Every inherited `GIT_*` variable is dropped first: `GIT_CONFIG_PARAMETERS` and
+ * `GIT_CONFIG_COUNT` add config past `GIT_CONFIG_GLOBAL`, `GIT_DIFF_OPTS` overrides `-U`, and
+ * `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_OBJECT_DIRECTORY` could point at another repository.
+ * Dropping the global config also drops a CI runner's `safe.directory`, so the repository is
+ * named on the command line, which git counts as protected configuration. `index` is a temporary
+ * index file the factory made, set after the drop.
  */
 export function safeGit(
   repo: string,
