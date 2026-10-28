@@ -10,13 +10,23 @@
 // the Owner signed (checked with main's pinned key lists), the protected files on main and in
 // the session's clone must equal its manifest in both directions, and the manifest must carry
 // the factory hooks. Until the release ships them (slice 28) no local session starts.
+//
+// Before launch the launcher fetches main and the branch into the factory's own clone and checks
+// the branch's history there, by hash (T078): its own commits since the merge base with main
+// change no protected path (the merge rules' path rule, Define's brief allowed), and the clone is
+// checked against the release pinned at that merge base, so a branch made before an upgrade still
+// starts. The session's clone is then made from the factory's own clone at exactly those commits,
+// never by fetching origin again. Any git failure stops the launch with an error, never read as
+// nothing there and never as tampering.
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
+import { mergeBase, safeDiff } from '../../git/diff.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
+import { pathRule } from '../../merge/rules.js';
 import { configOnMain } from '../../model/config.js';
 import type { GuardrailManifest, ReleasePin } from '../../model/types.js';
 import { ReleaseTagError } from '../../release/tag.js';
@@ -57,6 +67,25 @@ export const localInvocation = (request: LaunchRequest): readonly string[] => [
 ];
 
 type Unavailable = Extract<Availability, { ok: false }>;
+
+/** The commits a session starts from, as fetched into the factory's own clone. */
+interface Heads {
+  main: string;
+  /** The branch's head; main's for a session on main or a Define branch not on origin yet. */
+  head: string;
+  onOrigin: boolean;
+}
+
+/** Runs a step of the checks; any failure but a refusal is an error, never tampering. */
+function step<T>(what: string, run: () => T): T {
+  try {
+    return run();
+  } catch (err) {
+    if (err instanceof LaunchRefused) throw err;
+    const why = err instanceof Error ? err.message : String(err);
+    throw new EnvironmentError(`no local session started: ${what}: ${why}`);
+  }
+}
 
 /** The branches a local session may run on; anything else is refused before any path is built. */
 const ITEM_BRANCH = /^claude\/\d+-[a-z0-9-]+$/;
@@ -200,34 +229,73 @@ export class LocalLauncher implements SessionLauncher {
     }
   }
 
-  /** A fresh clone for the session at the branch's tip on origin, cleaned of every other file. */
-  private clone(project: string, branch: string): string {
+  /** Main and the branch fetched into the factory's own clone, by hash. */
+  private heads(project: string, branch: string): Heads {
+    const listed = (b: string) => this.git(project, ['ls-remote', '--heads', 'origin', b]);
+    const onOrigin = branch !== 'main' && listed(`refs/heads/${branch}`) !== '';
+    // Define's branch may not exist yet: its first session starts it from main.
+    if (branch !== 'main' && !onOrigin && branch !== DEFINE_BRANCH)
+      throw new LaunchRefused(`no local session started: ${branch} is not on origin`);
+    const refspec = (b: string) => `+refs/heads/${b}:refs/remotes/origin/${b}`;
+    const refs = [refspec('main'), ...(onOrigin ? [refspec(branch)] : [])];
+    this.git(project, ['fetch', '-q', '--no-tags', 'origin', ...refs]);
+    const commit = (b: string) =>
+      this.git(project, ['rev-parse', '--verify', `refs/remotes/origin/${b}^{commit}`]);
+    const main = commit('main');
+    return { main, head: onOrigin ? commit(branch) : main, onOrigin };
+  }
+
+  /**
+   * The checks on the branch's history, in the factory's own clone: its own commits since the
+   * merge base change no protected path, and the manifest is the release pinned at the merge base.
+   */
+  private history(project: string, branch: string, heads: Heads): GuardrailManifest {
+    const { env } = this.options;
+    const base = step('the merge base with main', () =>
+      mergeBase(project, heads.main, heads.head, env),
+    );
+    const changes = step(`the changes since ${base}`, () =>
+      safeDiff(project, base, heads.head, env),
+    );
+    const problems = pathRule(changes, branch === DEFINE_BRANCH);
+    if (problems.length > 0)
+      throw new LaunchRefused(
+        `no local session started: ${branch}'s own commits change ${problems.join('; ')}`,
+        true,
+      );
+    const pin = step(`the release pinned at ${base}`, () => configOnMain(project, base));
+    try {
+      return this.options.release(pin.factory_release);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      // A tag that is not the Owner's is tampering. One git cannot read, which verifyReleaseTag
+      // reports as not existing, and any other failure are errors.
+      if (err instanceof ReleaseTagError && !/does not exist/.test(why))
+        throw new LaunchRefused(`the release pinned at ${base} cannot be trusted: ${why}`, true);
+      throw new EnvironmentError(`no local session started: the release pinned at ${base}: ${why}`);
+    }
+  }
+
+  /**
+   * A fresh clone for the session, from the factory's own clone at exactly the checked commits,
+   * its `origin` the project's GitHub remote, never fetched.
+   */
+  private clone(project: string, branch: string, heads: Heads): string {
     const { home } = this.options;
-    const repo = configOnMain(project, this.options.mainRef).repo;
+    const repo = configOnMain(project, heads.main).repo;
     const name = branch === 'main' ? 'main' : branch.slice('claude/'.length);
     const dir = join(home, '.factory', 'work', ...repo.split('/'), name);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dirname(dir), { recursive: true });
-    this.git(home, ['clone', '-q', '--no-hardlinks', '--no-checkout', project, dir]);
-    const url = this.git(project, ['remote', 'get-url', 'origin']);
-    this.git(dir, ['remote', 'set-url', 'origin', url]);
-    this.git(dir, ['fetch', '-q', '--prune', 'origin']);
-    const onOrigin = (ref: string) => {
-      try {
-        this.git(dir, ['rev-parse', '--verify', '-q', `refs/remotes/origin/${ref}`]);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    if (branch === 'main') this.git(dir, ['checkout', '-q', '-f', '--detach', 'origin/main']);
-    else {
-      // Define's branch may not exist yet: its first session starts it from main.
-      const from = onOrigin(branch) ? `origin/${branch}` : 'origin/main';
-      if (from === 'origin/main' && branch !== DEFINE_BRANCH)
-        throw new LaunchRefused(`no local session started: ${branch} is not on origin`);
-      this.git(dir, ['checkout', '-q', '-f', '-B', branch, from]);
-    }
+    this.git(home, ['init', '-q', '-b', 'main', dir]);
+    const refs = [
+      `+${heads.main}:refs/remotes/origin/main`,
+      ...(heads.onOrigin ? [`+${heads.head}:refs/remotes/origin/${branch}`] : []),
+    ];
+    this.git(dir, ['fetch', '-q', '--no-tags', project, ...refs]);
+    this.git(dir, ['remote', 'add', 'origin', this.git(project, ['remote', 'get-url', 'origin'])]);
+    if (branch === 'main') this.git(dir, ['checkout', '-q', '-f', '--detach', heads.main]);
+    else this.git(dir, ['checkout', '-q', '-f', '-B', branch, heads.head]);
     this.git(dir, ['clean', '-q', '-ffdx']);
     return dir;
   }
@@ -240,9 +308,11 @@ export class LocalLauncher implements SessionLauncher {
     if (this.running) throw new LaunchRefused('a local session is already running');
     this.running = true;
     try {
-      const manifest = this.manifest(request.project);
-      if ('ok' in manifest) throw new LaunchRefused(manifest.reason, manifest.urgent);
-      const cwd = this.clone(request.project, request.branch);
+      const heads = step('fetching main and the branch into the factory’s own clone', () =>
+        this.heads(request.project, request.branch),
+      );
+      const manifest = this.history(request.project, request.branch, heads);
+      const cwd = this.clone(request.project, request.branch, heads);
       // The tree first: a symlinked `.claude` would pass a walk of the files it points at.
       const tree = this.treeFiles(cwd, 'HEAD', request.branch);
       const committed =

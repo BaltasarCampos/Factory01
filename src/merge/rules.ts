@@ -122,7 +122,7 @@ export function mergeRules(input: MergeRulesInput): RuleResult {
   return { rule: 'none', problems: [`no merge rule takes branch ${branch}`] };
 }
 
-function pathRule(changes: ReturnType<typeof safeDiff>, define: boolean): string[] {
+export function pathRule(changes: ReturnType<typeof safeDiff>, define: boolean): string[] {
   const problems = changes
     .filter((c) => guarded(c.path, define))
     .map((c) =>
