@@ -54,10 +54,10 @@ const isInt = (v: unknown, min: number, max = Number.MAX_SAFE_INTEGER): boolean 
   Number.isSafeInteger(v) && (v as number) >= min && (v as number) <= max;
 const isText = (v: unknown): boolean => typeof v === 'string' && v !== '';
 
-/** The event, or EventError listing every problem. */
-/** No session runs on a Fable model (FR-036): the events refuse one, and so does a session record. */
+/** No session runs on a Fable model (FR-036): events refuse one, and so does a session record. */
 export const isFable = (model: string) => /fable/i.test(model);
 
+/** The event, or EventError listing every problem. */
 export function validateEvent(value: unknown): Event {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new EventError(['event is not an object']);

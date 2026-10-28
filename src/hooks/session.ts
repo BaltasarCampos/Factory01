@@ -73,7 +73,7 @@ export function readSessionRecord(home: string, given: unknown): SessionRecord {
   const checks: [string, boolean][] = [
     ['role', (ROLES as readonly unknown[]).includes(r.role)],
     ['item', int(r.item)],
-    // The role's own station, so a session never runs another station's check with its permissions.
+    // The role's own station: no session runs another station's check with its permissions.
     ['station', r.station === ROLE_STATION[r.role as RoleName]],
     ['feature', typeof r.feature === 'string'],
     ['files', Array.isArray(r.files) && r.files.every((f) => typeof f === 'string')],
