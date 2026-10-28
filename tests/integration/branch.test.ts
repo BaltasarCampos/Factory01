@@ -207,7 +207,7 @@ describe('work-item branch creation (AC-066, FR-016a)', { timeout: 60_000 }, () 
     expect(message).toMatch(/Factory-Role: dispatcher\nFactory-Item: 2-add-login/);
     expect(t.project.git(['rev-parse', `origin/${BRANCH}~2`])).toBe(t.project.revParse('main'));
     expect(t.local.launches).toEqual([
-      expect.objectContaining({ role: 'spec', station: 2, branch: BRANCH }),
+      expect.objectContaining({ role: 'spec', station: 2, branch: BRANCH, feature: FEATURE }),
     ]);
   });
 
@@ -1177,6 +1177,11 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(tick).toBe(`${head}\n${dispatcherMessage('tick T001', '2-add-login').trim()}`);
       expect(t.local.launches.map((l) => l.station)).toEqual([4, 4]);
       expect(task(t)).toBe('T002');
+      // Each session's own settings allow edits of its task's files alone (T061).
+      expect(t.local.launches.map(({ feature, files }) => ({ feature, files }))).toEqual([
+        { feature: FEATURE, files: ['tests/login.test.ts'] },
+        { feature: FEATURE, files: ['src/login.ts'] },
+      ]);
     });
 
     it('T174: a red head gives the Builder the same task again with the failure, at most retry_limit times', async () => {

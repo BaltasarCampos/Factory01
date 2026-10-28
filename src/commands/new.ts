@@ -150,8 +150,10 @@ export async function startDefine(
       throw new RefusedError(
         `the ${launcher.mode} launcher is not available: ${availability.reason}`,
       );
+    // Define works for the project: no feature folder and no task files.
     const request = { project: workdir, role: 'define', station: 0, item: 0 } as const;
-    const { sessionId } = await launcher.launch({ ...request, branch: DEFINE_BRANCH, prompt });
+    const session = { feature: '', files: [], branch: DEFINE_BRANCH, prompt };
+    const { sessionId } = await launcher.launch({ ...request, ...session });
     ctx.io.stdout.write(`Define started on ${DEFINE_BRANCH} (${launcher.mode}, ${sessionId}).\n`);
     return ExitCode.Ok;
   } catch (err) {

@@ -12,6 +12,10 @@ export interface LaunchRequest {
   item: number;
   /** The branch the session checks out and pushes to. */
   branch: string;
+  /** The item's feature folder, `specs/<issue>-<slug>`; empty for a role on a fixed branch. */
+  feature: string;
+  /** The task's files from the station manifest, or a conflict session's; empty for none. */
+  files: readonly string[];
   prompt: string;
 }
 

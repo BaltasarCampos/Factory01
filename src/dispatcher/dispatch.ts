@@ -39,6 +39,7 @@ import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
 import {
   createItemBranch,
   ensureDraftPr,
+  featureOf,
   git as runGit,
   type BranchContext,
   type ItemRef,
@@ -461,11 +462,14 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       `the ${launcher.mode} launcher is unavailable: ${availability.reason}`,
       availability.urgent,
     );
+  // The feature folder and the task's files, for the session's own settings (T061).
+  let session = { feature: '', files: [] as readonly string[] };
   if (station >= 2 && station <= 6) {
     const ref: ItemRef = { issue: item.issue.number, branch };
     createItemBranch(git, ref, comments, mainRef);
     await ensureDraftPr(repo, { ...ref, title: item.issue.title }, options);
-    writeStationManifest(git, ref, { station, role }, mainRef);
+    const manifest = writeStationManifest(git, ref, { station, role }, mainRef);
+    session = { feature: `specs/${featureOf(ref)}`, files: manifest.files ?? [] };
   }
   const answersFor = (file: QuestionFile | undefined) => {
     const answers = file === undefined ? [] : ownerAnswers(git, branch, file, keys, mainRef);
@@ -496,6 +500,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       station,
       item: item.issue.number,
       branch,
+      ...session,
       prompt,
     }));
   } catch (err) {

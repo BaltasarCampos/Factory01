@@ -31,10 +31,10 @@ process.once('exit', () => {
 
 /**
  * A temp directory removed when the current test ends, or at process exit when created
- * outside a test (for example in `beforeAll`).
+ * outside a test (for example in `beforeAll`); under `root` when given.
  */
-export function tempDir(prefix = 'factory-test-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+export function tempDir(prefix = 'factory-test-', root = tmpdir()): string {
+  const dir = mkdtempSync(join(root, prefix));
   try {
     onTestFinished(() => {
       rmSync(dir, { recursive: true, force: true });

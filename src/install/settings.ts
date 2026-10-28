@@ -32,7 +32,7 @@ export const CLAUDE_CODE_TOOLS = [
 ] as const;
 
 /** The factory MCP server's tools (contracts/mcp-tools.md), which every session may call. */
-const MCP_TOOLS = ['advance_item', 'log_event', 'request_split'];
+export const MCP_TOOLS = ['advance_item', 'log_event', 'request_split'];
 
 interface Hook {
   type: 'command';
