@@ -9,8 +9,9 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { appendEvent, type EventInput } from '../events/append.js';
+import { isFable } from '../events/schema.js';
 import { REPO } from '../model/config.js';
-import { ROLES, type RoleName, type Station } from '../model/types.js';
+import { ROLE_STATION, ROLES, type RoleName, type Station } from '../model/types.js';
 
 /** A hook cannot determine what it needs; the caller blocks. */
 export class HookError extends Error {
@@ -72,11 +73,12 @@ export function readSessionRecord(home: string, given: unknown): SessionRecord {
   const checks: [string, boolean][] = [
     ['role', (ROLES as readonly unknown[]).includes(r.role)],
     ['item', int(r.item)],
-    ['station', int(r.station, 8)],
+    // The role's own station: no session runs another station's check with its permissions.
+    ['station', r.station === ROLE_STATION[r.role as RoleName]],
     ['feature', typeof r.feature === 'string'],
     ['files', Array.isArray(r.files) && r.files.every((f) => typeof f === 'string')],
     ['clone', typeof r.clone === 'string' && isAbsolute(r.clone)],
-    ['model', typeof r.model === 'string' && r.model !== ''],
+    ['model', typeof r.model === 'string' && r.model !== '' && !isFable(r.model)],
     ['role_version', typeof r.role_version === 'string' && r.role_version !== ''],
     ['repo', typeof r.repo === 'string' && REPO.test(r.repo)],
     ['inbox_issue', int(r.inbox_issue) && (r.inbox_issue as number) > 0],

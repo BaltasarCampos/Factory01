@@ -1,7 +1,7 @@
 ---
 name: planner
 description: Station 3. Breaks the approved spec into tasks, each with its file list, and a test plan that maps every acceptance criterion to a test.
-tools: Read, Grep, Glob, Write
+tools: Read, Grep, Glob, Write, mcp__factory__request_split
 model: sonnet
 version: 1
 ---

@@ -47,7 +47,10 @@ const COMMIT = /^[0-9a-f]{40}$/;
  * `owner/name`, as GitHub allows them: an owner of letters and digits with single inner hyphens, a
  * name not starting with `-` and never `.` or `..`, so neither is an option to gh nor a path part.
  */
-export const REPO = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\/(?!\.\.?$)[A-Za-z0-9._][A-Za-z0-9._-]*$/;
+const NAME = String.raw`(?!\.\.?$)[A-Za-z0-9._][A-Za-z0-9._-]*`;
+export const REPO = new RegExp(String.raw`^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\/${NAME}$`);
+/** The name part of `REPO`, for a repository whose owner is not known yet. */
+export const REPO_NAME = new RegExp(`^${NAME}$`);
 const POSITIVE_INT = /^[1-9]\d*$/;
 
 export function parseConfig(text: string, release: ReleaseLimits = RELEASE_LIMITS): ProjectConfig {

@@ -75,6 +75,12 @@ export const ROLES = [
 ] as const;
 export type RoleName = (typeof ROLES)[number];
 
+/** The station each role works at: Verify's three roles at 5 (T181), the Coach at Operate's. */
+export const ROLE_STATION: Readonly<Record<RoleName, Station>> = {
+  ...{ define: 0, intake: 1, spec: 2, planner: 3, builder: 4 },
+  ...{ test: 5, reviewer: 5, security: 5, integrator: 6, release: 7, ops: 8, coach: 8 },
+};
+
 export const ITEM_TYPES = ['feature', 'bug', 'debt', 'security', 'dependency', 'copy'] as const;
 export type ItemType = (typeof ITEM_TYPES)[number];
 export type Priority = 'p0' | 'p1' | 'p2' | 'p3';

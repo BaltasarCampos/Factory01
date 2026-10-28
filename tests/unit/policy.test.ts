@@ -14,10 +14,14 @@ const policy: Policy = loadPolicy(text);
 const row = (role: RoleName) => policy.roles[role];
 const F = '{feature}';
 
-/** The `tools` line of the shipped role file. */
+/**
+ * The Claude Code tools on the `tools` line of the shipped role file; its factory MCP tools are
+ * the role file's own, checked against contracts/mcp-tools.md (tests/contract/role-files.test.ts).
+ */
 const roleFileTools = (role: RoleName) => {
   const file = readFileSync(new URL(`../../factory/roles/${role}.md`, import.meta.url), 'utf8');
-  return (/^tools: (.*)$/m.exec(file)?.[1] ?? '').split(', ');
+  const tools = (/^tools: (.*)$/m.exec(file)?.[1] ?? '').split(', ');
+  return tools.filter((tool) => !tool.startsWith('mcp__'));
 };
 
 describe('the role permission table (T074, T081)', () => {
@@ -141,6 +145,7 @@ describe('the role permission table (T074, T081)', () => {
       'ToolSearch',
       'EndConversation',
       'WaitForMcpServers',
+      'Task',
     ]);
     for (const [tool, reason] of Object.entries(policy.keepTools)) {
       expect(reason.length, tool).toBeGreaterThan(10);

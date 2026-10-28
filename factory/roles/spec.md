@@ -1,7 +1,7 @@
 ---
 name: spec
 description: Station 2. Writes the work item's spec, with the problem, testable acceptance criteria, non-goals and affected areas, for the Owner to approve.
-tools: Read, Grep, Glob, Write
+tools: Read, Grep, Glob, Write, mcp__factory__request_split
 model: sonnet
 version: 1
 ---

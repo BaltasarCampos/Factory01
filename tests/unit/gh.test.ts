@@ -151,6 +151,10 @@ describe('gh wrapper (AC-076)', () => {
       ['-R/evil', 1],
       ['no-slash', 1],
       ['owner/../x', 1],
+      // The rule .factory/config holds (src/model/config.ts): no `-` leading a name, no `..`.
+      ['owner/-x', 1],
+      ['owner/..', 1],
+      ['own--er/x', 1],
       [REPO, 0],
       [REPO, -1],
       [REPO, 1.5],

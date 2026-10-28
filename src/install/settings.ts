@@ -15,9 +15,13 @@ import { ROLES } from '../model/types.js';
 /** The version whose tool names the deny rules are checked against. */
 export const CLAUDE_CODE_VERSION = '2.1.309';
 
-/** Claude Code's built-in tools in that version, from its tools reference. */
+/**
+ * Claude Code's built-in tools in that version, from its tools reference and the tools a session
+ * listed in T125's A3c, which added `Task`, the subagent tool's name there, and `DesignSync`.
+ */
 export const CLAUDE_CODE_TOOLS = [
   ...['Agent', 'Artifact', 'AskUserQuestion', 'Bash', 'CronCreate', 'CronDelete', 'CronList'],
+  ...['DesignSync', 'Task'],
   ...['Edit', 'EndConversation', 'EnterPlanMode', 'EnterWorktree', 'ExitPlanMode', 'ExitWorktree'],
   ...['Glob', 'Grep', 'ListAgents', 'ListMcpResourcesTool', 'LSP', 'Monitor', 'NotebookEdit'],
   ...['PowerShell', 'PushNotification', 'Read', 'ReadMcpResourceTool', 'RemoteTrigger'],

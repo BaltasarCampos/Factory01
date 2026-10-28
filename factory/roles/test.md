@@ -1,7 +1,7 @@
 ---
 name: test
 description: Station 5. Writes and runs extra tests for the item's change, property-based tests and formal checks included.
-tools: Read, Grep, Glob, Write, Edit, Bash
+tools: Read, Grep, Glob, Write, Edit, Bash, mcp__factory__request_split
 model: sonnet
 version: 1
 ---

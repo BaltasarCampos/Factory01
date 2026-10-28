@@ -18,6 +18,10 @@ Any internal error → block (fail closed).
 
 Every block writes a `blocked` Event with role, tool, and the rule that fired.
 
+The session's record is malformed, and every hook reading it blocks, when a field is missing or
+of the wrong type, its model is a Fable model, or its station is not its role's: each role works
+at one station, Verify's Test, Reviewer and Security at 5 and the Coach at Operate's 8.
+
 **Limits.** Hooks run as the same user, on the same machine, as everything the agent runs.
 The path guard sees only the Write and Edit tools; an agent with Bash can write files through
 `git apply`, `tee`, `sed -i` or a script, and the command guard cannot analyse every program.

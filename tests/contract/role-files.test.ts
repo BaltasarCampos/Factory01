@@ -14,6 +14,12 @@ import { parse } from 'yaml';
 import { ROLES } from '../../src/model/types.js';
 
 const DIR = fileURLToPath(new URL('../../factory/roles', import.meta.url));
+/** The factory MCP server's tools, as contracts/mcp-tools.md heads them. */
+const CONTRACT = readFileSync(
+  new URL('../../specs/001-software-factory/contracts/mcp-tools.md', import.meta.url),
+  'utf8',
+);
+const MCP_TOOLS = [...CONTRACT.matchAll(/^## `([a-z_]+)`$/gm)].map((m) => m[1] ?? '');
 const KEYS = ['description', 'model', 'name', 'tools', 'version'];
 /** The design's Tools column, Builder's subagents as Claude Code's `Agent` tool. */
 const TOOLS: Readonly<Record<string, string[]>> = {
@@ -108,7 +114,26 @@ describe('the role files (T070, T071)', () => {
       expect(String(front.description).trim()).not.toBe('');
       expect(front.model).toBe('sonnet');
       expect(Number.isInteger(front.version) && Number(front.version) >= 1).toBe(true);
-      expect(String(front.tools).split(', ')).toEqual(TOOLS[name]);
+      const tools = String(front.tools).split(', ');
+      expect(tools.filter((tool) => !tool.startsWith('mcp__'))).toEqual(TOOLS[name]);
+    },
+  );
+
+  it('the contract heads exactly the three factory MCP tools', () => {
+    expect(MCP_TOOLS).toEqual(['advance_item', 'log_event', 'request_split']);
+  });
+
+  // With --agent a session has exactly its role's tools, and no MCP tool its role file does not
+  // name (T125's A1, A3b), so a role names every factory tool its file tells it to call.
+  it.each(names)(
+    '%s: names exactly the factory MCP tools its file tells it to call, each of the contract',
+    (name) => {
+      const { front, body } = roleFile(`${name}.md`);
+      const named = String(front.tools)
+        .split(', ')
+        .filter((tool) => tool.startsWith('mcp__'));
+      const called = MCP_TOOLS.filter((tool) => body.includes(`\`${tool}\``));
+      expect(named).toEqual(called.map((tool) => `mcp__factory__${tool}`));
     },
   );
 

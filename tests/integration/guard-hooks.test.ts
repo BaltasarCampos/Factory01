@@ -16,6 +16,8 @@ import {
 import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { runCli } from '../../src/cli/commands.js';
+import { readSessionRecord } from '../../src/hooks/session.js';
+import { ROLES } from '../../src/model/types.js';
 import { tempDir } from '../helpers/keys.js';
 
 // A rename that fails, for the passed record's write.
@@ -256,6 +258,57 @@ describe('the guard hooks (T086)', () => {
       const at = setUp({ [field]: value });
       const result = await hook('command-guard', at, 'Bash', { command: 'npm test' });
       expect(result.stderr, field).toMatch(new RegExp(`session\\.json: bad ${field}$`, 'm'));
+    }
+  });
+
+  it.each<[string, Record<string, unknown>, string]>([
+    ['a Fable model', { model: 'claude-fable-5-1' }, 'model'],
+    ['a Fable model in any letter case', { model: 'Fable' }, 'model'],
+    ['a Builder at Verify', { station: 5 }, 'station'],
+    ['a Reviewer at Build', { role: 'reviewer', station: 4 }, 'station'],
+    ['Define at Intake', { role: 'define', station: 1, item: 0, feature: '' }, 'station'],
+  ])('block a record naming %s in the gate and every guard', async (_name, record, field) => {
+    const at = setUp(record);
+    for (const [event, tool, input] of [
+      ['gate', 'Task', {}],
+      ['path-guard', 'Write', { file_path: 'src/login.ts' }],
+      ['read-guard', 'Read', { file_path: 'src/login.ts' }],
+      ['command-guard', 'Bash', { command: 'npm test' }],
+    ] as const) {
+      const result = await hook(event, at, tool, input);
+      expect(result.code, event).toBe(2);
+      expect(result.stderr, event).toMatch(new RegExp(`session\\.json: bad ${field}$`, 'm'));
+    }
+  });
+
+  it('read every role at its own station: Verify has three, the Coach shares Operate', () => {
+    const at = setUp();
+    const stations = [
+      ...[
+        ['define', 0],
+        ['intake', 1],
+        ['spec', 2],
+        ['planner', 3],
+        ['builder', 4],
+      ],
+      ...[
+        ['test', 5],
+        ['reviewer', 5],
+        ['security', 5],
+        ['integrator', 6],
+        ['release', 7],
+      ],
+      ...[
+        ['ops', 8],
+        ['coach', 8],
+      ],
+    ] as const;
+    expect(stations.map(([role]) => role)).toEqual(ROLES);
+    for (const [role, station] of stations) {
+      const path = join(at.home, '.factory/sessions', SESSION, 'session.json');
+      const record = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
+      writeFileSync(path, JSON.stringify({ ...record, role, station }));
+      expect(readSessionRecord(at.home, SESSION), role).toMatchObject({ role, station });
     }
   });
 
