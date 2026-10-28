@@ -9,6 +9,7 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -668,6 +669,48 @@ describe('factory new refusals (AC-001, AC-083)', { timeout: 60_000 }, () => {
     }
   });
 });
+
+describe(
+  'factory new and factory adopt: the repository checked as .factory/config will',
+  { timeout: 60_000 },
+  () => {
+    /** The laptop with the fake GitHub's signed-in user set to `user`. */
+    function as(user: string) {
+      const at = laptop();
+      const path = process.env.FAKE_GH_STATE ?? '';
+      writeFileSync(path, JSON.stringify({ ...readState(), user }));
+      return at;
+    }
+
+    it.each([
+      ['-owner/x', '-owner', 'x'],
+      ['owner/..', 'owner', '..'],
+      ['owner/-x', 'owner', '-x'],
+    ])('factory new refuses %s, creating nothing', async (_repo, user, name) => {
+      const { cli, cwd, launchers } = as(user);
+      // `--name=`, so the argument parser does not read a leading `-` as an option.
+      const r = await cli(['new', 'A pitch', `--name=${name}`]);
+      expect(r.code).not.toBe(0);
+      expect(r.stderr).toMatch(/is not owner\/name|invalid repository name/);
+      expect(touchesRepo(calls())).toBe(false);
+      expect(readdirSync(cwd)).toEqual([]);
+      expect(launchers.local.launches).toEqual([]);
+    });
+
+    it.each(['-owner/x', 'owner/..'])(
+      'factory adopt refuses %s before asking GitHub',
+      async (repo) => {
+        const { cli, cwd, launchers } = laptop();
+        const r = await cli(['adopt', '--', repo]);
+        expect(r.code).not.toBe(0);
+        expect(r.stderr).toMatch(/expected owner\/repo/);
+        expect(calls()).toEqual([]);
+        expect(readdirSync(cwd)).toEqual([]);
+        expect(launchers.local.launches).toEqual([]);
+      },
+    );
+  },
+);
 
 describe('factory adopt (AC-007, AC-064)', { timeout: 120_000 }, () => {
   const APP = 'export const app = 1;\n';

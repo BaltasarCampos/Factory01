@@ -55,6 +55,9 @@ const isInt = (v: unknown, min: number, max = Number.MAX_SAFE_INTEGER): boolean 
 const isText = (v: unknown): boolean => typeof v === 'string' && v !== '';
 
 /** The event, or EventError listing every problem. */
+/** No session runs on a Fable model (FR-036): the events refuse one, and so does a session record. */
+export const isFable = (model: string) => /fable/i.test(model);
+
 export function validateEvent(value: unknown): Event {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw new EventError(['event is not an object']);
@@ -82,7 +85,7 @@ export function validateEvent(value: unknown): Event {
   );
   check(isText(e.session), 'session', 'session id required');
   check(isText(e.model), 'model', 'model required');
-  check(!(typeof e.model === 'string' && /fable/i.test(e.model)), 'model', 'must not be Fable');
+  check(!(typeof e.model === 'string' && isFable(e.model)), 'model', 'must not be Fable');
   check((EVENT_KINDS as readonly unknown[]).includes(e.kind), 'kind', 'unknown kind');
   for (const field of ['tool', 'input_summary', 'evidence'] as const) {
     check(e[field] === undefined || typeof e[field] === 'string', field, 'string expected');

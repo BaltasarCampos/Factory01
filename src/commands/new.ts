@@ -16,6 +16,7 @@ import { signedCommit } from '../git/sign.js';
 import { Fields, gh } from '../github/gh.js';
 import { cloneRepo, createRepo } from '../github/repo.js';
 import { createDefineBranch, DEFINE_BRANCH, installProject } from '../install/project.js';
+import { REPO, REPO_NAME } from '../model/config.js';
 import { formatReleasePin, slugify } from '../model/naming.js';
 import type { AgentsMode, ProjectConfig, ReleasePin } from '../model/types.js';
 import { RELEASE_TAG, verifyReleaseTag } from '../release/tag.js';
@@ -167,7 +168,7 @@ export async function newProject(ctx: CommandContext): Promise<number> {
   const pitch = (ctx.positionals[0] ?? '').trim();
   if (pitch === '') throw new UsageError('the pitch is empty');
   const name = typeof ctx.options.name === 'string' ? ctx.options.name : slugify(pitch);
-  if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(name))
+  if (!REPO_NAME.test(name))
     throw new UsageError(`invalid repository name ${JSON.stringify(name)}`);
   const workdir = join(ctx.cwd, name);
   if (existsSync(workdir)) throw new RefusedError(`${workdir} already exists`);
@@ -183,7 +184,9 @@ export async function newProject(ctx: CommandContext): Promise<number> {
     }
     const options = { env: ctx.env };
     const login = Fields.of(await gh(['api', 'user'], { ...options, json: true }), 'user');
-    const repo = await createRepo(`${login.str('login')}/${name}`, options);
+    const full = `${login.str('login')}/${name}`;
+    if (!REPO.test(full)) throw new RefusedError(`${JSON.stringify(full)} is not owner/name`);
+    const repo = await createRepo(full, options);
     await cloneRepo(repo, workdir, options);
     // The repo is empty: no auto-generated commit, so main starts at the signed root commit.
     mustGit(workdir, ['symbolic-ref', 'HEAD', 'refs/heads/main'], ctx.env);

@@ -16,7 +16,7 @@ import {
   DEFINE_BRANCH,
   installProject,
 } from '../install/project.js';
-import { parseConfig } from '../model/config.js';
+import { parseConfig, REPO } from '../model/config.js';
 import { formatReleasePin } from '../model/naming.js';
 import { visible } from '../notify/summary.js';
 import {
@@ -90,8 +90,8 @@ export function claudeMdShown(workdir: string, env: NodeJS.ProcessEnv): string {
 
 export async function adopt(ctx: CommandContext): Promise<number> {
   const repo = ctx.positionals[0] ?? '';
-  const name = /^[A-Za-z0-9_.-]+\/([A-Za-z0-9_-][A-Za-z0-9_.-]*)$/.exec(repo)?.[1];
-  if (name === undefined) throw new UsageError(`expected owner/repo, not ${JSON.stringify(repo)}`);
+  if (!REPO.test(repo)) throw new UsageError(`expected owner/repo, not ${JSON.stringify(repo)}`);
+  const name = repo.slice(repo.indexOf('/') + 1);
   const home = ownerHome(ctx);
   const options = { env: ctx.env };
   const seen = await visibility(repo, options);

@@ -12,7 +12,9 @@ without them. Every call is refused unless `FACTORY_SESSION` is a session id, it
 `FACTORY_ROLE` is the record's role and the session-start hook's `passed.json` names the session.
 Once the record reads, a refused call also logs a `blocked` event, so a session whose start
 never passed, or that the launcher misnamed, leaves a trace. The tools' events, `blocked`
-included, go to the session's own log, `events.jsonl` beside the record. An `item` other than the session's is invalid input.
+included, go to the session's own log, `events.jsonl` beside the record. A `blocked` event
+names its tool as `mcp__factory__<tool>` for one of the three tools below, or `unknown`, never
+by the name the session sent. An `item` other than the session's is invalid input.
 
 ## `advance_item`
 

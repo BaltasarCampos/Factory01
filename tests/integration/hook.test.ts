@@ -201,6 +201,17 @@ describe('factory hook stop (AC-063)', () => {
     expect(reason).not.toContain('\u202e');
   });
 
+  it.each([
+    ['a Fable model', { model: 'claude-fable-5-1' }, /bad model/],
+    ['a Builder at Verify, which would run its check', { station: 5 }, /bad station/],
+  ])('blocks a stop for a record naming %s', async (_name, record, why) => {
+    const dir = workingCopy();
+    const s = session(dir, record);
+    const r = await hook('stop', stop(dir), s.env);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(why);
+  });
+
   it('Intake whose record names no item cannot end (fails closed)', async () => {
     const dir = workingCopy();
     const s = session(dir, { role: 'intake', station: 1, item: 0, feature: '' });

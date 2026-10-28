@@ -164,6 +164,13 @@ describe('factory MCP server (contracts/mcp-tools.md)', () => {
     ],
     ['a record without its repository', () => launched({ repo: 'other' }), {}, /bad repo/],
     [
+      'a record naming a Fable model',
+      () => launched({ model: 'claude-fable-5-1' }),
+      {},
+      /bad model/,
+    ],
+    ['a record of a Builder at Verify', () => launched({ station: 5 }), {}, /bad station/],
+    [
       'a record without its inbox issue',
       () => launched({ inbox_issue: '1' }),
       {},
@@ -372,10 +379,20 @@ describe('invalid input: an MCP error and a blocked event (contracts/mcp-tools.m
     });
   });
 
-  it('an unknown tool is an MCP error', async () => {
+  it('an unknown tool is an MCP error, logged as unknown and never by the name the session sent', async () => {
     github();
-    const { client } = await connect(launched());
+    const dir = launched();
+    const { client } = await connect(dir);
     await expect(client.callTool({ name: 'merge_pr', arguments: {} })).rejects.toThrow(/merge_pr/);
+    expect(events(dir)).toEqual([expect.objectContaining({ kind: 'blocked', tool: 'unknown' })]);
+  });
+
+  it('a refused call to an unknown tool is logged as unknown too', async () => {
+    github();
+    const dir = launched({}, { passed: false });
+    const { call } = await connect(dir);
+    expect((await call('merge_pr', {})).isError).toBe(true);
+    expect(events(dir)).toEqual([expect.objectContaining({ kind: 'blocked', tool: 'unknown' })]);
   });
 });
 

@@ -42,6 +42,10 @@ import { requestSplit } from './tools/request-split.js';
 
 const TOOLS = [advanceItem, logEvent, requestSplit];
 
+/** The tool an event names: one of the factory's, or `unknown`, never the name the session sent. */
+const eventTool = (name: string) =>
+  TOOLS.some((t) => t.name === name) ? toolName(name) : 'unknown';
+
 /** The role and session id the launcher set; without them no tool can name its session. */
 export function launchedAs(env: NodeJS.ProcessEnv): { role: string; session: string } {
   const { FACTORY_ROLE: role, FACTORY_SESSION: session } = env;
@@ -68,7 +72,7 @@ async function toolSession(ctx: McpContext, tool: string): Promise<ToolSession |
         ? 'the session-start check has not passed for this session'
         : undefined;
   if (refused === undefined) return { record, session, log: sessionEvents(home, session) };
-  const fields = { tool: toolName(tool), input_summary: refused };
+  const fields = { tool: eventTool(tool), input_summary: refused };
   return refused + (await logBlocked(record, home, session, fields, ctx.now));
 }
 
@@ -104,7 +108,11 @@ export function createServer(ctx: McpContext): McpServer {
     } catch (err) {
       if (!(err instanceof InvalidInput))
         return result({ error: err instanceof Error ? err.message : String(err) }, true);
-      const fields = { kind: 'blocked', tool: toolName(name), input_summary: err.message } as const;
+      const fields = {
+        kind: 'blocked',
+        tool: eventTool(name),
+        input_summary: err.message,
+      } as const;
       await appendEvent(s.log, toolEvent(s, fields), ctx.now);
       throw new McpError(ErrorCode.InvalidParams, `${name}: ${err.message}`);
     }

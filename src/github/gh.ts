@@ -3,6 +3,7 @@
 // which refuses any value of the wrong shape rather than guessing.
 import { execFile, type ExecFileException } from 'node:child_process';
 import { EnvironmentError } from '../cli/env.js';
+import { REPO } from '../model/config.js';
 
 export class GhError extends Error {
   readonly args: readonly string[];
@@ -182,10 +183,8 @@ export function asList(value: unknown, what: string): unknown[] {
 // Arguments are checked before gh runs: a value starting with `-` would be read as a flag, and
 // gh splits label lists on commas, so `a,owner:approved` would add two labels.
 
-const REPO_RE = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9._-]+$/;
-
 export function repoArg(repo: string): string {
-  if (!REPO_RE.test(repo) || repo.endsWith('/.') || repo.endsWith('/..')) {
+  if (!REPO.test(repo)) {
     throw new GhError(`invalid repository ${JSON.stringify(repo)}; expected owner/name`);
   }
   return repo;
