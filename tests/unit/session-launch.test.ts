@@ -1,6 +1,15 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentError } from '../../src/cli/env.js';
 import { runLoop } from '../../src/commands/run.js';
@@ -13,11 +22,13 @@ import {
 } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, type LaunchRequest } from '../../src/dispatcher/launcher/types.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
+import { MCP_JSON } from '../../src/install/render.js';
+import type { SessionSettings } from '../../src/install/session-settings.js';
 import type { GuardrailManifest, ReleasePin } from '../../src/model/types.js';
 import { ReleaseTagError } from '../../src/release/tag.js';
 import { gitEnv, makeRepo, runGit } from '../helpers/git-repo.js';
 import { HOOKED_SETTINGS, manifestOf } from '../helpers/guardrails.js';
-import { tempDir } from '../helpers/keys.js';
+import { homeDir, tempDir } from '../helpers/keys.js';
 
 const BRANCH = 'claude/42-add-login';
 const REQUEST = {
@@ -25,18 +36,32 @@ const REQUEST = {
   station: 2,
   item: 42,
   branch: BRANCH,
+  feature: 'specs/42-add-login',
+  files: [],
   prompt: `Station 2 (specify) for owner/project#42 on branch ${BRANCH}.`,
 } as const;
 const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: owner/project\ninbox_issue: 1\n`;
-function fakeRunner(status = 0, stdout = '{"session_id":"s-123"}') {
+/** The session id `claude` was launched with, which its JSON output reports back. */
+const launchedId = (args: readonly string[]) => args[args.indexOf('--session-id') + 1];
+const echo = (args: readonly string[]) => JSON.stringify({ session_id: launchedId(args) });
+
+function fakeRunner(status = 0, stdout: string | typeof echo = echo) {
   const calls: { program: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv }[] =
     [];
   const run: Runner = (program, args, options) => {
     calls.push({ program, args, ...options });
-    return Promise.resolve({ status, stdout, stderr: status === 0 ? '' : 'boom' });
+    const out = typeof stdout === 'string' ? stdout : stdout(args);
+    return Promise.resolve({ status, stdout: out, stderr: status === 0 ? '' : 'boom' });
   };
   return { calls, run };
 }
+
+/** Session ids in launch order, each fresh. */
+const sessionIds = () => {
+  let n = 0;
+  return () => `0b6c7f3e-2a4d-4c1e-9f00-${String((n += 1)).padStart(12, '0')}`;
+};
+const FIRST = '0b6c7f3e-2a4d-4c1e-9f00-000000000001';
 
 const DEFINE_ROLE = '---\nname: define\nmodel: sonnet\ntools: Read\nversion: 1\n---\nDefine.\n';
 /** Main's protected files: what the pinned release's manifest lists. */
@@ -68,12 +93,13 @@ function setup(
   repo.push(BRANCH);
   repo.checkout('main');
   repo.git(['fetch', '-q', 'origin']);
-  const home = tempDir('factory-home-');
+  const home = homeDir();
   const runner = fakeRunner();
   const launcher = new LocalLauncher({
     ...{ home, env: options.env ?? gitEnv },
     release: options.release ?? (() => manifestOf(GUARDED)),
     run: options.run ?? runner.run,
+    sessionId: sessionIds(),
   });
   const owner = () => [
     repo.git(['rev-parse', '--abbrev-ref', 'HEAD']),
@@ -86,8 +112,14 @@ function setup(
   const available = () => launcher.available(repo.path);
   return { repo, home, launch, available, sessions, owner };
 }
+const FACTORY_SETTINGS = new URL('../../factory/settings/settings.json', import.meta.url);
 const work = (home: string, name: string) =>
-  join(home, '.factory', 'work', 'owner', 'project', name);
+  join(realpathSync(home), 'factory-work', 'owner', 'project', name);
+/** The session's own files, in its folder under `~/.factory/sessions/`. */
+const sessionFiles = (home: string, id = FIRST) => {
+  const dir = join(home, '.factory', 'sessions', id);
+  return { id, settings: join(dir, 'settings.json'), mcp: join(dir, 'mcp.json') };
+};
 
 describe('LocalLauncher (research R8, R9)', () => {
   it('runs claude in a fresh clone of its own on the item branch, never in the Owner’s working copy', async () => {
@@ -96,11 +128,12 @@ describe('LocalLauncher (research R8, R9)', () => {
 
     const { sessionId } = await t.launch(REQUEST);
 
-    expect(sessionId).toBe('s-123');
+    expect(sessionId).toBe(FIRST);
     const [launch] = t.sessions();
     const clone = work(t.home, '42-add-login');
     expect(launch?.cwd).toBe(clone);
-    expect(launch?.args).toEqual(localInvocation({ ...REQUEST, project: t.repo.path }));
+    const request = { ...REQUEST, project: t.repo.path };
+    expect(launch?.args).toEqual(localInvocation(request, sessionFiles(t.home)));
     expect(launch?.env).toMatchObject({ FACTORY_ITEM: '42', FACTORY_STATION: '2' });
     // The release's commands take the feature folder from the prompt (T171, T172).
     expect(launch?.env).not.toHaveProperty('SPECIFY_FEATURE');
@@ -113,6 +146,59 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(runGit(clone, ['rev-parse', '--abbrev-ref', 'HEAD'])).toBe(BRANCH);
     expect(runGit(clone, ['rev-parse', 'HEAD'])).toBe(t.repo.revParse(`origin/${BRANCH}`));
     expect(t.owner()).toEqual(before);
+  });
+
+  it("writes the session's settings and the factory's MCP config into its own fresh folder under ~/.factory/", async () => {
+    let home = '';
+    let tmp = '';
+    const run: Runner = (_program, args) => {
+      if (args[0] === '-p') {
+        const files = sessionFiles(home);
+        const settings = JSON.parse(readFileSync(files.settings, 'utf8')) as SessionSettings;
+        tmp = settings.sandbox.filesystem.allowWrite[0] ?? '';
+        expect(existsSync(tmp)).toBe(true);
+      }
+      return Promise.resolve({ status: 0, stdout: echo(args), stderr: '' });
+    };
+    const at = setup({ run });
+    home = at.home;
+
+    await at.launch({ ...REQUEST, files: ['specs/42-add-login/spec.md'] });
+
+    const files = sessionFiles(at.home);
+    const folder = dirname(files.settings);
+    expect(statSync(folder).mode & 0o777).toBe(0o700);
+    expect(statSync(files.settings).mode & 0o777).toBe(0o600);
+    expect(readFileSync(files.mcp, 'utf8')).toBe(MCP_JSON);
+    const settings = JSON.parse(readFileSync(files.settings, 'utf8')) as SessionSettings;
+    const clone = work(at.home, '42-add-login');
+    expect(settings.sandbox.filesystem.allowRead.slice(0, 2)).toEqual([clone, tmp]);
+    expect(settings.permissions.allow).toContain(`Edit(/${clone}/specs/42-add-login/spec.md)`);
+    expect(settings.hooks).toEqual(
+      (JSON.parse(readFileSync(FACTORY_SETTINGS, 'utf8')) as SessionSettings).hooks,
+    );
+    // The clone and the temporary folder stay outside ~/.factory/, which the sandbox denies whole.
+    const factory = join(realpathSync(at.home), '.factory');
+    for (const path of [clone, ...settings.sandbox.filesystem.allowWrite])
+      expect(path.startsWith(`${factory}/`), path).toBe(false);
+    expect(tmp.startsWith('/tmp/factory-42-')).toBe(true);
+    // The session's temporary folder goes with it.
+    expect(existsSync(tmp)).toBe(false);
+  });
+
+  it('refuses a launch whose session folder already exists, running nothing', async () => {
+    const t = setup();
+    const folder = dirname(sessionFiles(t.home).settings);
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, 'passed.json'), '{}');
+
+    const refused = t.launch(REQUEST);
+
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(/the session folder .* already exists/);
+    expect(t.sessions()).toEqual([]);
+    expect(readFileSync(join(folder, 'passed.json'), 'utf8')).toBe('{}');
+    expect(existsSync(sessionFiles(t.home).settings)).toBe(false);
   });
 
   it('runs Intake in a detached clone of main, with its item and station', async () => {
@@ -206,7 +292,14 @@ describe('LocalLauncher (research R8, R9)', () => {
       t.repo.push(DEFINE_BRANCH);
       t.repo.checkout('main');
     }
-    const define = { role: 'define', station: 0, item: 0, branch: DEFINE_BRANCH } as const;
+    const define = {
+      role: 'define',
+      station: 0,
+      item: 0,
+      branch: DEFINE_BRANCH,
+      feature: '',
+      files: [],
+    } as const;
 
     await t.launch({ ...define, prompt: 'Station 0 (define).' });
 
@@ -226,7 +319,7 @@ describe('LocalLauncher (research R8, R9)', () => {
         ? Promise.resolve({ status: 0, stdout: '', stderr: '' })
         : new Promise((done) => {
             finish = () => {
-              done({ status: 0, stdout: '{"session_id":"s-1"}', stderr: '' });
+              done({ status: 0, stdout: echo(args), stderr: '' });
             };
           });
     const t = setup({ run });
@@ -237,14 +330,15 @@ describe('LocalLauncher (research R8, R9)', () => {
       expect(existsSync(work(t.home, '42-add-login'))).toBe(true);
     });
     finish();
-    await expect(first).resolves.toEqual({ sessionId: 's-1' });
+    await expect(first).resolves.toEqual({ sessionId: FIRST });
   });
 
-  it('a failed session, or one without a session_id, is an error', async () => {
+  it('a failed session, or one reporting no session or another, is an error', async () => {
     await expect(setup({ run: fakeRunner(1).run }).launch(REQUEST)).rejects.toThrow(/boom/);
-    await expect(setup({ run: fakeRunner(0, '{}').run }).launch(REQUEST)).rejects.toThrow(
-      /session_id/,
-    );
+    for (const stdout of ['{}', '{"session_id":"s-other"}'])
+      await expect(setup({ run: fakeRunner(0, stdout).run }).launch(REQUEST)).rejects.toThrow(
+        new RegExp(`claude reported session .*, not ${FIRST} as launched`),
+      );
   });
 });
 
@@ -284,7 +378,14 @@ describe("LocalLauncher: the branch's history, checked in the factory's own clon
     t.repo.checkout(DEFINE_BRANCH, { create: true });
     t.repo.commit({ '.factory/brief.md': '# Brief\n' }, 'Define: brief');
     t.repo.push(DEFINE_BRANCH);
-    const define = { role: 'define', station: 0, item: 0, branch: DEFINE_BRANCH } as const;
+    const define = {
+      role: 'define',
+      station: 0,
+      item: 0,
+      branch: DEFINE_BRANCH,
+      feature: '',
+      files: [],
+    } as const;
     await t.launch({ ...define, prompt: 'Station 0 (define).' });
     expect(t.sessions()).toHaveLength(1);
 
@@ -411,8 +512,8 @@ describe("LocalLauncher: the branch's history, checked in the factory's own clon
 
   it("stops the launch with an error when the session's clone cannot be made", async () => {
     const t = setup();
-    mkdirSync(join(t.home, '.factory', 'work'), { recursive: true });
-    writeFileSync(join(t.home, '.factory', 'work', 'owner'), 'not a folder\n');
+    mkdirSync(join(t.home, 'factory-work'), { recursive: true });
+    writeFileSync(join(t.home, 'factory-work', 'owner'), 'not a folder\n');
     const failed = await error(t.launch(REQUEST));
     expect(failed).toBeInstanceOf(EnvironmentError);
     expect((failed as Error).message).toMatch(/making the session's clone/);

@@ -383,8 +383,12 @@ describe('invalid input: an MCP error and a blocked event (contracts/mcp-tools.m
     github();
     const dir = launched();
     const { client } = await connect(dir);
-    await expect(client.callTool({ name: 'merge_pr', arguments: {} })).rejects.toThrow(/merge_pr/);
-    expect(events(dir)).toEqual([expect.objectContaining({ kind: 'blocked', tool: 'unknown' })]);
+    const call = client.callTool({ name: 'zq_xylo_merge', arguments: {} });
+    await expect(call).rejects.toThrow(/unknown tool/);
+    await expect(call).rejects.not.toThrow(/zq|xylo|merge/);
+    expect(events(dir)).toEqual([
+      expect.objectContaining({ kind: 'blocked', tool: 'unknown', input_summary: 'unknown tool' }),
+    ]);
   });
 
   it('a refused call to an unknown tool is logged as unknown too', async () => {
@@ -393,6 +397,7 @@ describe('invalid input: an MCP error and a blocked event (contracts/mcp-tools.m
     const { call } = await connect(dir);
     expect((await call('merge_pr', {})).isError).toBe(true);
     expect(events(dir)).toEqual([expect.objectContaining({ kind: 'blocked', tool: 'unknown' })]);
+    expect(JSON.stringify(events(dir))).not.toContain('merge');
   });
 });
 

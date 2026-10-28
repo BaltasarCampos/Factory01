@@ -7,6 +7,8 @@ export interface LaunchRequest {
   station: number;
   item: number;
   branch: string;
+  feature: string;
+  files: readonly string[];
   prompt: string;
 }
 

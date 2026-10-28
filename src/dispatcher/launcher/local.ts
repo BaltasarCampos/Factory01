@@ -1,5 +1,5 @@
 // Local sessions (research R8, FR-031): `claude -p` on the laptop, one at a time, each in a
-// fresh clone of its own under `~/.factory/work/<repo>/<name>`, never in the Owner's working copy
+// fresh clone of its own under `~/factory-work/<repo>/<name>`, never in the Owner's working copy
 // and never in a worktree of it: a worktree shares `.git/config`, `.git/hooks` and the local
 // branches, so a session could plant a hook that runs when the Owner signs a merge (Owner review
 // 2026-10-07). The clone is made anew for every launch, its `origin` set to the project's
@@ -23,14 +23,32 @@
 // its `.gitattributes` with every config git reads, so a filter the Owner's config defines, such
 // as git-lfs's, would run against origin with the Owner's credentials. Every such call goes
 // through `isolated()`, without the global and system config, hooks or submodule recursion.
+//
+// Every launch gets a fresh session id and a folder of its own, `~/.factory/sessions/<id>/`, made
+// exclusively, so no file of an earlier launch sits beside a new one. It holds the session's
+// `--settings` file and the factory's MCP config, read by Claude Code outside the sandbox, which
+// denies all of `~/.factory/` to the session's shell; the clone and the session's temporary
+// folder stay outside it, opened by real path.
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
+import { loadPolicy } from '../../guard/policy.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
+import { MCP_JSON } from '../../install/render.js';
+import { renderSessionSettings } from '../../install/session-settings.js';
+import type { Settings } from '../../install/settings.js';
 import { pathRule } from '../../merge/rules.js';
 import { parseConfig } from '../../model/config.js';
 import { visible } from '../../notify/summary.js';
@@ -63,14 +81,26 @@ export const runProcess: Runner = (program, args, options) =>
     });
   });
 
+/** The session's own files, in its folder under `~/.factory/sessions/`. */
+export interface SessionFiles {
+  id: string;
+  settings: string;
+  mcp: string;
+}
+
 /**
- * The `claude` arguments for a local session. Not confirmed yet: the Phase 0 probe T125 checks
- * `--agent` and the `session_id` field of the JSON output, and changes only this function.
+ * The `claude` arguments for a local session (T061): its id, its own settings, only the project's
+ * settings besides, only the factory's MCP server and `dontAsk`, so a tool call no rule allows is
+ * refused; never auto mode, a resume or a skipped permission check.
  */
-export const localInvocation = (request: LaunchRequest): readonly string[] => [
+export const localInvocation = (request: LaunchRequest, files: SessionFiles): readonly string[] => [
   ...['-p', '--agent', request.role, '--model', 'sonnet', '--output-format', 'json'],
+  ...['--session-id', files.id, '--settings', files.settings, '--setting-sources', 'project'],
+  ...['--strict-mcp-config', '--mcp-config', files.mcp, '--permission-mode', 'dontAsk'],
   request.prompt,
 ];
+
+const FACTORY = new URL('../../../factory/', import.meta.url);
 
 type Unavailable = Extract<Availability, { ok: false }>;
 
@@ -149,7 +179,7 @@ export function guardrailCheck(
 }
 
 export interface LocalOptions {
-  /** Holds `.factory/work/`. */
+  /** Holds `factory-work/`, the sessions' clones, and `.factory/sessions/`, their own files. */
   home: string;
   env: NodeJS.ProcessEnv;
   /**
@@ -160,6 +190,10 @@ export interface LocalOptions {
   /** Default `origin/main`. */
   mainRef?: string;
   run?: Runner;
+  /** A fresh session id for each launch; default a random UUID. */
+  sessionId?: () => string;
+  /** Where the session's temporary folder is made, kept short (T061); default `/tmp`. */
+  tmpRoot?: string;
 }
 
 export class LocalLauncher implements SessionLauncher {
@@ -312,7 +346,7 @@ export class LocalLauncher implements SessionLauncher {
     const { home } = this.options;
     const repo = this.config(project, heads.main).repo;
     const name = branch === 'main' ? 'main' : branch.slice('claude/'.length);
-    const dir = join(home, '.factory', 'work', ...repo.split('/'), name);
+    const dir = join(realpathSync(home), 'factory-work', ...repo.split('/'), name);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dirname(dir), { recursive: true });
     this.isolated(home, ['init', '-q', '-b', 'main', dir]);
@@ -372,21 +406,76 @@ export class LocalLauncher implements SessionLauncher {
         ...(request.item > 0 ? { FACTORY_ITEM: String(request.item) } : {}),
         FACTORY_STATION: String(request.station),
       };
-      const result = await this.run('claude', localInvocation(request), { cwd, env });
-      if (result.status !== 0)
-        throw new EnvironmentError(
-          `claude exited ${String(result.status)}: ${result.stderr.trim()}`,
-        );
-      let sessionId: unknown;
+      const files = step("making the session's folder", () => this.sessionFolder());
+      const tmp = step("making the session's temporary folder", () => this.tmpFolder(request.item));
       try {
-        sessionId = (JSON.parse(result.stdout) as { session_id?: unknown }).session_id;
-      } catch {
-        sessionId = undefined;
+        step("writing the session's settings", () => {
+          this.writeSettings(request, files, { clone: cwd, tmp });
+        });
+        const result = await this.run('claude', localInvocation(request, files), { cwd, env });
+        if (result.status !== 0)
+          throw new EnvironmentError(
+            `claude exited ${String(result.status)}: ${result.stderr.trim()}`,
+          );
+        let reported: unknown;
+        try {
+          reported = (JSON.parse(result.stdout) as { session_id?: unknown }).session_id;
+        } catch {
+          reported = undefined;
+        }
+        if (reported !== files.id)
+          throw new EnvironmentError(
+            `claude reported session ${JSON.stringify(reported)}, not ${files.id} as launched`,
+          );
+        return { sessionId: files.id };
+      } finally {
+        rmSync(tmp, { recursive: true, force: true });
       }
-      if (typeof sessionId !== 'string') throw new EnvironmentError('claude printed no session_id');
-      return { sessionId };
     } finally {
       this.running = false;
     }
+  }
+
+  /** The session's own folder under `~/.factory/sessions/`, made for this launch alone. */
+  private sessionFolder(): SessionFiles {
+    const id = (this.options.sessionId ?? randomUUID)();
+    const dir = join(this.options.home, '.factory', 'sessions', id);
+    mkdirSync(dirname(dir), { recursive: true, mode: 0o700 });
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      throw new LaunchRefused(`no local session started: the session folder ${dir} already exists`);
+    }
+    return { id, settings: join(dir, 'settings.json'), mcp: join(dir, 'mcp.json') };
+  }
+
+  /** A fresh, short temporary folder for the session, by its real path (T061). */
+  private tmpFolder(item: number): string {
+    const root = this.options.tmpRoot ?? '/tmp';
+    return realpathSync(mkdtempSync(join(root, `factory-${String(item)}-`)));
+  }
+
+  /** The session's `--settings` file and the factory's MCP config, from the installed factory. */
+  private writeSettings(
+    request: LaunchRequest,
+    files: SessionFiles,
+    at: { clone: string; tmp: string },
+  ) {
+    const policy = loadPolicy(readFileSync(new URL('policy/roles.yaml', FACTORY), 'utf8'));
+    const project = readFileSync(new URL('settings/settings.json', FACTORY), 'utf8');
+    const { hooks } = JSON.parse(project) as Settings;
+    // The roles whose shell runs npm read node's own folder, which may lie under home.
+    const npm = policy.roles[request.role].shell.some((prefix) => /^(npm|npx)\b/.test(prefix));
+    const node = dirname(dirname(realpathSync(process.execPath)));
+    const paths = {
+      ...{ home: realpathSync(this.options.home), ...at },
+      tools: npm ? [node] : [],
+    };
+    const { role, feature, files: task } = request;
+    const settings = renderSessionSettings(policy, { role, paths, feature, files: task, hooks });
+    const write = { flag: 'wx', mode: 0o600 } as const;
+    writeFileSync(files.settings, `${JSON.stringify(settings, null, 2)}\n`, write);
+    writeFileSync(files.mcp, MCP_JSON, write);
   }
 }

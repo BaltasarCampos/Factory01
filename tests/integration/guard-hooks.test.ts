@@ -267,6 +267,13 @@ describe('the guard hooks (T086)', () => {
     ['a Builder at Verify', { station: 5 }, 'station'],
     ['a Reviewer at Build', { role: 'reviewer', station: 4 }, 'station'],
     ['Define at Intake', { role: 'define', station: 1, item: 0, feature: '' }, 'station'],
+    // Every field an event takes from the record, checked as the event schema checks it.
+    ['a role_version without the role file hash', { role_version: 'v1.0.0' }, 'role_version'],
+    [
+      'a role_version that is no release tag',
+      { role_version: 'latest+0123456789ab' },
+      'role_version',
+    ],
   ])('block a record naming %s in the gate and every guard', async (_name, record, field) => {
     const at = setUp(record);
     for (const [event, tool, input] of [

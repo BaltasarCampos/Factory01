@@ -10,7 +10,7 @@
 // (`onFailure: "block"`, Claude Code v2.1.295 or later); it has no effect on Stop.
 import { RefusedError } from '../cli/env.js';
 import { deniedWrites, type Policy } from '../guard/policy.js';
-import { ROLES } from '../model/types.js';
+import { ROLES, type RoleName } from '../model/types.js';
 
 /** The version whose tool names the deny rules are checked against. */
 export const CLAUDE_CODE_VERSION = '2.1.309';
@@ -32,7 +32,7 @@ export const CLAUDE_CODE_TOOLS = [
 ] as const;
 
 /** The factory MCP server's tools (contracts/mcp-tools.md), which every session may call. */
-const MCP_TOOLS = ['advance_item', 'log_event', 'request_split'];
+export const MCP_TOOLS = ['advance_item', 'log_event', 'request_split'];
 
 interface Hook {
   type: 'command';
@@ -71,6 +71,19 @@ const hook = (name: string, guard: boolean, matcher?: string): HookGroup => ({
 /** A table path as a permission rule's: home and any-depth paths as they are, others from the root. */
 const rulePath = (path: string) =>
   path.startsWith('~/') || path.startsWith('**/') ? path : `/${path}`;
+
+/**
+ * The tools a session of `role` is denied, for its own settings: every tool of the version but its
+ * role's and the kept ones, so a subagent tool only the Builder has stays denied to the others.
+ */
+export function deniedTools(
+  policy: Policy,
+  role: RoleName,
+  tools: readonly string[] = CLAUDE_CODE_TOOLS,
+): string[] {
+  const open = new Set([...policy.roles[role].tools, ...Object.keys(policy.keepTools)]);
+  return tools.filter((tool) => !open.has(tool));
+}
 
 export function renderSettings(
   policy: Policy,

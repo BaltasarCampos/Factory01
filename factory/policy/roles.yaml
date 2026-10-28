@@ -70,7 +70,8 @@ roles:
     network: []
     branch: item
   builder:
-    tools: [Read, Write, Edit, Bash, Grep, Glob, Agent]
+    # Task is Claude Code 2.1.309's name for Agent, the subagent tool (T125's A3c).
+    tools: [Read, Write, Edit, Bash, Grep, Glob, Agent, Task]
     # Never tasks.md, even when a task lists it: the dispatcher ticks it (T174).
     write: ['{task}']
     # Explicit subcommands, as Define's, with what a conflict session needs: the merges (T084).
@@ -217,7 +218,6 @@ keep_tools:
   ToolSearch: loads the factory MCP server's tools, which Claude Code defers until searched
   EndConversation: Claude Code cannot deny it while any other tool remains
   WaitForMcpServers: waits for the factory MCP server while it is still connecting
-  Task: the subagent tool's name in Claude Code 2.1.309 (T125's A3c), the Builder's Agent, so denying it could deny the Builder's subagents
 
 # Names a command may assign before its program, such as `CI=1 npm test`, each with why; every
 # other leading assignment is refused, since one such as PATH, GIT_DIR or LD_PRELOAD changes what

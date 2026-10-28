@@ -21,13 +21,13 @@ const CONTRACT = readFileSync(
 );
 const MCP_TOOLS = [...CONTRACT.matchAll(/^## `([a-z_]+)`$/gm)].map((m) => m[1] ?? '');
 const KEYS = ['description', 'model', 'name', 'tools', 'version'];
-/** The design's Tools column, Builder's subagents as Claude Code's `Agent` tool. */
+/** The design's Tools column, Builder's subagents as `Agent` and 2.1.309's name for it, `Task`. */
 const TOOLS: Readonly<Record<string, string[]>> = {
   define: ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob'],
   intake: ['Read', 'Grep', 'Glob', 'Bash'],
   spec: ['Read', 'Grep', 'Glob', 'Write'],
   planner: ['Read', 'Grep', 'Glob', 'Write'],
-  builder: ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'Agent'],
+  builder: ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'Agent', 'Task'],
   test: ['Read', 'Grep', 'Glob', 'Write', 'Edit', 'Bash'],
   reviewer: ['Read', 'Grep', 'Glob', 'Bash', 'Write'],
   security: ['Read', 'Grep', 'Glob', 'Bash', 'Write'],

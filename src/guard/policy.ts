@@ -7,8 +7,8 @@ import { parse } from 'yaml';
 import { RefusedError } from '../cli/env.js';
 import { ROLES, type RoleName } from '../model/types.js';
 
-/** Claude Code's own tools that a role may be given. */
-export const TOOLS = ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'Agent'] as const;
+/** Claude Code's own tools that a role may be given; `Task` is 2.1.309's name for `Agent`. */
+export const TOOLS = ['Read', 'Write', 'Edit', 'Bash', 'Grep', 'Glob', 'Agent', 'Task'] as const;
 export const BRANCHES = ['item', 'claude/factory-log', 'claude/define', 'none'] as const;
 
 export interface RolePolicy {

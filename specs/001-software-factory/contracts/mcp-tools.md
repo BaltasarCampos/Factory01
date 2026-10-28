@@ -14,7 +14,8 @@ Once the record reads, a refused call also logs a `blocked` event, so a session 
 never passed, or that the launcher misnamed, leaves a trace. The tools' events, `blocked`
 included, go to the session's own log, `events.jsonl` beside the record. A `blocked` event
 names its tool as `mcp__factory__<tool>` for one of the three tools below, or `unknown`, never
-by the name the session sent. An `item` other than the session's is invalid input.
+by the name the session sent, and a call to any other tool is refused as `unknown tool`, quoting no
+part of its name. An `item` other than the session's is invalid input.
 
 With `--agent` a session has exactly its role file's `tools`, so each role file names, as
 `mcp__factory__<tool>`, exactly the tools its body tells the role to call (T070): today

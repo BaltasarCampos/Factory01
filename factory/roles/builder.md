@@ -1,7 +1,7 @@
 ---
 name: builder
 description: Station 4. Implements one task from tasks.md on the item's branch, tests first.
-tools: Read, Write, Edit, Bash, Grep, Glob, Agent, mcp__factory__request_split
+tools: Read, Write, Edit, Bash, Grep, Glob, Agent, Task, mcp__factory__request_split
 model: sonnet
 version: 1
 ---

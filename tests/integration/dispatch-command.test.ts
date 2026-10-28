@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -12,10 +12,11 @@ import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, mergeBrief } from '../helpers/git-repo.js';
 import { HOOKED_SETTINGS, manifestOf } from '../helpers/guardrails.js';
-import { makeKeys, makeOtherKeys, tempDir, type TestKeys } from '../helpers/keys.js';
+import { homeDir, makeKeys, makeOtherKeys, tempDir, type TestKeys } from '../helpers/keys.js';
 import { promptFiles } from '../helpers/release.js';
 
 const REPO = 'owner/project';
+const SESSION_ID = '0b6c7f3e-2a4d-4c1e-9f00-1234567890ab';
 const BRANCH = 'claude/2-add-login';
 const BEFORE = '2026-10-01T08:00:00Z';
 const LABELS = [...STATES.map((s) => `state:${s}`), 'owner:approved'].map((name) => ({
@@ -103,7 +104,7 @@ function setup(options: Setup = {}) {
       },
     },
   });
-  const home = tempDir('factory-home-');
+  const home = homeDir();
   mkdirSync(join(home, '.factory', 'keys'), { recursive: true });
   copyFileSync(owner.publicKeyPath, `${ownerKeyPath(home)}.pub`);
   // The laptop's own key lists (`factory keygen`), which release tags must verify against.
@@ -118,8 +119,14 @@ function setup(options: Setup = {}) {
       release: () => manifest,
       run: (_program, args, { cwd }) => {
         sessions.push({ args, cwd });
-        return Promise.resolve({ status: 0, stdout: '{"session_id":"s-9"}', stderr: '' });
+        const id = args[args.indexOf('--session-id') + 1];
+        return Promise.resolve({
+          status: 0,
+          stdout: JSON.stringify({ session_id: id }),
+          stderr: '',
+        });
       },
+      sessionId: () => SESSION_ID,
     });
   const cli = async (
     argv: string[],
@@ -229,8 +236,10 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
 
     const r = await t.cli(['dispatch'], { launchers: { local } });
 
-    expect(r.stdout).toContain(`started spec (station 2) for #2 on ${BRANCH}: local session s-9`);
-    const worktree = join(t.home, '.factory', 'work', 'owner', 'project', '2-add-login');
+    expect(r.stdout).toContain(
+      `started spec (station 2) for #2 on ${BRANCH}: local session ${SESSION_ID}`,
+    );
+    const worktree = join(realpathSync(t.home), 'factory-work', 'owner', 'project', '2-add-login');
     expect(t.sessions.filter((s) => s.args[0] === '-p').map((s) => s.cwd)).toEqual([worktree]);
     expect(t.checkout()).toEqual(before);
     expect(t.inbox()).toEqual([]);

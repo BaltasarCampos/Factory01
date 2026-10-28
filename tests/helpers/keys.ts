@@ -1,9 +1,10 @@
 // Throwaway Owner keys made with the real `ssh-keygen`, so signature tests exercise the same
 // verification the factory uses. Keys have no passphrase and never touch ~/.factory.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { onTestFinished } from 'vitest';
 
 export interface TestKeys {
@@ -31,10 +32,10 @@ process.once('exit', () => {
 
 /**
  * A temp directory removed when the current test ends, or at process exit when created
- * outside a test (for example in `beforeAll`).
+ * outside a test (for example in `beforeAll`); under `root` when given.
  */
-export function tempDir(prefix = 'factory-test-'): string {
-  const dir = mkdtempSync(join(tmpdir(), prefix));
+export function tempDir(prefix = 'factory-test-', root = tmpdir()): string {
+  const dir = mkdtempSync(join(root, prefix));
   try {
     onTestFinished(() => {
       rmSync(dir, { recursive: true, force: true });
@@ -43,6 +44,17 @@ export function tempDir(prefix = 'factory-test-'): string {
     pendingCleanup.add(dir);
   }
   return dir;
+}
+
+/**
+ * The Owner's home for a test that launches a local session: outside every shared temporary
+ * folder, which the sandbox denies, so a clone there is refused (T061). Under `node_modules/`,
+ * which git ignores.
+ */
+export function homeDir(): string {
+  const root = fileURLToPath(new URL('../../node_modules/.cache/factory-homes/', import.meta.url));
+  mkdirSync(root, { recursive: true });
+  return tempDir('factory-home-', root);
 }
 
 function generate(comment: string): TestKeys {
