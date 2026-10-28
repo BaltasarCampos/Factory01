@@ -4,7 +4,13 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { loadPolicy } from '../../src/guard/policy.js';
-import { CLAUDE_CODE_TOOLS, renderSettings, type Settings } from '../../src/install/settings.js';
+import {
+  CLAUDE_CODE_TOOLS,
+  deniedTools,
+  renderSettings,
+  type Settings,
+} from '../../src/install/settings.js';
+import { ROLES } from '../../src/model/types.js';
 
 const read = (path: string) =>
   readFileSync(fileURLToPath(new URL(`../../factory/${path}`, import.meta.url)), 'utf8');
@@ -115,11 +121,34 @@ describe('the generated settings (T082)', () => {
     expect(settings.disableClaudeAiConnectors).toBe(true);
   });
 
-  it("keeps Task open, 2.1.309's name for the Builder's subagent tool Agent", () => {
-    expect(policy.keepTools).toHaveProperty('Task');
-    expect(policy.roles.builder.tools).toContain('Agent');
+  it("gives Task, 2.1.309's name for Agent, to the Builder alone, so the project denies neither", () => {
+    expect(policy.keepTools).not.toHaveProperty('Task');
+    for (const role of ROLES) {
+      const subagents = role === 'builder' ? ['Agent', 'Task'] : [];
+      expect(
+        policy.roles[role].tools.filter((t) => t === 'Agent' || t === 'Task'),
+        role,
+      ).toEqual(subagents);
+    }
     expect(deny).not.toContain('Task');
     expect(deny).not.toContain('Agent');
+  });
+
+  it("denies a session every tool not its role's or kept, Task and Agent for all but the Builder", () => {
+    for (const role of ROLES.filter((r) => r !== 'builder')) {
+      expect(deniedTools(policy, role), role).toEqual(expect.arrayContaining(['Task', 'Agent']));
+    }
+    const builder = deniedTools(policy, 'builder');
+    expect(builder).not.toContain('Task');
+    expect(builder).not.toContain('Agent');
+    expect(deniedTools(policy, 'reviewer')).not.toContain('Read');
+    expect(deniedTools(policy, 'reviewer')).not.toContain('ToolSearch');
+    for (const role of ROLES)
+      for (const tool of CLAUDE_CODE_TOOLS)
+        expect(deniedTools(policy, role).includes(tool), `${role} ${tool}`).toBe(
+          !(policy.roles[role].tools as readonly string[]).includes(tool) &&
+            !(tool in policy.keepTools),
+        );
   });
 
   it('refuses a kept or role tool that the Claude Code version the release targets does not have', () => {

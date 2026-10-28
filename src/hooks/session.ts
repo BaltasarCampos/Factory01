@@ -9,9 +9,9 @@
 import { readFileSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { appendEvent, type EventInput } from '../events/append.js';
-import { isFable } from '../events/schema.js';
+import { sessionFields } from '../events/schema.js';
 import { REPO } from '../model/config.js';
-import { ROLE_STATION, ROLES, type RoleName, type Station } from '../model/types.js';
+import { ROLE_STATION, type RoleName, type Station } from '../model/types.js';
 
 /** A hook cannot determine what it needs; the caller blocks. */
 export class HookError extends Error {
@@ -68,20 +68,18 @@ export function readSessionRecord(home: string, given: unknown): SessionRecord {
     throw new HookError(`the session's record ${path} could not be read: ${String(error)}`);
   }
   const r = (typeof value === 'object' && value !== null ? value : {}) as Record<string, unknown>;
-  const int = (v: unknown, max = Number.MAX_SAFE_INTEGER) =>
-    Number.isSafeInteger(v) && (v as number) >= 0 && (v as number) <= max;
   const checks: [string, boolean][] = [
-    ['role', (ROLES as readonly unknown[]).includes(r.role)],
-    ['item', int(r.item)],
+    ['role', sessionFields.role(r.role)],
+    ['item', sessionFields.item(r.item)],
     // The role's own station: no session runs another station's check with its permissions.
-    ['station', r.station === ROLE_STATION[r.role as RoleName]],
+    ['station', sessionFields.station(r.station) && r.station === ROLE_STATION[r.role as RoleName]],
     ['feature', typeof r.feature === 'string'],
     ['files', Array.isArray(r.files) && r.files.every((f) => typeof f === 'string')],
     ['clone', typeof r.clone === 'string' && isAbsolute(r.clone)],
-    ['model', typeof r.model === 'string' && r.model !== '' && !isFable(r.model)],
-    ['role_version', typeof r.role_version === 'string' && r.role_version !== ''],
+    ['model', sessionFields.model(r.model)],
+    ['role_version', sessionFields.role_version(r.role_version)],
     ['repo', typeof r.repo === 'string' && REPO.test(r.repo)],
-    ['inbox_issue', int(r.inbox_issue) && (r.inbox_issue as number) > 0],
+    ['inbox_issue', Number.isSafeInteger(r.inbox_issue) && (r.inbox_issue as number) > 0],
   ];
   const problem = checks.find(([, ok]) => !ok)?.[0];
   if (problem !== undefined) throw new HookError(`the session's record ${path}: bad ${problem}`);

@@ -57,6 +57,18 @@ const isText = (v: unknown): boolean => typeof v === 'string' && v !== '';
 /** No session runs on a Fable model (FR-036): events refuse one, and so does a session record. */
 export const isFable = (model: string) => /fable/i.test(model);
 
+/**
+ * The checks of the fields an event takes from its session, which the session's record shares
+ * (src/hooks/session.ts), so no record passes the hooks before a call and fails only its event.
+ */
+export const sessionFields = {
+  item: (v: unknown) => isInt(v, 0),
+  station: (v: unknown) => isInt(v, 0, 8),
+  role: (v: unknown) => (ROLES as readonly unknown[]).includes(v),
+  role_version: (v: unknown) => typeof v === 'string' && ROLE_VERSION.test(v),
+  model: (v: unknown) => isText(v) && !isFable(v as string),
+};
+
 /** The event, or EventError listing every problem. */
 export function validateEvent(value: unknown): Event {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
@@ -75,11 +87,11 @@ export function validateEvent(value: unknown): Event {
     'ts',
     'RFC 3339 time required',
   );
-  check(isInt(e.item, 0), 'item', 'issue number required (0 for project-level work)');
-  check(isInt(e.station, 0, 8), 'station', 'integer 0–8 required');
-  check((ROLES as readonly unknown[]).includes(e.role), 'role', 'one of the 12 roles required');
+  check(sessionFields.item(e.item), 'item', 'issue number required (0 for project-level work)');
+  check(sessionFields.station(e.station), 'station', 'integer 0–8 required');
+  check(sessionFields.role(e.role), 'role', 'one of the 12 roles required');
   check(
-    typeof e.role_version === 'string' && ROLE_VERSION.test(e.role_version),
+    sessionFields.role_version(e.role_version),
     'role_version',
     'release tag + role file hash required',
   );

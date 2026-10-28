@@ -103,7 +103,8 @@ export function createServer(ctx: McpContext): McpServer {
     if (typeof s === 'string') return result({ error: s }, true);
     try {
       const tool = TOOLS.find((t) => t.name === name);
-      if (tool === undefined) throw new InvalidInput([`unknown tool ${name}`]);
+      // Never the name the session sent: it reaches the session's log and its own error.
+      if (tool === undefined) throw new InvalidInput(['unknown tool']);
       return result(await tool.call(args, s, ctx));
     } catch (err) {
       if (!(err instanceof InvalidInput))
@@ -114,7 +115,8 @@ export function createServer(ctx: McpContext): McpServer {
         input_summary: err.message,
       } as const;
       await appendEvent(s.log, toolEvent(s, fields), ctx.now);
-      throw new McpError(ErrorCode.InvalidParams, `${name}: ${err.message}`);
+      const at = TOOLS.some((t) => t.name === name) ? `${name}: ` : '';
+      throw new McpError(ErrorCode.InvalidParams, `${at}${err.message}`);
     }
   });
   return mcp;
