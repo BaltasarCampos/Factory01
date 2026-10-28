@@ -111,6 +111,7 @@ export function renderSettings(
     hooks: {
       SessionStart: [hook('session-start', true)],
       PreToolUse: [
+        hook('gate', true, '*'),
         hook('path-guard', true, 'Write|Edit'),
         hook('read-guard', true, 'Read|Grep|Glob'),
         hook('command-guard', true, 'Bash'),

@@ -7,7 +7,9 @@
 // until the session-start hook has passed the session (src/hooks/session-start.ts), and every call
 // out of `dontAsk`, so a mode changed during the session is refused too. The hooks run outside
 // the sandbox, so they read nothing from the clone but the paths the guards resolve, and write
-// their events to the session's own log under `~/.factory/`, never into the clone.
+// their events to the session's own log under `~/.factory/`, never into the clone. `factory hook
+// gate`, on every tool (matcher `*`), runs only those two checks, so a tool no guard checks, such
+// as a subagent, an MCP tool or one a later Claude Code adds, is refused before the start too.
 import { readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { checkBash } from '../guard/command-guard.js';
@@ -25,6 +27,7 @@ import {
 } from './session.js';
 
 export type GuardKind = 'path-guard' | 'read-guard' | 'command-guard';
+type Check = (r: SessionRecord, input: HookInput, home: string) => Decision;
 type Decision = { allowed: true } | { allowed: false; rule: string; reason: string };
 
 const TOOLS: Record<GuardKind, string[]> = {
@@ -106,21 +109,21 @@ function decide(kind: GuardKind, r: SessionRecord, input: HookInput, home: strin
   });
 }
 
-export const guardHook =
-  (kind: GuardKind) =>
+const checked =
+  (name: string, check: Check) =>
   async (input: HookInput, ctx: HookContext): Promise<HookResult> => {
     const home = ctx.env?.HOME ?? homedir();
     const session = sessionId(input.session_id);
     const record = readSessionRecord(home, session);
     let decision: Decision;
     try {
-      decision = started(home, session, input) ?? decide(kind, record, input, home);
+      decision = started(home, session, input) ?? check(record, input, home);
     } catch (error) {
       const why = visible(error instanceof Error ? error.message : String(error));
       decision = {
         allowed: false,
         rule: 'internal-error',
-        reason: `refused: ${kind} failed: ${why}`,
+        reason: `refused: ${name} failed: ${why}`,
       };
     }
     if (decision.allowed) return { block: false };
@@ -131,3 +134,9 @@ export const guardHook =
     const unlogged = await logBlocked(record, home, session, fields, ctx.now);
     return { block: true, reason: decision.reason + visible(unlogged) };
   };
+
+export const guardHook = (kind: GuardKind) =>
+  checked(kind, (r, input, home) => decide(kind, r, input, home));
+
+/** Every tool call: only the session-start and `dontAsk` checks. */
+export const gateHook = checked('gate', () => ({ allowed: true }));

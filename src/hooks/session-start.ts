@@ -5,8 +5,11 @@
 // goes on, and every tool call it makes is refused. The check runs again when the hook fires after
 // a compaction or a resume. The git-history checks run in the launcher before launch (slice 28-2b),
 // the model, which the hook input does not carry, is checked from the stream's init message (slice
-// 28-4), and the pause state, which lives on GitHub, at issue time by the dispatcher.
-import { rmSync, writeFileSync } from 'node:fs';
+// 28-4), and the pause state, which lives on GitHub, at issue time by the dispatcher. The passed
+// record is written to a temporary file in the same folder and renamed into place, so a guard
+// never reads one half written.
+import { randomUUID } from 'node:crypto';
+import { realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { visible } from '../notify/summary.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
@@ -19,6 +22,15 @@ import {
 } from './session.js';
 
 const shown = (value: unknown) => (value === undefined ? 'unset' : JSON.stringify(value));
+
+/** A path's real location; undefined when it is no path or cannot be resolved. */
+function real(path: unknown): string | undefined {
+  try {
+    return typeof path === 'string' ? realpathSync(path) : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** The first fact that does not match the record, as its rule and why. */
 function mismatch(r: SessionRecord, input: HookInput, env: NodeJS.ProcessEnv) {
@@ -47,6 +59,11 @@ function mismatch(r: SessionRecord, input: HookInput, env: NodeJS.ProcessEnv) {
       input.permission_mode === 'dontAsk',
       `permission_mode ${shown(input.permission_mode)} is not dontAsk`,
     ],
+    [
+      'cwd',
+      real(input.cwd) === r.clone,
+      `cwd ${shown(input.cwd)} is not the session's clone ${r.clone}`,
+    ],
   ];
   return checks.find(([, ok]) => !ok);
 }
@@ -68,6 +85,12 @@ export async function runSessionStart(input: HookInput, ctx: HookContext): Promi
   }
   const source = typeof input.source === 'string' ? input.source : 'unknown';
   const checked = { session, source, checked_at: ctx.now().toISOString() };
-  writeFileSync(passed, `${JSON.stringify(checked)}\n`);
+  const temporary = `${passed}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(checked)}\n`, { flag: 'wx' });
+    renameSync(temporary, passed);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
   return { block: false };
 }
