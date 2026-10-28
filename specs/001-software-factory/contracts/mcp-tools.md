@@ -10,8 +10,9 @@ writes before launch, as for the guard hooks; never from the clone's `.station.j
 role, from `FACTORY_SESSION` and `FACTORY_ROLE`, which the launcher sets, and refuses to serve
 without them. Every call is refused unless `FACTORY_SESSION` is a session id, its record reads,
 `FACTORY_ROLE` is the record's role and the session-start hook's `passed.json` names the session.
-The tools' events, `blocked` included, go to the session's own log, `events.jsonl` beside the
-record. An `item` other than the session's is invalid input.
+Once the record reads, a refused call also logs a `blocked` event, so a session whose start
+never passed, or that the launcher misnamed, leaves a trace. The tools' events, `blocked`
+included, go to the session's own log, `events.jsonl` beside the record. An `item` other than the session's is invalid input.
 
 ## `advance_item`
 

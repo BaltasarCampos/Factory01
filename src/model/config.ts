@@ -43,8 +43,11 @@ const KEYS = [
 type Key = (typeof KEYS)[number];
 
 const COMMIT = /^[0-9a-f]{40}$/;
-/** `owner/name`, as GitHub allows them. */
-export const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
+/**
+ * `owner/name`, as GitHub allows them: an owner of letters and digits with single inner hyphens, a
+ * name not starting with `-` and never `.` or `..`, so neither is an option to gh nor a path part.
+ */
+export const REPO = /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*\/(?!\.\.?$)[A-Za-z0-9._][A-Za-z0-9._-]*$/;
 const POSITIVE_INT = /^[1-9]\d*$/;
 
 export function parseConfig(text: string, release: ReleaseLimits = RELEASE_LIMITS): ProjectConfig {

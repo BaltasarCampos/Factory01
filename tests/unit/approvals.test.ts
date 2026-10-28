@@ -263,6 +263,8 @@ describe('approval record canonical form (AC-070)', () => {
       ['timestamp with fractions', 'timestamp', 'timestamp: 2026-10-01T09:12:44.123Z'],
       ['impossible date', 'timestamp', 'timestamp: 2026-02-30T09:12:44Z'],
       ['repo without owner', 'repo', 'repo: sample'],
+      ['repo starting with -', 'repo', 'repo: -owner/sample'],
+      ['repo named ..', 'repo', 'repo: owner/..'],
       ['issue 0', 'issue', 'issue: 0'],
       ['tier 4', 'tier', 'tier: 4'],
       ['short spec_sha', 'spec_sha', `spec_sha: ${SPEC_SHA.slice(1)}`],

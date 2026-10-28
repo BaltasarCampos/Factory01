@@ -5,6 +5,7 @@
 // LF endings, `key: value` with one space, absent fields omitted. `parse` accepts only those
 // bytes; anything else is rejected rather than normalised.
 import { randomBytes } from 'node:crypto';
+import { REPO } from '../model/config.js';
 import { isSlug } from '../model/naming.js';
 import { STATIONS, type ApprovalGate, type ApprovalRecord, type Tier } from '../model/types.js';
 
@@ -51,8 +52,6 @@ const GATES: readonly string[] = [
 ] satisfies ApprovalGate[];
 const SCOPES: readonly string[] = ['line', ...STATIONS];
 
-// Same rule as `repo` in .factory/config.
-const REPO = /^[A-Za-z0-9-]+\/[A-Za-z0-9._-]+$/;
 const POSITIVE_INT = /^[1-9]\d*$/;
 const SHA = /^[0-9a-f]{40}$/;
 const NONCE = /^[0-9a-f]{32}$/;
