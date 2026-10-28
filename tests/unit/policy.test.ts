@@ -141,6 +141,7 @@ describe('the role permission table (T074, T081)', () => {
       'ToolSearch',
       'EndConversation',
       'WaitForMcpServers',
+      'Task',
     ]);
     for (const [tool, reason] of Object.entries(policy.keepTools)) {
       expect(reason.length, tool).toBeGreaterThan(10);

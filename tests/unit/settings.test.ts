@@ -94,6 +94,34 @@ describe('the generated settings (T082)', () => {
     expect(later.permissions.deny).toContain('NewTool');
   });
 
+  it("knows every tool T125's A3c listed for 2.1.309, so the deny list covers them (T082)", () => {
+    // The init message of a session with no --agent (~/t125-probe/record.md, A3c): 24 built-in
+    // tools, and 8 of the Owner's claude.ai Docs connector, which disableClaudeAiConnectors drops.
+    const a3c = [
+      ...['Task', 'Bash', 'CronCreate', 'CronDelete', 'CronList', 'DesignSync', 'Edit'],
+      ...['EnterWorktree', 'ExitWorktree', 'ListAgents', 'Monitor', 'NotebookEdit'],
+      ...['PushNotification', 'Read', 'RemoteTrigger', 'ReportFindings', 'ScheduleWakeup'],
+      ...['SendMessage', 'Skill', 'TaskStop', 'ToolSearch', 'WebFetch', 'WebSearch', 'Write'],
+      ...['batch', 'create', 'delete', 'export', 'guide', 'query', 'read', 'update'].map(
+        (name) => `mcp__claude_ai_Claude_Docs__${name}`,
+      ),
+    ];
+    expect(a3c).toHaveLength(32);
+    const builtIn = a3c.filter((tool) => !tool.startsWith('mcp__'));
+    expect(
+      builtIn.filter((tool) => !(CLAUDE_CODE_TOOLS as readonly string[]).includes(tool)),
+    ).toEqual([]);
+    expect(deny).toContain('DesignSync');
+    expect(settings.disableClaudeAiConnectors).toBe(true);
+  });
+
+  it("keeps Task open, 2.1.309's name for the Builder's subagent tool Agent", () => {
+    expect(policy.keepTools).toHaveProperty('Task');
+    expect(policy.roles.builder.tools).toContain('Agent');
+    expect(deny).not.toContain('Task');
+    expect(deny).not.toContain('Agent');
+  });
+
   it('refuses a kept or role tool that the Claude Code version the release targets does not have', () => {
     expect(CLAUDE_CODE_TOOLS).not.toContain('MultiEdit');
     const keep = { ...policy.keepTools, MultiEdit: 'a tool this version does not have' };

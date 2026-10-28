@@ -11,6 +11,7 @@
       "CronCreate",
       "CronDelete",
       "CronList",
+      "DesignSync",
       "EnterPlanMode",
       "EnterWorktree",
       "ExitPlanMode",
