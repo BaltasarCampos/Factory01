@@ -63,6 +63,8 @@ describe('the generated settings (T082)', () => {
           g.hooks.map((h) => `${h.command} ${h.args.join(' ')} ${h.onFailure ?? '-'}`),
         );
     expect(run('SessionStart')).toEqual(['factory hook session-start block']);
+    // The gate refuses every tool call, whatever the tool, until the session-start check passes.
+    expect(run('PreToolUse', '*')).toEqual(['factory hook gate block']);
     expect(run('PreToolUse', 'Write|Edit')).toEqual(['factory hook path-guard block']);
     expect(run('PreToolUse', 'Read|Grep|Glob')).toEqual(['factory hook read-guard block']);
     expect(run('PreToolUse', 'Bash')).toEqual(['factory hook command-guard block']);

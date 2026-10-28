@@ -287,8 +287,9 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
     await t.cli(['dispatch'], { launchers: { local } });
 
     expect(r.code).toBe(0);
+    // The launcher's history check finds it first: the branch's own commits change the hooks.
     expect(r.stdout).toMatch(
-      /no session started: .*claude\/2-add-login: .*settings\.json does not match/,
+      /no session started: .*claude\/2-add-login's own commits change \.claude\/settings\.json/,
     );
     expect(t.sessions.filter((s) => s.args[0] === '-p')).toEqual([]);
     expect(t.inbox()).toHaveLength(1);

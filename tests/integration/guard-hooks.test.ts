@@ -2,12 +2,34 @@
 // guards with the session's facts from its record under `~/.factory/sessions/<id>/`, never from the
 // clone's `.station.json` or the hook input's `agent_type`; every refusal and every crash blocks
 // and appends a `blocked` event with its rule. `factory hook session-start` checks the session
-// against its record and writes the "passed" record, without which every guard refuses every call.
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+// against its record and writes the "passed" record, without which every guard refuses every call,
+// and `factory hook gate` refuses every tool call without it, whatever the tool.
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { runCli } from '../../src/cli/commands.js';
 import { tempDir } from '../helpers/keys.js';
+
+// A rename that fails, for the passed record's write.
+const fail = vi.hoisted(() => ({ rename: false }));
+vi.mock('node:fs', async (original) => {
+  const real = await original<typeof import('node:fs')>();
+  return {
+    ...real,
+    renameSync: (...args: Parameters<typeof real.renameSync>) => {
+      if (fail.rename) throw new Error('EXDEV: rename failed');
+      real.renameSync(...args);
+    },
+  };
+});
 
 // A command that makes the command guard throw, for the crash case.
 vi.mock('../../src/guard/command-guard.js', async (original) => {
@@ -27,7 +49,8 @@ const VERSION = 'v1.0.0+0123456789ab';
 
 /** A home folder holding the session's record, and a clone, with no git. */
 function setUp(record: Record<string, unknown> = {}, { passed = true } = {}) {
-  const home = tempDir();
+  // By its real path, as the launcher writes the clone into the record.
+  const home = realpathSync(tempDir());
   const clone = join(home, 'factory-work', 'project', '42-add-login');
   const write = (path: string, text: string) => {
     mkdirSync(dirname(path), { recursive: true });
@@ -547,5 +570,94 @@ describe('the guards on the session-start record (T086)', () => {
     );
     writeFileSync(passedRecord(at.home), 'not json');
     expect((await hook('command-guard', at, 'Bash', { command: 'npm test' })).code).toBe(2);
+  });
+});
+
+describe('the session-start hook: its clone and its write (T086)', () => {
+  it("blocks a start whose cwd is not the record's clone by its real path, and allows a link to it", async () => {
+    const at = setUp({}, { passed: false });
+    const elsewhere = join(at.home, 'elsewhere');
+    mkdirSync(elsewhere);
+    const moved = await start(at, { cwd: elsewhere });
+    expect(moved.code).toBe(2);
+    expect(moved.stderr).toContain(`cwd "${elsewhere}" is not the session's clone ${at.clone}`);
+    expect(existsSync(passedRecord(at.home))).toBe(false);
+    expect(events(sessionLog(at.home))).toEqual([
+      expect.objectContaining({
+        tool: 'SessionStart',
+        input_summary: expect.stringMatching(/^cwd: /) as string,
+      }),
+    ]);
+    expect((await start(at, { cwd: undefined })).stderr).toMatch(/cwd unset is not the session's/);
+    expect((await start(at, { cwd: join(at.home, 'missing') })).code).toBe(2);
+    expect(existsSync(passedRecord(at.home))).toBe(false);
+    const link = join(at.home, 'link');
+    symlinkSync(at.clone, link);
+    expect(await start(at, { cwd: link })).toEqual({ code: 0, stderr: '' });
+  });
+
+  it('writes the passed record through a temporary file renamed into place, leaving no other file', async () => {
+    const at = setUp({}, { passed: false });
+    expect((await start(at)).code).toBe(0);
+    const folder = join(at.home, '.factory/sessions', SESSION);
+    expect(readdirSync(folder).sort()).toEqual(['passed.json', 'session.json']);
+  });
+
+  it('writes no passed record, and leaves no temporary file, when the rename fails', async () => {
+    const at = setUp({}, { passed: false });
+    fail.rename = true;
+    let result: Awaited<ReturnType<typeof start>>;
+    try {
+      result = await start(at);
+    } finally {
+      fail.rename = false;
+    }
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/EXDEV: rename failed/);
+    expect(readdirSync(join(at.home, '.factory/sessions', SESSION))).toEqual(['session.json']);
+    expect((await hook('command-guard', at, 'Bash', { command: 'npm test' })).code).toBe(2);
+  });
+});
+
+describe('the gate on every tool call (T086)', () => {
+  it.each(['Task', 'Agent', 'mcp__factory__advance_item', 'SomeLaterTool'])(
+    'refuses %s until the session-start check passes, and allows it after',
+    async (tool) => {
+      const at = setUp({}, { passed: false });
+      const before = await hook('gate', at, tool, { prompt: 'x' });
+      expect(before.code).toBe(2);
+      expect(before.stderr).toMatch(/refused: the session-start check has not passed/);
+      expect(events(sessionLog(at.home))).toEqual([
+        expect.objectContaining({
+          kind: 'blocked',
+          tool,
+          input_summary: expect.stringMatching(/^session-start: /) as string,
+        }),
+      ]);
+      expect((await start(at)).code).toBe(0);
+      expect(await hook('gate', at, tool, { prompt: 'x' })).toEqual({ code: 0, stderr: '' });
+      expect(events(sessionLog(at.home))).toHaveLength(1);
+    },
+  );
+
+  it("refuses every call out of dontAsk, and leaves the rest to the tool's own guard", async () => {
+    const at = setUp();
+    const mode = await hook('gate', at, 'Task', { prompt: 'x' }, { permission_mode: 'default' });
+    expect(mode.code).toBe(2);
+    expect(mode.stderr).toMatch(/permission_mode "default" is not dontAsk/);
+    expect(await hook('gate', at, 'Read', { file_path: '/etc/shadow' })).toEqual({
+      code: 0,
+      stderr: '',
+    });
+  });
+
+  it('shows a record that cannot be read through visible(), whatever its path holds', async () => {
+    const at = setUp();
+    const home = join(at.home, 'x\u001b[2J');
+    const result = await hook('gate', { ...at, home }, 'Task', { prompt: 'x' });
+    expect(result.code).toBe(2);
+    expect(result.stderr).toMatch(/could not be read/);
+    expect(result.stderr).not.toContain('\u001b');
+    expect(result.stderr).toContain('x\\u{1b}[2J');
   });
 });
