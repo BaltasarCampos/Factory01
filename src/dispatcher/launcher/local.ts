@@ -18,18 +18,23 @@
 // starts. The session's clone is then made from the factory's own clone at exactly those commits,
 // never by fetching origin again. Any git failure stops the launch with an error, never read as
 // nothing there and never as tampering.
-import { spawn, spawnSync } from 'node:child_process';
+//
+// Branch content is never read or written with the Owner's git config: checking it out applies
+// its `.gitattributes` with every config git reads, so a filter the Owner's config defines, such
+// as git-lfs's, would run against origin with the Owner's credentials. Every such call goes
+// through `isolated()`, without the global and system config, hooks or submodule recursion.
+import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
-import { mergeBase, safeDiff } from '../../git/diff.js';
+import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
 import { pathRule } from '../../merge/rules.js';
-import { configOnMain } from '../../model/config.js';
+import { parseConfig } from '../../model/config.js';
 import { visible } from '../../notify/summary.js';
-import type { GuardrailManifest, ReleasePin } from '../../model/types.js';
+import type { GuardrailManifest, ProjectConfig, ReleasePin } from '../../model/types.js';
 import { ReleaseTagError } from '../../release/tag.js';
 import { git } from '../branch.js';
 import {
@@ -77,14 +82,17 @@ interface Heads {
   onOrigin: boolean;
 }
 
-/** Runs a step of the checks; any failure but a refusal is an error, never tampering. */
+/**
+ * Runs a step of the checks; any failure but a refusal is an error, never tampering. Git's text
+ * can quote a path from the branch, so it is shown through `visible()`.
+ */
 function step<T>(what: string, run: () => T): T {
   try {
     return run();
   } catch (err) {
     if (err instanceof LaunchRefused) throw err;
     const why = err instanceof Error ? err.message : String(err);
-    throw new EnvironmentError(`no local session started: ${what}: ${why}`);
+    throw new EnvironmentError(`no local session started: ${what}: ${visible(why)}`);
   }
 }
 
@@ -165,22 +173,37 @@ export class LocalLauncher implements SessionLauncher {
     this.run = options.run ?? runProcess;
   }
 
-  /** git with hooks off: nothing in a repository may run code while the launcher works. */
+  /**
+   * git with hooks off and the Owner's config, only for what reads no branch content: talking to
+   * origin, whose credential helper is in that config, and naming refs.
+   */
   private git(cwd: string, args: readonly string[]): string {
     const at = { projectDir: cwd, now: () => new Date(), env: this.options.env };
     return git(at, ['-c', 'core.hooksPath=/dev/null', ...args]);
   }
 
+  /** git for branch content: `safeGit`, without the Owner's config, hooks or submodules. */
+  private isolated(cwd: string, args: readonly string[]): Buffer {
+    const result = safeGit(cwd, args, this.options.env);
+    if (result.status !== 0) throw new Error(`git ${args[0] ?? ''} failed: ${result.stderr}`);
+    return result.stdout;
+  }
+
+  /** The project's config in the commit `ref`, read without the Owner's config. */
+  private config(project: string, ref: string): ProjectConfig {
+    return parseConfig(this.isolated(project, ['show', `${ref}:.factory/config`]).toString());
+  }
+
   /** The verified manifest of the release pinned on main, or why there is none. */
   private manifest(project: string): GuardrailManifest | Unavailable {
-    const { mainRef } = this.options;
+    const { mainRef = 'origin/main' } = this.options;
     try {
-      return this.options.release(configOnMain(project, mainRef).factory_release);
+      return this.options.release(this.config(project, mainRef).factory_release);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       // A tag that exists but is not the Owner's is tampering; one not fetched, or key lists
       // that cannot be read, leave the launcher unavailable.
-      const urgent = err instanceof ReleaseTagError && !/does not exist/.test(why);
+      const urgent = err instanceof ReleaseTagError && err.reason !== 'missing';
       return { ok: false, reason: `the pinned release cannot be trusted: ${why}`, urgent };
     }
   }
@@ -197,16 +220,16 @@ export class LocalLauncher implements SessionLauncher {
   ): { found: Record<string, string>; settings?: Buffer } | Unavailable {
     const found: Record<string, string> = {};
     let settings: Buffer | undefined;
-    const tree = this.git(dir, ['ls-tree', '-r', '-z', ref]).split('\0');
+    const tree = this.isolated(dir, ['ls-tree', '-r', '-z', ref]).toString().split('\0');
     for (const entry of tree.filter((e) => e !== '')) {
       const [meta = '', path = ''] = entry.split('\t');
       if (!coversHashed(path)) continue;
       const [mode, , oid = ''] = meta.split(' ');
       if (mode !== '100644' && mode !== '100755')
         return { ok: false, urgent: true, reason: `${where}: ${path} is not a regular file` };
-      const blob = spawnSync('git', ['cat-file', 'blob', oid], { cwd: dir, env: this.options.env });
-      found[path] = sha256(blob.stdout);
-      if (path === SETTINGS) settings = blob.stdout;
+      const blob = this.isolated(dir, ['cat-file', 'blob', oid]);
+      found[path] = sha256(blob);
+      if (path === SETTINGS) settings = blob;
     }
     return settings === undefined ? { found } : { found, settings };
   }
@@ -215,7 +238,7 @@ export class LocalLauncher implements SessionLauncher {
     const manifest = this.manifest(project);
     if ('ok' in manifest) return manifest;
     const { mainRef = 'origin/main' } = this.options;
-    const main = this.treeFiles(project, mainRef, 'main');
+    const main = step('reading main', () => this.treeFiles(project, mainRef, 'main'));
     if ('ok' in main) return main;
     const guardrails = guardrailCheck(main.found, main.settings, manifest, 'main');
     if (!guardrails.ok) return guardrails;
@@ -230,7 +253,11 @@ export class LocalLauncher implements SessionLauncher {
     }
   }
 
-  /** Main and the branch fetched into the factory's own clone, by hash. */
+  /**
+   * Main and the branch fetched into the factory's own clone, by hash. Only this keeps the
+   * Owner's config, for its credential helper: `ls-remote` and a fetch write no working tree, so
+   * no attribute applies.
+   */
   private heads(project: string, branch: string): Heads {
     const listed = (b: string) => this.git(project, ['ls-remote', '--heads', 'origin', b]);
     const onOrigin = branch !== 'main' && listed(`refs/heads/${branch}`) !== '';
@@ -264,14 +291,14 @@ export class LocalLauncher implements SessionLauncher {
         `no local session started: ${branch}'s own commits change ${problems.map(visible).join('; ')}`,
         true,
       );
-    const pin = step(`the release pinned at ${base}`, () => configOnMain(project, base));
+    const pin = step(`the release pinned at ${base}`, () => this.config(project, base));
     try {
       return this.options.release(pin.factory_release);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
-      // A tag that is not the Owner's is tampering. One git cannot read, which verifyReleaseTag
-      // reports as not existing, and any other failure are errors.
-      if (err instanceof ReleaseTagError && !/does not exist/.test(why))
+      // A tag that is not the Owner's is tampering. One git cannot read, and any other failure,
+      // are errors.
+      if (err instanceof ReleaseTagError && err.reason !== 'missing')
         throw new LaunchRefused(`the release pinned at ${base} cannot be trusted: ${why}`, true);
       throw new EnvironmentError(`no local session started: the release pinned at ${base}: ${why}`);
     }
@@ -283,21 +310,23 @@ export class LocalLauncher implements SessionLauncher {
    */
   private clone(project: string, branch: string, heads: Heads): string {
     const { home } = this.options;
-    const repo = configOnMain(project, heads.main).repo;
+    const repo = this.config(project, heads.main).repo;
     const name = branch === 'main' ? 'main' : branch.slice('claude/'.length);
     const dir = join(home, '.factory', 'work', ...repo.split('/'), name);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dirname(dir), { recursive: true });
-    this.git(home, ['init', '-q', '-b', 'main', dir]);
+    this.isolated(home, ['init', '-q', '-b', 'main', dir]);
     const refs = [
       `+${heads.main}:refs/remotes/origin/main`,
       ...(heads.onOrigin ? [`+${heads.head}:refs/remotes/origin/${branch}`] : []),
     ];
-    this.git(dir, ['fetch', '-q', '--no-tags', project, ...refs]);
-    this.git(dir, ['remote', 'add', 'origin', this.git(project, ['remote', 'get-url', 'origin'])]);
-    if (branch === 'main') this.git(dir, ['checkout', '-q', '-f', '--detach', heads.main]);
-    else this.git(dir, ['checkout', '-q', '-f', '-B', branch, heads.head]);
-    this.git(dir, ['clean', '-q', '-ffdx']);
+    const url = this.git(project, ['remote', 'get-url', 'origin']);
+    const clone = (args: readonly string[]) => this.isolated(dir, args);
+    clone(['fetch', '-q', '--no-tags', project, ...refs]);
+    clone(['remote', 'add', 'origin', url]);
+    if (branch === 'main') clone(['checkout', '-q', '-f', '--detach', heads.main]);
+    else clone(['checkout', '-q', '-f', '-B', branch, heads.head]);
+    clone(['clean', '-q', '-ffdx']);
     return dir;
   }
 
@@ -313,9 +342,13 @@ export class LocalLauncher implements SessionLauncher {
         this.heads(request.project, request.branch),
       );
       const manifest = this.history(request.project, request.branch, heads);
-      const cwd = this.clone(request.project, request.branch, heads);
+      const cwd = step("making the session's clone", () =>
+        this.clone(request.project, request.branch, heads),
+      );
       // The tree first: a symlinked `.claude` would pass a walk of the files it points at.
-      const tree = this.treeFiles(cwd, 'HEAD', request.branch);
+      const tree = step("reading the session's clone", () =>
+        this.treeFiles(cwd, 'HEAD', request.branch),
+      );
       const committed =
         'ok' in tree ? tree : guardrailCheck(tree.found, tree.settings, manifest, request.branch);
       if (!committed.ok && committed.urgent === true)

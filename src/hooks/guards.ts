@@ -19,8 +19,8 @@ import { checkRead } from '../guard/read-guard.js';
 import { visible } from '../notify/summary.js';
 import { summarise, type HookContext, type HookInput, type HookResult } from './log.js';
 import {
+  hasPassed,
   logBlocked,
-  passedPath,
   readSessionRecord,
   sessionId,
   type SessionRecord,
@@ -50,14 +50,7 @@ const refuse = (rule: string, why: string): Decision => ({
 
 /** Refuses a session the session-start hook has not passed, or a call out of `dontAsk`. */
 function started(home: string, session: string, input: HookInput): Decision | undefined {
-  let passed: unknown;
-  try {
-    const path = passedPath(home, session);
-    passed = (JSON.parse(readFileSync(path, 'utf8')) as { session?: unknown }).session;
-  } catch {
-    passed = undefined;
-  }
-  if (passed !== session)
+  if (!hasPassed(home, session))
     return refuse(
       'session-start',
       'the session-start check has not passed for this session; no tool call runs',

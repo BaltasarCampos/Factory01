@@ -1,14 +1,12 @@
 // Contract tests for the factory MCP tools (contracts/mcp-tools.md, FR-022, R7): requests and
-// events only, never a label; session facts come from the launcher and the working copy, never
-// from the caller.
-import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+// events only, never a label; session facts come from the session's record, never from the
+// clone or the caller.
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { describe, expect, it } from 'vitest';
 import { runCli } from '../../src/cli/commands.js';
-import { roleVersion } from '../../src/events/schema.js';
 import { createServer } from '../../src/mcp/server.js';
 import { calls, seedState } from '../helpers/fake-gh.js';
 import { tempDir } from '../helpers/keys.js';
@@ -16,29 +14,37 @@ import { tempDir } from '../helpers/keys.js';
 const SHA40 = '3f9a0c1d2e3f4a5b6c7d8e9f0011223344556677';
 const FEATURE = 'specs/42-add-login';
 const NOW = new Date('2026-10-08T10:00:00.000Z');
-const ROLE_FILE = '---\nname: builder\nmodel: sonnet\ntools: Read\nversion: 1\n---\nBuilder.\n';
+const SESSION_ID = '0b6c7f3e-2a4d-4c1e-9f00-1234567890ab';
+const VERSION = 'v1.0.0+0123456789ab';
 
-/** A Builder's working copy on the item branch, as the launcher's clone would hold it. */
-function workingCopy(): string {
-  const dir = tempDir();
-  spawnSync('git', ['init', '-q', '-b', 'claude/42-add-login'], { cwd: dir });
-  const write = (path: string, text: string) => {
-    mkdirSync(dirname(join(dir, path)), { recursive: true });
-    writeFileSync(join(dir, path), text);
-  };
+const write = (path: string, text: string) => {
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, text);
+};
+const folder = (home: string) => join(home, '.factory', 'sessions', SESSION_ID);
+
+/**
+ * A Builder's session as the launcher leaves it: its record and passed start under the home
+ * folder, and a clone whose config and station manifest name another repository, item and role,
+ * which the server never reads.
+ */
+function launched(record: Record<string, unknown> = {}, { passed = true } = {}): string {
+  const home = realpathSync(tempDir());
+  const clone = join(home, 'factory-work', 'project', '42-add-login');
   write(
-    '.factory/config',
-    `factory_release: v1.0.0@${SHA40}\nagents: local\nprofile: typescript\nrepo: owner/project\ninbox_issue: 1\n`,
+    join(clone, '.factory/config'),
+    `factory_release: v1.0.0@${SHA40}\nagents: local\nprofile: typescript\nrepo: other/elsewhere\ninbox_issue: 9\n`,
   );
-  write('.claude/agents/builder.md', ROLE_FILE);
   write(
-    `${FEATURE}/.station.json`,
-    JSON.stringify({
-      ...{ item: 42, station: 4, role: 'builder', branch: 'claude/42-add-login' },
-      ...{ task: 'T007', files: ['src/login.ts'], issued_at: '2026-10-08T09:00:00Z' },
-    }),
+    join(clone, FEATURE, '.station.json'),
+    JSON.stringify({ item: 7, station: 2, role: 'spec' }),
   );
-  return dir;
+  write(join(clone, FEATURE, 'events.jsonl'), '');
+  const fields = { role: 'builder', item: 42, station: 4, feature: FEATURE, files: [], clone };
+  const launch = { model: 'sonnet', role_version: VERSION, repo: 'owner/project', inbox_issue: 1 };
+  write(join(folder(home), 'session.json'), JSON.stringify({ ...fields, ...launch, ...record }));
+  if (passed) write(join(folder(home), 'passed.json'), JSON.stringify({ session: SESSION_ID }));
+  return home;
 }
 
 /** The project on the fake GitHub: inbox #1 with `inboxLabels`, item #42 in `state`. */
@@ -55,10 +61,13 @@ function github(state = 'building', inboxLabels: string[] = []) {
   });
 }
 
-const SESSION = { FACTORY_ROLE: 'builder', FACTORY_SESSION: 'sess-1', FACTORY_STATION: '4' };
+const SESSION = { FACTORY_ROLE: 'builder', FACTORY_SESSION: SESSION_ID, FACTORY_STATION: '4' };
 
-async function connect(dir: string, env: NodeJS.ProcessEnv = { ...process.env, ...SESSION }) {
-  const server = createServer({ cwd: dir, env, now: () => NOW });
+async function connect(home: string, env: NodeJS.ProcessEnv = {}) {
+  const server = createServer({
+    env: { ...process.env, HOME: home, ...SESSION, ...env },
+    now: () => NOW,
+  });
   const [serverSide, clientSide] = InMemoryTransport.createLinkedPair();
   await server.connect(serverSide);
   const client = new Client({ name: 'test', version: '1.0.0' });
@@ -74,8 +83,9 @@ async function connect(dir: string, env: NodeJS.ProcessEnv = { ...process.env, .
   return { client, call };
 }
 
-function events(dir: string): Record<string, unknown>[] {
-  const path = join(dir, FEATURE, 'events.jsonl');
+/** The session's own log, beside its record. */
+function events(home: string): Record<string, unknown>[] {
+  const path = join(folder(home), 'events.jsonl');
   if (!existsSync(path)) return [];
   return readFileSync(path, 'utf8')
     .split('\n')
@@ -87,8 +97,8 @@ const SESSION_FIELDS = {
   item: 42,
   station: 4,
   role: 'builder',
-  role_version: roleVersion('v1.0.0', ROLE_FILE),
-  session: 'sess-1',
+  role_version: VERSION,
+  session: SESSION_ID,
   model: 'sonnet',
 };
 
@@ -102,7 +112,7 @@ const labelWrites = () =>
 
 describe('factory MCP server (contracts/mcp-tools.md)', () => {
   it('serves exactly advance_item, log_event and request_split, each with an input schema', async () => {
-    const { client } = await connect(workingCopy());
+    const { client } = await connect(launched());
     const { tools } = await client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual(['advance_item', 'log_event', 'request_split']);
     for (const tool of tools) expect(tool.inputSchema.type).toBe('object');
@@ -110,19 +120,65 @@ describe('factory MCP server (contracts/mcp-tools.md)', () => {
 
   it('refuses every call when the launcher gave no session context, and writes nothing', async () => {
     github();
-    const dir = workingCopy();
-    const { call } = await connect(dir, { ...process.env, FACTORY_ROLE: undefined });
+    const dir = launched();
+    const { call } = await connect(dir, { FACTORY_ROLE: undefined });
     const r = await call('log_event', { item: 42, kind: 'tool_call', tool: 'Bash' });
     expect(r.isError).toBe(true);
     expect(JSON.stringify(r.value)).toMatch(/FACTORY_ROLE/);
     expect(events(dir)).toEqual([]);
+  });
+
+  it.each<[string, () => string, NodeJS.ProcessEnv, RegExp]>([
+    [
+      'a session whose start has not passed',
+      () => launched({}, { passed: false }),
+      {},
+      /session-start check has not passed/,
+    ],
+    [
+      'a FACTORY_ROLE that is not the record’s role',
+      () => launched(),
+      { FACTORY_ROLE: 'reviewer' },
+      /FACTORY_ROLE \\"reviewer\\" is not the session's role builder/,
+    ],
+    [
+      'a FACTORY_SESSION that is no session id',
+      () => launched(),
+      { FACTORY_SESSION: '../../x' },
+      /is not a session id/,
+    ],
+    ['a record without its repository', () => launched({ repo: 'other' }), {}, /bad repo/],
+    [
+      'a record without its inbox issue',
+      () => launched({ inbox_issue: '1' }),
+      {},
+      /bad inbox_issue/,
+    ],
+  ])('refuses every call of %s, and writes nothing', async (_name, home, env, why) => {
+    github('building');
+    const dir = home();
+    const { call } = await connect(dir, env);
+    const r = await call('advance_item', { item: 42, from_state: 'building', evidence: 'x' });
+    expect(r.isError).toBe(true);
+    expect(JSON.stringify(r.value)).toMatch(why);
+    expect(existsSync(join(folder(dir), 'events.jsonl'))).toBe(false);
+  });
+
+  it("writes the session's events to its own log, never into the clone", async () => {
+    github();
+    const dir = launched();
+    const { call } = await connect(dir);
+    await call('log_event', { item: 42, kind: 'usage', usage: { sessions: 1, est_share: 0.25 } });
+    expect(events(dir)).toHaveLength(1);
+    const clone = join(dir, 'factory-work', 'project', '42-add-login');
+    expect(readFileSync(join(clone, FEATURE, 'events.jsonl'), 'utf8')).toBe('');
   });
 });
 
 describe('advance_item (FR-022, FR-029b)', () => {
   it('writes an advance_request event and returns accepted with its request id, touching no label', async () => {
     github('building');
-    const dir = workingCopy();
+    const dir = launched();
     const { call } = await connect(dir);
 
     const r = await call('advance_item', {
@@ -162,7 +218,7 @@ describe('advance_item (FR-022, FR-029b)', () => {
     ['state mismatch', 'planned', []],
   ])('refuses with "%s" and writes no request', async (reason, state, inboxLabels) => {
     github(state, inboxLabels);
-    const dir = workingCopy();
+    const dir = launched();
     const { call } = await connect(dir);
 
     const r = await call('advance_item', { item: 42, from_state: 'building', evidence: 'x' });
@@ -174,14 +230,14 @@ describe('advance_item (FR-022, FR-029b)', () => {
 
   it('a pause on the station the item is already at does not stop the request to leave it', async () => {
     github('building', ['pause:build']);
-    const { call } = await connect(workingCopy());
+    const { call } = await connect(launched());
     const r = await call('advance_item', { item: 42, from_state: 'building', evidence: 'x' });
     expect(r.value).toMatchObject({ accepted: true });
   });
 
   it('refuses a state the session’s station does not work on, even when the item is in it', async () => {
     github('verifying');
-    const { call } = await connect(workingCopy());
+    const { call } = await connect(launched());
     const r = await call('advance_item', { item: 42, from_state: 'verifying', evidence: 'x' });
     expect(r.value).toEqual({ accepted: false, reason: 'state mismatch' });
   });
@@ -190,7 +246,7 @@ describe('advance_item (FR-022, FR-029b)', () => {
 describe('log_event (AC-048)', () => {
   it('fills ts, role, session and model from the session and ignores the caller’s values', async () => {
     github();
-    const dir = workingCopy();
+    const dir = launched();
     const { call } = await connect(dir);
 
     const r = await call('log_event', {
@@ -222,7 +278,7 @@ describe('log_event (AC-048)', () => {
 
   it('logs usage telemetry', async () => {
     github();
-    const dir = workingCopy();
+    const dir = launched();
     const { call } = await connect(dir);
     await call('log_event', { item: 42, kind: 'usage', usage: { sessions: 1, est_share: 0.25 } });
     expect(events(dir)).toEqual([
@@ -239,7 +295,7 @@ describe('log_event (AC-048)', () => {
 describe('request_split (FR-024, AC-037, AC-057)', () => {
   it('logs a split event naming the task returned to Plan and tells the session to stop', async () => {
     github();
-    const dir = workingCopy();
+    const dir = launched();
     const { call } = await connect(dir);
 
     const r = await call('request_split', {
@@ -286,7 +342,7 @@ describe('invalid input: an MCP error and a blocked event (contracts/mcp-tools.m
     ['request_split', { item: '42', task: 'T007', reason: 'size limit' }, /item/],
   ])('%s %j', async (name, args, problem) => {
     github();
-    const dir = workingCopy();
+    const dir = launched();
     const { client } = await connect(dir);
 
     await expect(client.callTool({ name, arguments: args })).rejects.toThrow(problem);
@@ -303,7 +359,7 @@ describe('invalid input: an MCP error and a blocked event (contracts/mcp-tools.m
 
   it('an unknown tool is an MCP error', async () => {
     github();
-    const { client } = await connect(workingCopy());
+    const { client } = await connect(launched());
     await expect(client.callTool({ name: 'merge_pr', arguments: {} })).rejects.toThrow(/merge_pr/);
   });
 });

@@ -3,10 +3,15 @@
 Served by `factory mcp` over stdio, declared in each project's `.mcp.json` (guardrail file).
 All inputs are validated; invalid input returns an MCP error and logs a `blocked` event.
 
-The session context (role, session id, item, station, model, role version and event log) is
-the one its hooks resolve. A hook reads the role and session id from its input; the MCP server
-reads them from `FACTORY_ROLE` and `FACTORY_SESSION`, which the launcher sets, and refuses to
-serve without them. An `item` other than the session's is invalid input.
+The session context (item, station, role, model, role version, repository and inbox issue)
+comes from the session's record under `~/.factory/sessions/<session_id>/`, which the launcher
+writes before launch, as for the guard hooks; never from the clone's `.station.json` or
+`.factory/config`. A hook reads the session id from its input; the MCP server reads it, and the
+role, from `FACTORY_SESSION` and `FACTORY_ROLE`, which the launcher sets, and refuses to serve
+without them. Every call is refused unless `FACTORY_SESSION` is a session id, its record reads,
+`FACTORY_ROLE` is the record's role and the session-start hook's `passed.json` names the session.
+The tools' events, `blocked` included, go to the session's own log, `events.jsonl` beside the
+record. An `item` other than the session's is invalid input.
 
 ## `advance_item`
 

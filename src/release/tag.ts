@@ -9,7 +9,18 @@ import type { GuardrailManifest, ReleasePin } from '../model/types.js';
 
 export const RELEASE_TAG = /^v\d+\.\d+\.\d+$/;
 
-export class ReleaseTagError extends RefusedError {}
+/**
+ * A release tag refused. `missing` only where git cannot read the tag at all, which the launcher
+ * treats as an error to wait on; every other reason is a tag that cannot be trusted.
+ */
+export class ReleaseTagError extends RefusedError {
+  readonly reason: 'missing' | 'untrusted';
+
+  constructor(message: string, reason: 'missing' | 'untrusted' = 'untrusted') {
+    super(message);
+    this.reason = reason;
+  }
+}
 
 function git(repo: string, args: readonly string[]): { ok: boolean; out: string; err: string } {
   // Hooks off: verifying a tag must not run anything from the repository.
@@ -30,7 +41,7 @@ export function verifyReleaseTag(repo: string, tag: string, sha: string, keys: R
   if (!RELEASE_TAG.test(tag)) throw new ReleaseTagError(`invalid release tag ${tag}`);
   const ref = `refs/tags/${tag}`;
   const type = git(repo, ['cat-file', '-t', ref]);
-  if (!type.ok) throw new ReleaseTagError(`release tag ${tag} does not exist`);
+  if (!type.ok) throw new ReleaseTagError(`release tag ${tag} does not exist`, 'missing');
   if (type.out !== 'tag') throw new ReleaseTagError(`${tag} is a lightweight tag, not signed`);
 
   const object = git(repo, ['cat-file', 'tag', ref]).out;

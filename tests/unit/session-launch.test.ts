@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentError } from '../../src/cli/env.js';
@@ -52,6 +53,7 @@ function setup(
     branchFiles?: Record<string, string>;
     mainFiles?: Record<string, string | null>;
     release?: (pin: ReleasePin) => GuardrailManifest;
+    env?: NodeJS.ProcessEnv;
   } = {},
 ) {
   const repo = makeRepo({ files: { '.factory/config': CONFIG, ...GUARDED } });
@@ -70,7 +72,7 @@ function setup(
   const home = tempDir('factory-home-');
   const runner = fakeRunner();
   const launcher = new LocalLauncher({
-    ...{ home, env: gitEnv },
+    ...{ home, env: options.env ?? gitEnv },
     release: options.release ?? (() => manifestOf(GUARDED)),
     run: options.run ?? runner.run,
   });
@@ -382,7 +384,7 @@ describe("LocalLauncher: the branch's history, checked in the factory's own clon
     expect(failed).toBeInstanceOf(EnvironmentError);
     expect((failed as Error).message).toMatch(/git cat-file failed/);
     const missing = () => {
-      throw new ReleaseTagError('release tag v1.0.0 does not exist');
+      throw new ReleaseTagError('release tag v1.0.0 does not exist', 'missing');
     };
     expect(await error(setup({ release: missing }).launch(REQUEST))).toBeInstanceOf(
       EnvironmentError,
@@ -393,6 +395,70 @@ describe("LocalLauncher: the branch's history, checked in the factory's own clon
     await expect(setup({ release: forged }).launch(REQUEST)).rejects.toMatchObject({
       urgent: true,
     });
+  });
+
+  it('refuses a forged tag as tampering whatever its message says, "does not exist" included', async () => {
+    const forged = () => {
+      throw new ReleaseTagError('v1.0.0 is not signed by a listed key: v9 does not exist');
+    };
+    await expect(setup({ release: forged }).launch(REQUEST)).rejects.toMatchObject({
+      urgent: true,
+    });
+    expect(await setup({ release: forged }).available()).toMatchObject({ urgent: true });
+  });
+
+  it("shows git's error text through visible(), whatever path it quotes", async () => {
+    const t = setup();
+    // Git shows a control character as `?` itself, but not a right-to-left override.
+    t.repo.git(['remote', 'set-url', 'origin', join(t.home, 'no\u202ewhere.git')]);
+    const failed = await error(t.launch(REQUEST));
+    expect(failed).toBeInstanceOf(EnvironmentError);
+    expect((failed as Error).message).toMatch(/no\\u\{202e\}where\.git/);
+    expect((failed as Error).message).not.toContain('\u202e');
+  });
+
+  it("stops the launch with an error when the session's clone cannot be made", async () => {
+    const t = setup();
+    mkdirSync(join(t.home, '.factory', 'work'), { recursive: true });
+    writeFileSync(join(t.home, '.factory', 'work', 'owner'), 'not a folder\n');
+    const failed = await error(t.launch(REQUEST));
+    expect(failed).toBeInstanceOf(EnvironmentError);
+    expect((failed as Error).message).toMatch(/making the session's clone/);
+    expect(t.sessions()).toEqual([]);
+  });
+
+  it("runs none of the Owner's git drivers on branch content: no filter, no textconv", async () => {
+    const dir = tempDir('factory-hostile-');
+    const ran = (what: string) => join(dir, `${what}-ran`);
+    const driver = (what: string, body: string) => {
+      const path = join(dir, `${what}.sh`);
+      writeFileSync(path, `#!/bin/sh\ntouch '${ran(what)}'\n${body}\n`, { mode: 0o755 });
+      return path;
+    };
+    const config = join(dir, 'gitconfig');
+    writeFileSync(
+      config,
+      [
+        ...['[filter "evil"]', `\tsmudge = ${driver('smudge', 'cat')}`],
+        ...[`\tclean = ${driver('clean', 'cat')}`, '[diff "evil"]'],
+        `\ttextconv = ${driver('textconv', 'cat "$1"')}`,
+      ].join('\n'),
+    );
+    const env = { ...gitEnv, GIT_CONFIG_GLOBAL: config };
+    const t = setup({ mainFiles: { '.gitattributes': '* filter=evil diff=evil\n' }, env });
+    // The drivers do run where git applies the attributes with this config.
+    const owners = (args: string[]) => execFileSync('git', args, { cwd: t.repo.path, env });
+    owners(['log', '-p', '-1', `origin/${BRANCH}`]);
+    owners(['clone', '-q', t.repo.origin, join(dir, 'plain-clone')]);
+    expect([existsSync(ran('textconv')), existsSync(ran('smudge'))]).toEqual([true, true]);
+    rmSync(ran('textconv'));
+    rmSync(ran('smudge'));
+
+    expect(await t.available()).toEqual({ ok: true });
+    await t.launch(REQUEST);
+
+    expect(t.sessions()).toHaveLength(1);
+    for (const what of ['smudge', 'clean', 'textconv']) expect(existsSync(ran(what))).toBe(false);
   });
 });
 
@@ -434,7 +500,7 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     expect(waiting).toMatchObject({ ok: false, reason: /installs no factory hooks/ });
     expect(waiting).not.toHaveProperty('urgent');
     const missing = () => {
-      throw new ReleaseTagError('release tag v1.0.0 does not exist');
+      throw new ReleaseTagError('release tag v1.0.0 does not exist', 'missing');
     };
     expect(await setup({ release: missing }).available()).toMatchObject({
       ok: false,

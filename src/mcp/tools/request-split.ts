@@ -3,8 +3,7 @@
 // routes by (src/stations/edges.ts `splitFailure`); Plan files the work as new items, and the
 // session stops.
 import { appendEvent } from '../../events/append.js';
-import { eventInput } from '../../hooks/log.js';
-import { check, isText, toolName, type FactoryTool } from './input.js';
+import { check, isText, toolEvent, toolName, type FactoryTool } from './input.js';
 
 const REASONS = ['context limit', 'size limit'] as const;
 const TASK = /^T\d{3,4}$/;
@@ -42,7 +41,7 @@ export const requestSplit: FactoryTool = {
       tool: toolName('request_split'),
       input_summary: JSON.stringify({ task, reason, notes }),
     } as const;
-    await appendEvent(s.log, eventInput(s.session, fields), ctx.now);
+    await appendEvent(s.log, toolEvent(s, fields), ctx.now);
     const id = task as string;
     return {
       split: true,

@@ -5,8 +5,7 @@
 // and advance requests have their own tools.
 import { appendEvent, type EventInput } from '../../events/append.js';
 import { EventError } from '../../events/schema.js';
-import { eventInput } from '../../hooks/log.js';
-import { check, InvalidInput, isText, type FactoryTool } from './input.js';
+import { check, InvalidInput, isText, toolEvent, type FactoryTool } from './input.js';
 
 const KINDS = ['tool_call', 'gate_result', 'usage'] as const;
 const FIELDS = ['tool', 'input_summary', 'gate', 'pass', 'evidence', 'usage'] as const;
@@ -50,7 +49,7 @@ export const logEvent: FactoryTool = {
       FIELDS.flatMap((key) => (key in args ? [[key, args[key]]] : [])),
     );
     try {
-      await appendEvent(s.log, eventInput(s.session, { ...fields, kind } as EventInput), ctx.now);
+      await appendEvent(s.log, toolEvent(s, { ...fields, kind } as EventInput), ctx.now);
     } catch (err) {
       if (err instanceof EventError) throw new InvalidInput(err.problems);
       throw err;
