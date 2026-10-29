@@ -264,12 +264,12 @@ function checkOptions(words: string[]) {
 
 /**
  * A path no session may read, in a word, after its `=`, `:` or `@` or after a short option's
- * letter, `~` there as home: `deny_read`, and `/proc`, `/sys` and `/dev`, which show the session's
+ * letter or cluster, `~` there as home: `deny_read`, and `/proc`, `/sys` and `/dev`, which show the session's
  * environment, for every program.
  */
 function checkReads(policy: Policy, { cwd, home }: Places, words: string[]) {
   for (const word of words.slice(1)) {
-    const attached = /^-[A-Za-z](.+)$/.exec(word)?.[1];
+    const attached = /^-[A-Za-z]+?([/~.].*)$/.exec(word)?.[1] ?? /^-[A-Za-z](.+)$/.exec(word)?.[1];
     for (const part of [word, ...word.split(/[=:@]/).slice(1), attached ?? '']) {
       if (part === '') continue;
       const path = absolute(part, cwd, home);
@@ -292,7 +292,8 @@ function checkGhFiles({ cwd, clone, home }: Places, words: string[]) {
   const api = words[1] === 'api';
   words.forEach((word, i) => {
     const long = /^(--[a-z-]+)(?:=(.*))?$/s.exec(word);
-    const short = /^-F(.*)$/s.exec(word);
+    // A short-option cluster, such as `-wF<file>`, with the file attached or as the next word.
+    const short = /^-[A-Za-z]*F(.*)$/s.exec(word);
     const reads = api ? ['--input', '--field'] : ['--body-file'];
     let value = short === null ? undefined : short[1] || words[i + 1];
     if (long !== null && reads.includes(long[1] ?? '')) value = long[2] ?? words[i + 1];
