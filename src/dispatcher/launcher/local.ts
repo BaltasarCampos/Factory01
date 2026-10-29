@@ -47,6 +47,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -56,6 +57,7 @@ import {
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
 import { SERVED_HOOKS } from '../../commands/hook.js';
+import { WRAPPERS } from '../../guard/command-guard.js';
 import { isFable, roleVersion } from '../../events/schema.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
@@ -173,6 +175,22 @@ function sessionPath(path: string | undefined, outside: readonly string[]): stri
     return outside.some((folder) => under(real, folder)) ? [] : [real];
   });
   return [...new Set(folders)].join(':');
+}
+
+/** `CLAUDE.md` and `CLAUDE.local.md` in any letter case, as a disk that ignores case reads them. */
+const MEMORY = /^claude(\.local)?\.md$/i;
+
+/** The memory files in every folder above `clone`, up to `/` (T061). */
+function memoryAbove(clone: string): string[] {
+  const found: string[] = [];
+  for (let dir = dirname(clone); ; dir = dirname(dir)) {
+    found.push(
+      ...readdirSync(dir)
+        .filter((name) => MEMORY.test(name))
+        .map((n) => join(dir, n)),
+    );
+    if (dir === '/') return found;
+  }
 }
 
 /** Whether `path` is a file the Owner can run. */
@@ -515,6 +533,13 @@ export class LocalLauncher implements SessionLauncher {
       const cwd = step("making the session's clone", () =>
         this.clone(request.project, repo, request.branch, heads, files.id),
       );
+      // Claude Code loads these from every folder above where it runs, whatever the settings say.
+      const memory = step('reading the folders above the clone', () => memoryAbove(cwd));
+      if (memory.length > 0)
+        throw new LaunchRefused(
+          `no local session started: Claude Code would load ${memory.map(visible).join(', ')}, above the session's clone; move it away`,
+          true,
+        );
       // The tree first: a symlinked `.claude` would pass a walk of the files it points at.
       const tree = step("reading the session's clone", () =>
         this.treeFiles(cwd, 'HEAD', request.branch),
@@ -564,6 +589,7 @@ export class LocalLauncher implements SessionLauncher {
             throw new LaunchRefused(
               `no local session started: ${program}, which Claude Code's sandbox needs, is not on the session's PATH (${env.PATH}); install it`,
             );
+        await this.shellNames(cwd, env);
         await this.claudeVersion(cwd, env);
         step("writing the session's settings and record", () => {
           const tests = this.testFiles(cwd);
@@ -606,6 +632,37 @@ export class LocalLauncher implements SessionLauncher {
       }
     } finally {
       this.running = false;
+    }
+  }
+
+  /**
+   * The functions and aliases of a login and an interactive shell, with the session's own
+   * environment, since T125's A8 matched neither to the session's: none may have the name of a
+   * command any role's shell column starts with, or of a wrapper the command guard sees through.
+   */
+  private async shellNames(cwd: string, env: NodeJS.ProcessEnv) {
+    const commands = Object.values(factoryPolicy().roles).flatMap((row) => row.shell);
+    const names = new Set([...commands.map((prefix) => prefix.split(' ')[0] ?? ''), ...WRAPPERS]);
+    for (const mode of ['-lc', '-ic']) {
+      let result: Awaited<ReturnType<Runner>>;
+      try {
+        result = await this.run('bash', [mode, 'compgen -A function -A alias || true'], {
+          cwd,
+          env,
+        });
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err);
+        throw new EnvironmentError(`no local session started: bash ${mode}: ${visible(why)}`);
+      }
+      if (result.status !== 0)
+        throw new EnvironmentError(
+          `no local session started: bash ${mode} exited ${String(result.status)}: ${visible(result.stderr.trim())}`,
+        );
+      const clash = result.stdout.split('\n').filter((name) => names.has(name.trim()));
+      if (clash.length > 0)
+        throw new LaunchRefused(
+          `no local session started: bash ${mode} defines ${clash.map(visible).join(', ')} as a function or alias, the name of a command a session runs; remove it from your shell's startup files`,
+        );
     }
   }
 
@@ -656,6 +713,8 @@ export class LocalLauncher implements SessionLauncher {
     const outside = [join(home, 'factory-work'), dirname(tmp), ...SHARED_TMP];
     return {
       ...{ PATH: sessionPath(env.PATH, outside), HOME: home },
+      // Every Bash command starts in the clone, a second layer beside the guard's refusal of cd.
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: '1',
       ...(env.LANG === undefined ? {} : { LANG: env.LANG }),
       ...(env.TERM === undefined ? {} : { TERM: env.TERM }),
       // Define works for the project, not an item: it gets a station and no item.
