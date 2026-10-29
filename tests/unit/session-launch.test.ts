@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentError } from '../../src/cli/env.js';
 import { runLoop } from '../../src/commands/run.js';
 import type { PassResult } from '../../src/dispatcher/dispatch.js';
+import { SERVED_HOOKS } from '../../src/commands/hook.js';
 import { CloudLauncher, cloudInvocation } from '../../src/dispatcher/launcher/cloud.js';
 import {
   guardrailCheck,
@@ -501,17 +502,20 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(t.sessions()).toEqual([]);
   });
 
-  it('checks Claude Code is 2.1.295 or later, as the session would run it, before launch', async () => {
+  it('checks Claude Code is 2.1.309 or later, as the session would run it, before launch', async () => {
     const t = setup();
     await t.launch(REQUEST);
     // The same claude the session runs: found on the session's own PATH, with its environment.
     expect(t.versions()[0]?.env).toEqual(t.sessions()[0]?.env);
-    for (const version of ['2.1.294', '2.0.999', 'not a version']) {
+    // Every behaviour the guards rely on was probed on 2.1.309 (T082).
+    for (const version of ['2.1.308', '2.1.295', '2.0.999', 'not a version']) {
       const old = setup({ run: fakeRunner(0, echo, version).run });
       const refused = old.launch(REQUEST);
       await expect(refused).rejects.toThrow(LaunchRefused);
-      await expect(refused).rejects.toThrow(/Claude Code 2\.1\.295 or later/);
+      await expect(refused).rejects.toThrow(/Claude Code 2\.1\.309 or later/);
     }
+    const newer = setup({ run: fakeRunner(0, echo, '2.1.310').run });
+    await expect(newer.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
     // A claude that cannot start is an error, never a refusal or a pass.
     const missing: Runner = () => Promise.reject(new Error('spawn claude ENOENT'));
     await expect(setup({ run: missing }).launch(REQUEST)).rejects.toThrow(EnvironmentError);
@@ -806,7 +810,7 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     expect(await t.available()).toMatchObject({ ok: false, urgent: true });
   });
 
-  type Hooks = Record<string, { hooks: Record<string, unknown>[] }[]>;
+  type Hooks = Record<string, { matcher?: string; hooks: Record<string, unknown>[] }[]>;
   const shell = (command: string) => [{ hooks: [{ type: 'command', command }] }];
   const served = (name: string) => [
     { hooks: [{ type: 'command', command: 'factory', args: ['hook', name] }] },
@@ -832,6 +836,44 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       reason: /^release v1\.0\.0 (registers|installs)/,
     });
     expect(check).not.toHaveProperty('urgent');
+  });
+
+  it.each([
+    ['stop', 'PreToolUse'],
+    ['pre-compact', 'PreToolUse'],
+    ['session-start', 'PreToolUse'],
+  ])(
+    'refuses a clone whose settings register factory hook %s under %s, running nothing',
+    async (name, event) => {
+      const hooked = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+      const guard = {
+        type: 'command',
+        command: 'factory',
+        args: ['hook', name],
+        onFailure: 'block',
+      };
+      hooked.hooks[event]?.push({ matcher: '*', hooks: [guard] });
+      const files = { ...GUARDED, '.claude/settings.json': `${JSON.stringify(hooked)}\n` };
+      const t = setup({ mainFiles: files, release: () => manifestOf(files) });
+
+      const refused = t.launch(REQUEST);
+
+      await expect(refused).rejects.toThrow(LaunchRefused);
+      await expect(refused).rejects.toThrow(
+        new RegExp(
+          `registers factory hook ${name} under ${event}; the installed factory serves it under [A-Za-z]+`,
+        ),
+      );
+      expect(t.sessions()).toEqual([]);
+    },
+  );
+
+  it('ties every hook the factory serves to the events of its own settings', () => {
+    const hooked = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+    const named = Object.values(hooked.hooks).flatMap((groups) =>
+      groups.flatMap((group) => group.hooks.map((hook) => (hook.args as string[])[1])),
+    );
+    expect(new Set(named)).toEqual(new Set(SERVED_HOOKS));
   });
 
   it('refuses a clone whose settings name a hook the factory does not serve, running nothing', async () => {

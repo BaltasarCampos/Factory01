@@ -64,7 +64,7 @@ import { DEFINE_BRANCH } from '../../install/project.js';
 import { MCP_JSON } from '../../install/render.js';
 import { runsGh, SHARED_TMP, under } from '../../install/sandbox.js';
 import { renderSessionSettings } from '../../install/session-settings.js';
-import type { Settings } from '../../install/settings.js';
+import { CLAUDE_CODE_VERSION, type Settings } from '../../install/settings.js';
 import { pathRule } from '../../merge/rules.js';
 import { parseConfig } from '../../model/config.js';
 import { branchFeatureDir } from '../../model/naming.js';
@@ -225,6 +225,19 @@ const NO_HOOKS = 'installs no factory hooks; local sessions wait for the guards 
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
 
 /**
+ * The events each hook may be registered under, from the installed factory's own settings, which
+ * every session's `--settings` file carries: `stop` under `PreToolUse` would block every call.
+ */
+function hookEvents(): Map<string, Set<string>> {
+  const { hooks } = JSON.parse(factoryFile('settings/settings.json')) as Settings;
+  const events = new Map<string, Set<string>>();
+  for (const [event, groups] of Object.entries(hooks))
+    for (const { args } of groups.flatMap((group) => group.hooks))
+      events.set(args[1] ?? '', new Set([...(events.get(args[1] ?? '') ?? []), event]));
+  return events;
+}
+
+/**
  * Why settings do not install the factory's hooks: every event registered, every hook `factory
  * hook <name>` in exec form, with no shell, naming a hook the installed factory serves, since
  * any other blocks every call, and every guard with `onFailure: "block"`, which needs Claude
@@ -240,6 +253,7 @@ function hookProblem(settings: Buffer | undefined): string | undefined {
   if (typeof hooks !== 'object' || hooks === null) return NO_HOOKS;
   const byEvent = hooks as Record<string, unknown>;
   if (!HOOK_EVENTS.every((event) => list(byEvent[event] ?? []).length > 0)) return NO_HOOKS;
+  const events = hookEvents();
   for (const [event, groups] of Object.entries(byEvent))
     for (const group of list(groups))
       for (const one of list((group as { hooks?: unknown } | null)?.hooks)) {
@@ -251,6 +265,9 @@ function hookProblem(settings: Buffer | undefined): string | undefined {
           return `registers a ${event} hook that is not factory hook <name> in exec form`;
         if (!SERVED_HOOKS.includes(args[1]))
           return `registers the ${event} hook factory hook ${visible(args[1])}, which the installed factory does not serve`;
+        const served = events.get(args[1]) ?? new Set<string>();
+        if (!served.has(event))
+          return `registers factory hook ${args[1]} under ${visible(event)}; the installed factory serves it under ${[...served].join(', ') || 'no event'}`;
         if (GUARD_EVENTS.has(event) && (one as { onFailure?: unknown }).onFailure !== 'block')
           return `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"`;
       }
@@ -592,7 +609,10 @@ export class LocalLauncher implements SessionLauncher {
     }
   }
 
-  /** Claude Code as the session runs it: 2.1.295 or later, for `onFailure: "block"` (T082). */
+  /**
+   * Claude Code as the session runs it: the version the release was probed on, 2.1.309, or later;
+   * 2.1.295 is only the floor for `onFailure: "block"`, and the guards rely on more (T082).
+   */
   private async claudeVersion(cwd: string, env: NodeJS.ProcessEnv) {
     let result: Awaited<ReturnType<Runner>>;
     try {
@@ -604,10 +624,13 @@ export class LocalLauncher implements SessionLauncher {
     const [major = 0, minor = 0, patch = 0] = (/^(\d+)\.(\d+)\.(\d+)/.exec(result.stdout) ?? [])
       .slice(1)
       .map(Number);
-    const old = major * 1e8 + minor * 1e4 + patch < 2 * 1e8 + 1 * 1e4 + 295;
+    const [floorMajor = 0, floorMinor = 0, floorPatch = 0] =
+      CLAUDE_CODE_VERSION.split('.').map(Number);
+    const old =
+      major * 1e8 + minor * 1e4 + patch < floorMajor * 1e8 + floorMinor * 1e4 + floorPatch;
     if (result.status !== 0 || old)
       throw new LaunchRefused(
-        `no local session started: the session's claude reports ${JSON.stringify(visible(result.stdout.trim()))}; local sessions need Claude Code 2.1.295 or later`,
+        `no local session started: the session's claude reports ${JSON.stringify(visible(result.stdout.trim()))}; local sessions need Claude Code ${CLAUDE_CODE_VERSION} or later`,
       );
   }
 
