@@ -16,6 +16,7 @@ import { runLoop } from '../../src/commands/run.js';
 import type { PassResult } from '../../src/dispatcher/dispatch.js';
 import { CloudLauncher, cloudInvocation } from '../../src/dispatcher/launcher/cloud.js';
 import {
+  guardrailCheck,
   LocalLauncher,
   localInvocation,
   type Runner,
@@ -29,7 +30,7 @@ import type { SessionSettings } from '../../src/install/session-settings.js';
 import type { GuardrailManifest, ReleasePin } from '../../src/model/types.js';
 import { ReleaseTagError } from '../../src/release/tag.js';
 import { gitEnv, makeRepo, runGit } from '../helpers/git-repo.js';
-import { HOOKED_SETTINGS, manifestOf } from '../helpers/guardrails.js';
+import { HOOKED_SETTINGS, manifestOf, SANDBOX_BIN } from '../helpers/guardrails.js';
 import { homeDir, tempDir } from '../helpers/keys.js';
 
 const BRANCH = 'claude/42-add-login';
@@ -47,11 +48,22 @@ const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: owner/project\n
 const launchedId = (args: readonly string[]) => args[args.indexOf('--session-id') + 1];
 const echo = (args: readonly string[]) => JSON.stringify({ session_id: launchedId(args) });
 
-function fakeRunner(status = 0, stdout: string | typeof echo = echo) {
+/** Programs Claude Code's sandbox needs, as stand-ins on the session's PATH. */
+const withStubs = (env: NodeJS.ProcessEnv) => ({
+  ...env,
+  PATH: `${SANDBOX_BIN}:${env.PATH ?? ''}`,
+});
+
+/** What `claude --version` prints for a version the launcher accepts. */
+const VERSION = { status: 0, stdout: '2.1.309 (Claude Code)\n', stderr: '' };
+
+function fakeRunner(status = 0, stdout: string | typeof echo = echo, version = '2.1.309') {
   const calls: { program: string; args: readonly string[]; cwd: string; env: NodeJS.ProcessEnv }[] =
     [];
   const run: Runner = (program, args, options) => {
     calls.push({ program, args, ...options });
+    if (args[0] === '--version')
+      return Promise.resolve({ status: 0, stdout: `${version} (Claude Code)\n`, stderr: '' });
     const out = typeof stdout === 'string' ? stdout : stdout(args);
     return Promise.resolve({ status, stdout: out, stderr: status === 0 ? '' : 'boom' });
   };
@@ -75,7 +87,7 @@ const GUARDED = {
   '.claude/agents/spec.md': roleFile('spec'),
   '.claude/agents/intake.md': roleFile('intake'),
 };
-/** The project's comment-only token, which only roles with `gh` in their shell get. */
+/** The project's gh token, which only roles with `gh` in their shell get. */
 const TOKEN = `github_pat_${'1'.repeat(22)}_${'a'.repeat(59)}`;
 const tokenFile = (home: string) => join(home, '.factory', 'tokens', 'owner', 'project');
 /** The session's record, as the launcher wrote it. */
@@ -92,8 +104,10 @@ function setup(
     mainFiles?: Record<string, string | null>;
     release?: (pin: ReleasePin) => GuardrailManifest;
     env?: NodeJS.ProcessEnv;
-    /** The project's comment-only token in `~/.factory/tokens/`; null for none. */
+    /** The project's gh token in `~/.factory/tokens/`; null for none. */
     token?: string | null;
+    /** The programs the sandbox needs on the session's PATH; default bwrap and socat. */
+    sandbox?: string[];
   } = {},
 ) {
   const repo = makeRepo({ files: { '.factory/config': CONFIG, ...GUARDED } });
@@ -116,7 +130,8 @@ function setup(
   }
   const runner = fakeRunner();
   const launcher = new LocalLauncher({
-    ...{ home, env: options.env ?? gitEnv },
+    ...{ home, env: withStubs(options.env ?? gitEnv) },
+    ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
     release: options.release ?? (() => manifestOf(GUARDED)),
     run: options.run ?? runner.run,
     sessionId: sessionIds(),
@@ -127,10 +142,11 @@ function setup(
     repo.git(['for-each-ref', 'refs/heads']),
   ];
   const sessions = () => runner.calls.filter((c) => c.args[0] === '-p');
+  const versions = () => runner.calls.filter((c) => c.args[0] === '--version');
   const launch = (request: Omit<LaunchRequest, 'project'>) =>
     launcher.launch({ project: repo.path, ...request });
   const available = () => launcher.available(repo.path);
-  return { repo, home, launch, available, sessions, owner };
+  return { repo, home, launch, available, sessions, versions, owner };
 }
 const FACTORY_SETTINGS = new URL('../../factory/settings/settings.json', import.meta.url);
 /** The session's clone: a folder of its own for each launch, named with its session id. */
@@ -155,7 +171,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     const clone = work(t.home, '42-add-login');
     expect(launch?.cwd).toBe(clone);
     const request = { ...REQUEST, project: t.repo.path };
-    expect(launch?.args).toEqual(localInvocation(request, sessionFiles(t.home)));
+    expect(launch?.args).toEqual(localInvocation(request, sessionFiles(t.home), 'sonnet'));
     expect(launch?.env).toMatchObject({ FACTORY_ITEM: '42', FACTORY_STATION: '2' });
     // The release's commands take the feature folder from the prompt (T171, T172).
     expect(launch?.env).not.toHaveProperty('SPECIFY_FEATURE');
@@ -174,6 +190,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     let home = '';
     let tmp = '';
     const run: Runner = (_program, args) => {
+      if (args[0] === '--version') return Promise.resolve(VERSION);
       if (args[0] === '-p') {
         const files = sessionFiles(home);
         const settings = JSON.parse(readFileSync(files.settings, 'utf8')) as SessionSettings;
@@ -406,7 +423,8 @@ describe('LocalLauncher (research R8, R9)', () => {
         .sort(),
     );
     // Absolute folders only, none in a temporary folder: the hooks run `factory` by name.
-    expect(env).toMatchObject({ PATH: tools, HOME: realpathSync(t.home), LANG: 'C.UTF-8' });
+    expect(env).toMatchObject({ PATH: `${SANDBOX_BIN}:${tools}`, HOME: realpathSync(t.home) });
+    expect(env.LANG).toBe('C.UTF-8');
     expect(tmp).toMatch(/^\/tmp\/factory-42-/);
     expect(env).toMatchObject({ CLAUDE_CODE_TMPDIR: tmp, npm_config_cache: join(tmp, 'npm') });
     // git's identity in the clone's own config, so the Owner's global config never reaches it.
@@ -415,7 +433,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(runGit(clone, ['config', '--local', 'user.email'])).toBe('spec@factory.invalid');
   });
 
-  it("gives a role with gh in its shell the project's comment-only token, never the Owner's", async () => {
+  it("gives a role with gh in its shell the project's gh token, never the Owner's", async () => {
     const owners = { GH_TOKEN: 'gho_owner', GITHUB_TOKEN: 'ghs_owner' };
     const t = setup({ env: { ...gitEnv, ...owners } });
 
@@ -445,8 +463,66 @@ describe('LocalLauncher (research R8, R9)', () => {
 
     await expect(refused).rejects.toThrow(LaunchRefused);
     await expect(refused).rejects.toThrow(tokenFile(t.home));
+    // GitHub has no comment-only permission: the setup names the token's real ones.
+    await expect(refused).rejects.toThrow(
+      /owner\/project only, with Issues read and write, Pull requests read and write, Contents read-only and Metadata read-only, expiring soon after the run/,
+    );
+    await expect(refused).rejects.toThrow(
+      /can also change labels and close issues, which is why gates rest on signed records/,
+    );
     expect(t.sessions()).toEqual([]);
     expect(existsSync(join(t.home, 'factory-work'))).toBe(false);
+  });
+
+  it('launches the model the role file names, one value for --model and the record', async () => {
+    const spec = roleFile('spec').replace('model: sonnet', 'model: opus');
+    const files = { ...GUARDED, '.claude/agents/spec.md': spec };
+    const t = setup({ mainFiles: files, release: () => manifestOf(files) });
+
+    await t.launch(REQUEST);
+
+    const args = t.sessions()[0]?.args ?? [];
+    expect(args[args.indexOf('--model') + 1]).toBe('opus');
+    expect(recordOf(t.home).model).toBe('opus');
+  });
+
+  it.each([
+    ['names no model', roleFile('spec').replace('model: sonnet\n', '')],
+    ['names a Fable model', roleFile('spec').replace('model: sonnet', 'model: fable')],
+    ['names a model that reads as an option', roleFile('spec').replace('sonnet', '--debug')],
+  ])('refuses a role file that %s, running nothing', async (_name, spec) => {
+    const files = { ...GUARDED, '.claude/agents/spec.md': spec };
+    const t = setup({ mainFiles: files, release: () => manifestOf(files) });
+
+    const refused = t.launch(REQUEST);
+
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(/\.claude\/agents\/spec\.md names no model/);
+    expect(t.sessions()).toEqual([]);
+  });
+
+  it('checks Claude Code is 2.1.295 or later, as the session would run it, before launch', async () => {
+    const t = setup();
+    await t.launch(REQUEST);
+    // The same claude the session runs: found on the session's own PATH, with its environment.
+    expect(t.versions()[0]?.env).toEqual(t.sessions()[0]?.env);
+    for (const version of ['2.1.294', '2.0.999', 'not a version']) {
+      const old = setup({ run: fakeRunner(0, echo, version).run });
+      const refused = old.launch(REQUEST);
+      await expect(refused).rejects.toThrow(LaunchRefused);
+      await expect(refused).rejects.toThrow(/Claude Code 2\.1\.295 or later/);
+    }
+    // A claude that cannot start is an error, never a refusal or a pass.
+    const missing: Runner = () => Promise.reject(new Error('spawn claude ENOENT'));
+    await expect(setup({ run: missing }).launch(REQUEST)).rejects.toThrow(EnvironmentError);
+  });
+
+  it("refuses a launch when a program Claude Code's sandbox needs is not on the session's PATH", async () => {
+    const t = setup({ sandbox: ['bwrap', 'factory-no-such-program'] });
+    const refused = t.launch(REQUEST);
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(/factory-no-such-program, which Claude Code's sandbox/);
+    expect(t.sessions()).toEqual([]);
   });
 
   it('refuses a role whose role file the clone does not have, running nothing', async () => {
@@ -460,7 +536,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     let finish: () => void = () => undefined;
     const run: Runner = (_program, args) =>
       args[0] !== '-p'
-        ? Promise.resolve({ status: 0, stdout: '', stderr: '' })
+        ? Promise.resolve(VERSION)
         : new Promise((done) => {
             finish = () => {
               done({ status: 0, stdout: echo(args), stderr: '' });
@@ -728,6 +804,54 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     t.repo.push('main');
     t.repo.git(['fetch', '-q', 'origin']);
     expect(await t.available()).toMatchObject({ ok: false, urgent: true });
+  });
+
+  type Hooks = Record<string, { hooks: Record<string, unknown>[] }[]>;
+  const shell = (command: string) => [{ hooks: [{ type: 'command', command }] }];
+  const served = (name: string) => [
+    { hooks: [{ type: 'command', command: 'factory', args: ['hook', name] }] },
+  ];
+  it.each([
+    ['in shell form', (h: Hooks) => (h.Stop = shell('factory hook stop'))],
+    [
+      'a guard without onFailure',
+      (h: Hooks) => {
+        for (const hook of h.PreToolUse?.flatMap((group) => group.hooks) ?? [])
+          delete hook.onFailure;
+      },
+    ],
+    ['a hook of another event', (h: Hooks) => (h.Notification = shell('notify-send x'))],
+    ['no Stop hook', (h: Hooks) => (h.Stop = [])],
+    ['a hook the factory does not serve', (h: Hooks) => (h.Stop = served('nope'))],
+  ])('waits, without alarm, for a release whose settings register %s', (_name, change) => {
+    const settings = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+    change(settings.hooks);
+    const check = guardrailCheck({}, Buffer.from(JSON.stringify(settings)), manifestOf({}), 'main');
+    expect(check).toMatchObject({
+      ok: false,
+      reason: /^release v1\.0\.0 (registers|installs)/,
+    });
+    expect(check).not.toHaveProperty('urgent');
+  });
+
+  it('refuses a clone whose settings name a hook the factory does not serve, running nothing', async () => {
+    const hooked = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+    hooked.hooks.PostToolUse = served('lint');
+    const files = { ...GUARDED, '.claude/settings.json': `${JSON.stringify(hooked)}\n` };
+    const t = setup({ mainFiles: files, release: () => manifestOf(files) });
+
+    const refused = t.launch(REQUEST);
+
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(
+      /registers the PostToolUse hook factory hook lint, which the installed factory does not serve/,
+    );
+    expect(t.sessions()).toEqual([]);
+  });
+
+  it('accepts the installed factory’s own settings: every hook in exec form, every guard blocking', () => {
+    const settings = Buffer.from(HOOKED_SETTINGS);
+    expect(guardrailCheck({}, settings, manifestOf({}), 'main')).toEqual({ ok: true });
   });
 
   it('waits, without alarm, while the release ships no hooks, the tag is not fetched or claude is missing', async () => {

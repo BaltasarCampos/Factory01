@@ -1,0 +1,3 @@
+#!/bin/sh
+# A stand-in for bwrap on the launch tests' PATH: the launcher only checks that it is there.
+exit 0

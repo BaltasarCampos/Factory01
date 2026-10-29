@@ -15,7 +15,7 @@ const policy = loadPolicy(
   readFileSync(new URL('../../factory/policy/roles.yaml', import.meta.url), 'utf8'),
 );
 const check = (role: string, command: string) =>
-  checkBash(policy, { role, command, cwd: '/w/clone', home: '/home/o' });
+  checkBash(policy, { role, command, cwd: '/w/clone', clone: '/w/clone', home: '/home/o' });
 const SHELLS = ROLES.filter((role) => policy.roles[role].shell.length > 0);
 const EXCLUDE = "-- ':(exclude)*events.jsonl' ':(exclude).factory/events'";
 const OPERATORS = [' && ', '; ', ' || ', ' | ', '\n'];

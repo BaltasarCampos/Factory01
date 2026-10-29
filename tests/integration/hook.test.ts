@@ -151,10 +151,27 @@ describe('factory hook entry: fail closed (contracts/hooks.md)', () => {
   });
 
   // The guard and session-start hooks are in tests/integration/guard-hooks.test.ts (slice 28-1).
-  it.each(['pre-compact', 'nope'])('%s is not in this build, so it blocks', async (event) => {
-    const r = await hook(event, input(workingCopy()));
+  it('a hook not in this build blocks', async () => {
+    const r = await hook('nope', input(workingCopy()));
     expect(r.code).toBe(2);
     expect(r.stderr).toMatch(/not available/);
+  });
+});
+
+describe('factory hook pre-compact, until T099', () => {
+  it("blocks the compaction, tells the session to stop, and logs one blocked event in the session's log", async () => {
+    const dir = workingCopy();
+    const s = session(dir);
+    const r = await hook('pre-compact', input(dir, { hook_event_name: 'PreCompact' }), s.env);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/stop: your context is full, so the task is too big for one session/);
+    expect(events(s.log)).toEqual([
+      expect.objectContaining({
+        ...{ role: 'builder', item: 42, station: 4, kind: 'blocked', tool: 'PreCompact' },
+        input_summary: expect.stringMatching(/^pre-compact: .*too big for one session/) as string,
+      }),
+    ]);
+    cloneUntouched(dir);
   });
 });
 

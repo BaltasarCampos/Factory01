@@ -11,7 +11,7 @@ import { STATES, type ApprovalRecord, type GuardrailManifest } from '../../src/m
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, mergeBrief } from '../helpers/git-repo.js';
-import { HOOKED_SETTINGS, manifestOf } from '../helpers/guardrails.js';
+import { HOOKED_SETTINGS, manifestOf, SANDBOX_BIN } from '../helpers/guardrails.js';
 import { homeDir, makeKeys, makeOtherKeys, tempDir, type TestKeys } from '../helpers/keys.js';
 import { promptFiles } from '../helpers/release.js';
 
@@ -118,9 +118,12 @@ function setup(options: Setup = {}) {
   const sessions: { args: readonly string[]; cwd: string }[] = [];
   const realLocal = (manifest: GuardrailManifest) =>
     new LocalLauncher({
-      ...{ home, env: gitEnv },
+      // The programs Claude Code's sandbox needs, as stand-ins on the session's PATH.
+      ...{ home, env: { ...gitEnv, PATH: `${SANDBOX_BIN}:${gitEnv.PATH ?? ''}` } },
       release: () => manifest,
       run: (_program, args, { cwd }) => {
+        if (args[0] === '--version')
+          return Promise.resolve({ status: 0, stdout: '2.1.309 (Claude Code)\n', stderr: '' });
         sessions.push({ args, cwd });
         const id = args[args.indexOf('--session-id') + 1];
         return Promise.resolve({

@@ -13,11 +13,11 @@
 // Grep searches, and Grep without a glob skips gitignored files: a Grep over a folder holding a
 // `.env` file git does not ignore is beyond both. Reasons go through `visible()`.
 import { posix } from 'node:path';
-import { absolute, deniedRead, inside, realPath } from './paths.js';
+import { absolute, deniedRead, inside, realPath, systemFolder } from './paths.js';
 import { decide, type GuardDecision } from './path-guard.js';
 import { matchesPath, type Policy } from './policy.js';
 
-export type ReadRule = 'unresolved' | 'secret' | 'search' | 'events';
+export type ReadRule = 'unresolved' | 'secret' | 'system' | 'search' | 'events';
 
 export interface ReadInput {
   role: string;
@@ -76,6 +76,11 @@ export function checkRead(policy: Policy, input: ReadInput): GuardDecision<ReadR
       path === input.clone || inside(input.clone, path) !== undefined;
     if (pattern?.split('/').includes('..') === true && !paths.every(inClone))
       refuse('search', `the pattern ${pattern} leaves the clone with ..; search inside it`);
+    if (paths.some((path) => systemFolder(path) !== undefined))
+      refuse(
+        'system',
+        `${shown}: no session reads /proc, /sys or /dev, which show its environment`,
+      );
     for (const path of paths) {
       const denied = deniedRead(policy, input.home, path);
       if (denied !== undefined) refuse('secret', `${shown}: no session reads it (${denied})`);
