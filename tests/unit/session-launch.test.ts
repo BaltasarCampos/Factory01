@@ -514,21 +514,29 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(t.sessions()).toEqual([]);
   });
 
-  it('checks Claude Code is 2.1.309 or later, as the session would run it, before launch', async () => {
+  it('checks Claude Code as the session would run it, before launch', async () => {
     const t = setup();
     await t.launch(REQUEST);
     // The same claude the session runs: found on the session's own PATH, with its environment.
     expect(t.versions()[0]?.env).toEqual(t.sessions()[0]?.env);
-    // Every behaviour the guards rely on was probed on 2.1.309 (T082).
-    for (const version of ['2.1.308', '2.1.295', '2.0.999', 'not a version']) {
-      const old = setup({ run: fakeRunner(0, echo, version).run });
-      const refused = old.launch(REQUEST);
+  });
+
+  // Every behaviour the guards rely on was probed on 2.1.309 (T082).
+  it.each(['2.1.308', '2.1.295', '2.0.999', 'not a version'])(
+    'refuses Claude Code reporting %s: it must be 2.1.309 or later',
+    async (version) => {
+      const refused = setup({ run: fakeRunner(0, echo, version).run }).launch(REQUEST);
       await expect(refused).rejects.toThrow(LaunchRefused);
       await expect(refused).rejects.toThrow(/Claude Code 2\.1\.309 or later/);
-    }
-    const newer = setup({ run: fakeRunner(0, echo, '2.1.310').run });
-    await expect(newer.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
-    // A claude that cannot start is an error, never a refusal or a pass.
+    },
+  );
+
+  it.each(['2.1.309', '2.1.310'])('launches with Claude Code %s', async (version) => {
+    const t = setup({ run: fakeRunner(0, echo, version).run });
+    await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+  });
+
+  it('fails the launch with an error, never a refusal or a pass, when claude cannot start', async () => {
     const missing: Runner = () => Promise.reject(new Error('spawn claude ENOENT'));
     await expect(setup({ run: missing }).launch(REQUEST)).rejects.toThrow(EnvironmentError);
   });
