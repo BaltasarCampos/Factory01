@@ -42,7 +42,11 @@ function launched(record: Record<string, unknown> = {}, { passed = true } = {}):
   write(join(clone, FEATURE, 'events.jsonl'), '');
   const fields = { role: 'builder', item: 42, station: 4, feature: FEATURE, files: [], clone };
   const launch = { model: 'sonnet', role_version: VERSION, repo: 'owner/project', inbox_issue: 1 };
-  write(join(folder(home), 'session.json'), JSON.stringify({ ...fields, ...launch, ...record }));
+  const issued = { branch: 'claude/42-add-login', head: 'c'.repeat(40), tests: [] };
+  write(
+    join(folder(home), 'session.json'),
+    JSON.stringify({ ...fields, ...launch, ...issued, ...record }),
+  );
   if (passed) write(join(folder(home), 'passed.json'), JSON.stringify({ session: SESSION_ID }));
   return home;
 }

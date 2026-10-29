@@ -21,6 +21,8 @@ import {
   type Runner,
 } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, type LaunchRequest } from '../../src/dispatcher/launcher/types.js';
+import { roleVersion } from '../../src/events/schema.js';
+import { readSessionRecord } from '../../src/hooks/session.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
 import { MCP_JSON } from '../../src/install/render.js';
 import type { SessionSettings } from '../../src/install/session-settings.js';
@@ -63,12 +65,21 @@ const sessionIds = () => {
 };
 const FIRST = '0b6c7f3e-2a4d-4c1e-9f00-000000000001';
 
-const DEFINE_ROLE = '---\nname: define\nmodel: sonnet\ntools: Read\nversion: 1\n---\nDefine.\n';
+const roleFile = (role: string) =>
+  `---\nname: ${role}\nmodel: sonnet\ntools: Read\nversion: 1\n---\n`;
+const DEFINE_ROLE = `${roleFile('define')}Define.\n`;
 /** Main's protected files: what the pinned release's manifest lists. */
 const GUARDED = {
   '.claude/settings.json': HOOKED_SETTINGS,
   '.claude/agents/define.md': DEFINE_ROLE,
+  '.claude/agents/spec.md': roleFile('spec'),
+  '.claude/agents/intake.md': roleFile('intake'),
 };
+/** The session's record, as the launcher wrote it. */
+const recordOf = (home: string, id = FIRST) =>
+  JSON.parse(
+    readFileSync(join(home, '.factory', 'sessions', id, 'session.json'), 'utf8'),
+  ) as Record<string, unknown>;
 
 /** The Owner's clone, with the release's protected files on main and an item branch on origin. */
 function setup(
@@ -118,7 +129,8 @@ const work = (home: string, name: string) =>
 /** The session's own files, in its folder under `~/.factory/sessions/`. */
 const sessionFiles = (home: string, id = FIRST) => {
   const dir = join(home, '.factory', 'sessions', id);
-  return { id, settings: join(dir, 'settings.json'), mcp: join(dir, 'mcp.json') };
+  const at = (name: string) => join(dir, name);
+  return { id, settings: at('settings.json'), mcp: at('mcp.json'), record: at('session.json') };
 };
 
 describe('LocalLauncher (research R8, R9)', () => {
@@ -325,6 +337,39 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(launch?.env.FACTORY_STATION).toBe('0');
     const at = pushed ? `origin/${DEFINE_BRANCH}` : 'origin/main';
     expect(runGit(clone, ['rev-parse', 'HEAD'])).toBe(t.repo.revParse(at));
+    // The record the hooks take Define's facts from: the project, not an item.
+    expect(recordOf(t.home)).toMatchObject({
+      ...{ role: 'define', item: 0, station: 0, feature: '', files: [], clone },
+      ...{ branch: DEFINE_BRANCH, head: t.repo.revParse(at) },
+    });
+  });
+
+  it("writes the session's record before launch, and FACTORY_SESSION is always the id it launches with", async () => {
+    const t = setup({ branchFiles: { 'tests/login.test.ts': 't\n', 'tests/helpers/x.ts': 'h\n' } });
+
+    await t.launch({ ...REQUEST, files: ['specs/42-add-login/spec.md'] });
+
+    const [launch] = t.sessions();
+    const id = launchedId(launch?.args ?? []) ?? '';
+    expect(launch?.env).toMatchObject({ FACTORY_SESSION: id, FACTORY_ROLE: 'spec' });
+    const folder = join(t.home, '.factory', 'sessions', id);
+    expect(statSync(join(folder, 'session.json')).mode & 0o777).toBe(0o600);
+    expect(recordOf(t.home, id)).toEqual({
+      ...{ role: 'spec', item: 42, station: 2, feature: 'specs/42-add-login' },
+      ...{ files: ['specs/42-add-login/spec.md'], clone: work(t.home, '42-add-login') },
+      ...{ model: 'sonnet', role_version: roleVersion('v1.0.0', roleFile('spec')) },
+      ...{ repo: 'owner/project', inbox_issue: 1, branch: BRANCH },
+      ...{ head: t.repo.revParse(`origin/${BRANCH}`), tests: ['tests/login.test.ts'] },
+    });
+    // The hooks read it as written.
+    expect(readSessionRecord(t.home, id)).toEqual(recordOf(t.home, id));
+  });
+
+  it('refuses a role whose role file the clone does not have, running nothing', async () => {
+    const t = setup();
+    const refused = t.launch({ ...REQUEST, role: 'planner', station: 3 });
+    await expect(refused).rejects.toThrow(/\.claude\/agents\/planner\.md/);
+    expect(t.sessions()).toEqual([]);
   });
 
   it('runs one session at a time', async () => {

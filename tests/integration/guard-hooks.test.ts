@@ -75,6 +75,9 @@ function setUp(record: Record<string, unknown> = {}, { passed = true } = {}) {
     role_version: VERSION,
     repo: 'owner/project',
     inbox_issue: 1,
+    branch: 'claude/42-add-login',
+    head: 'c'.repeat(40),
+    tests: [],
   };
   write(
     join(home, '.factory/sessions', SESSION, 'session.json'),
@@ -254,6 +257,9 @@ describe('the guard hooks (T086)', () => {
       ['role_version', 5],
       ['repo', 'owner/project/../x'],
       ['inbox_issue', 0],
+      ['branch', ''],
+      ['head', 'HEAD'],
+      ['tests', 'tests/login.test.ts'],
     ] as const) {
       const at = setUp({ [field]: value });
       const result = await hook('command-guard', at, 'Bash', { command: 'npm test' });

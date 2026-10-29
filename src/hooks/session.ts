@@ -35,6 +35,11 @@ export interface SessionRecord {
   /** The project's repository and inbox issue, from main's config as launched. */
   repo: string;
   inbox_issue: number;
+  /** The branch the dispatcher issued, and the commit the session's clone was made from. */
+  branch: string;
+  head: string;
+  /** The test files in the clone at launch, which Test may not change (T070). */
+  tests: string[];
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -80,6 +85,9 @@ export function readSessionRecord(home: string, given: unknown): SessionRecord {
     ['role_version', sessionFields.role_version(r.role_version)],
     ['repo', typeof r.repo === 'string' && REPO.test(r.repo)],
     ['inbox_issue', Number.isSafeInteger(r.inbox_issue) && (r.inbox_issue as number) > 0],
+    ['branch', typeof r.branch === 'string' && r.branch !== ''],
+    ['head', typeof r.head === 'string' && /^[0-9a-f]{40}$/.test(r.head)],
+    ['tests', Array.isArray(r.tests) && r.tests.every((f) => typeof f === 'string')],
   ];
   const problem = checks.find(([, ok]) => !ok)?.[0];
   if (problem !== undefined) throw new HookError(`the session's record ${path}: bad ${problem}`);

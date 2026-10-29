@@ -21,6 +21,9 @@ export function recordSession(
     role_version: ROLE_VERSION,
     repo: 'owner/project',
     inbox_issue: 1,
+    branch: 'claude/42-add-login',
+    head: 'c'.repeat(40),
+    tests: [],
   };
   writeFileSync(join(folder, 'session.json'), JSON.stringify({ ...launch, ...record }));
   return { home, log: join(folder, 'events.jsonl'), env: { HOME: home } };

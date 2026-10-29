@@ -42,6 +42,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
+import { roleVersion } from '../../events/schema.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
@@ -55,6 +56,7 @@ import { branchFeatureDir } from '../../model/naming.js';
 import { visible } from '../../notify/summary.js';
 import type { GuardrailManifest, ProjectConfig, ReleasePin } from '../../model/types.js';
 import { ReleaseTagError } from '../../release/tag.js';
+import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
 import {
   LaunchRefused,
@@ -87,7 +89,12 @@ export interface SessionFiles {
   id: string;
   settings: string;
   mcp: string;
+  /** The session's record, which the hooks and the MCP server read (src/hooks/session.ts). */
+  record: string;
 }
+
+/** The session's own files are written once, readable only by the Owner. */
+const WRITE_ONCE = { flag: 'wx', mode: 0o600 } as const;
 
 /**
  * The `claude` arguments for a local session (T061): its id, its own settings, only the project's
@@ -417,18 +424,39 @@ export class LocalLauncher implements SessionLauncher {
       const check = guardrailCheck(found, settings, manifest, request.branch);
       if (!check.ok)
         throw new LaunchRefused(`no local session started: ${check.reason}`, check.urgent);
+      const roleFile = join(cwd, '.claude', 'agents', `${request.role}.md`);
+      if (!existsSync(roleFile))
+        throw new LaunchRefused(
+          `no local session started: ${request.branch} has no .claude/agents/${request.role}.md`,
+        );
+      const files = step("making the session's folder", () => this.sessionFolder());
       // No Spec Kit variables: the release's commands take the feature folder from the prompt.
       const env = {
         ...this.options.env,
         // Define works for the project, not an item: it gets a station and no item.
         ...(request.item > 0 ? { FACTORY_ITEM: String(request.item) } : {}),
         FACTORY_STATION: String(request.station),
+        // What the MCP server takes its session from; the hooks read it from their input.
+        ...{ FACTORY_ROLE: request.role, FACTORY_SESSION: files.id },
       };
-      const files = step("making the session's folder", () => this.sessionFolder());
       const tmp = step("making the session's temporary folder", () => this.tmpFolder(request.item));
       try {
-        step("writing the session's settings", () => {
+        step("writing the session's settings and record", () => {
           this.writeSettings(request, files, { clone: cwd, tmp });
+          const { repo, inbox_issue } = this.config(request.project, heads.main);
+          const record = {
+            ...{ role: request.role, item: request.item, station: request.station },
+            ...{ feature: request.feature, files: request.files, clone: cwd, model: 'sonnet' },
+            role_version: roleVersion(manifest.release, readFileSync(roleFile)),
+            ...{
+              repo,
+              inbox_issue,
+              branch: request.branch,
+              head: heads.head,
+              tests: this.testFiles(cwd),
+            },
+          };
+          writeFileSync(files.record, `${JSON.stringify(record, null, 2)}\n`, WRITE_ONCE);
         });
         const result = await this.run('claude', localInvocation(request, files), { cwd, env });
         if (result.status !== 0)
@@ -465,7 +493,17 @@ export class LocalLauncher implements SessionLauncher {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       throw new LaunchRefused(`no local session started: the session folder ${dir} already exists`);
     }
-    return { id, settings: join(dir, 'settings.json'), mcp: join(dir, 'mcp.json') };
+    const at = (name: string) => join(dir, name);
+    return { id, settings: at('settings.json'), mcp: at('mcp.json'), record: at('session.json') };
+  }
+
+  /** The test files at the clone's head, read without the Owner's config (T070). */
+  private testFiles(clone: string): string[] {
+    const paths = this.isolated(clone, ['ls-tree', '-r', '-z', '--name-only', 'HEAD']);
+    return paths
+      .toString()
+      .split('\0')
+      .filter((path) => path !== '' && isTestFile(path));
   }
 
   /** A fresh, short temporary folder for the session, by its real path (T061). */
@@ -494,8 +532,7 @@ export class LocalLauncher implements SessionLauncher {
     const { role, feature, files: task } = request;
     const input = { role, paths, feature, files: task, factory, mcp };
     const settings = renderSessionSettings(policy, input);
-    const write = { flag: 'wx', mode: 0o600 } as const;
-    writeFileSync(files.settings, `${JSON.stringify(settings, null, 2)}\n`, write);
-    writeFileSync(files.mcp, MCP_JSON, write);
+    writeFileSync(files.settings, `${JSON.stringify(settings, null, 2)}\n`, WRITE_ONCE);
+    writeFileSync(files.mcp, MCP_JSON, WRITE_ONCE);
   }
 }
