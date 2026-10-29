@@ -244,7 +244,8 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
     expect(r.stdout).toContain(
       `started spec (station 2) for #2 on ${BRANCH}: local session ${SESSION_ID}`,
     );
-    const worktree = join(realpathSync(t.home), 'factory-work', 'owner', 'project', '2-add-login');
+    const clone = `2-add-login-${SESSION_ID}`;
+    const worktree = join(realpathSync(t.home), 'factory-work', 'owner', 'project', clone);
     expect(t.sessions.filter((s) => s.args[0] === '-p').map((s) => s.cwd)).toEqual([worktree]);
     expect(t.checkout()).toEqual(before);
     expect(t.inbox()).toEqual([]);

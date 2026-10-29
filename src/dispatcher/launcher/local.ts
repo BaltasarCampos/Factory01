@@ -1,10 +1,11 @@
 // Local sessions (research R8, FR-031): `claude -p` on the laptop, one at a time, each in a
-// fresh clone of its own under `~/factory-work/<repo>/<name>`, never in the Owner's working copy
-// and never in a worktree of it: a worktree shares `.git/config`, `.git/hooks` and the local
-// branches, so a session could plant a hook that runs when the Owner signs a merge (Owner review
-// 2026-10-07). The clone is made anew for every launch, its `origin` set to the project's
-// GitHub remote, so nothing a session left in it (config, hooks, files) carries over. The
-// launch resolves when the session ends, so `factory run` works the line one session at a time.
+// fresh clone of its own under `~/factory-work/<repo>/<name>-<session id>`, never in the Owner's
+// working copy and never in a worktree of it: a worktree shares `.git/config`, `.git/hooks` and
+// the local branches, so a session could plant a hook that runs when the Owner signs a merge
+// (Owner review 2026-10-07). The clone is made anew for every launch, its `origin` set to the
+// project's GitHub remote, so nothing a session left in it (config, hooks, files) carries over.
+// The launch resolves when the session ends, so `factory run` works the line one session at a
+// time.
 //
 // No local session starts before the guards exist: the release pinned on main must have a tag
 // the Owner signed (checked with main's pinned key lists), the protected files on main and in
@@ -361,13 +362,15 @@ export class LocalLauncher implements SessionLauncher {
 
   /**
    * A fresh clone for the session, from the factory's own clone at exactly the checked commits,
-   * its `origin` the project's GitHub remote, never fetched.
+   * its `origin` the project's GitHub remote, never fetched. Each launch gets a folder of its own,
+   * named with its session id: a clone path the Owner once trusted in Claude Code would otherwise
+   * load the pinned release's allow rules into a later session.
    */
-  private clone(project: string, branch: string, heads: Heads): string {
+  private clone(project: string, branch: string, heads: Heads, session: string): string {
     const { home } = this.options;
     const repo = this.config(project, heads.main).repo;
     const name = branch === 'main' ? 'main' : branch.slice('claude/'.length);
-    const dir = join(realpathSync(home), 'factory-work', ...repo.split('/'), name);
+    const dir = join(realpathSync(home), 'factory-work', ...repo.split('/'), `${name}-${session}`);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dirname(dir), { recursive: true });
     this.isolated(home, ['init', '-q', '-b', 'main', dir]);
@@ -401,8 +404,9 @@ export class LocalLauncher implements SessionLauncher {
         this.heads(request.project, request.branch),
       );
       const manifest = this.history(request.project, request.branch, heads);
+      const files = step("making the session's folder", () => this.sessionFolder());
       const cwd = step("making the session's clone", () =>
-        this.clone(request.project, request.branch, heads),
+        this.clone(request.project, request.branch, heads, files.id),
       );
       // The tree first: a symlinked `.claude` would pass a walk of the files it points at.
       const tree = step("reading the session's clone", () =>
@@ -429,7 +433,6 @@ export class LocalLauncher implements SessionLauncher {
         throw new LaunchRefused(
           `no local session started: ${request.branch} has no .claude/agents/${request.role}.md`,
         );
-      const files = step("making the session's folder", () => this.sessionFolder());
       // No Spec Kit variables: the release's commands take the feature folder from the prompt.
       const env = {
         ...this.options.env,

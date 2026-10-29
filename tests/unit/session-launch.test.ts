@@ -124,8 +124,9 @@ function setup(
   return { repo, home, launch, available, sessions, owner };
 }
 const FACTORY_SETTINGS = new URL('../../factory/settings/settings.json', import.meta.url);
-const work = (home: string, name: string) =>
-  join(realpathSync(home), 'factory-work', 'owner', 'project', name);
+/** The session's clone: a folder of its own for each launch, named with its session id. */
+const work = (home: string, name: string, id = FIRST) =>
+  join(realpathSync(home), 'factory-work', 'owner', 'project', `${name}-${id}`);
 /** The session's own files, in its folder under `~/.factory/sessions/`. */
 const sessionFiles = (home: string, id = FIRST) => {
   const dir = join(home, '.factory', 'sessions', id);
@@ -241,7 +242,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     );
   });
 
-  it('starts every launch from a fresh clone: files, config and hooks a session left are gone', async () => {
+  it('starts every launch in a fresh clone of its own: files, config and hooks a session left are not in it', async () => {
     const t = setup();
     await t.launch(REQUEST);
     const clone = work(t.home, '42-add-login');
@@ -255,10 +256,13 @@ describe('LocalLauncher (research R8, R9)', () => {
 
     await t.launch(REQUEST);
 
-    expect(existsSync(join(clone, 'left-behind.txt'))).toBe(false);
-    expect(existsSync(join(clone, '.git', 'hooks', 'post-checkout'))).toBe(false);
-    expect(() => runGit(clone, ['config', 'core.hooksPath'])).toThrow();
-    expect(runGit(clone, ['rev-parse', 'HEAD'])).toBe(runGit(other, ['rev-parse', 'HEAD']));
+    // Another folder, so no path the Owner once trusted in Claude Code is a later session's.
+    const second = work(t.home, '42-add-login', '0b6c7f3e-2a4d-4c1e-9f00-000000000002');
+    expect(t.sessions().map((s) => s.cwd)).toEqual([clone, second]);
+    expect(existsSync(join(second, 'left-behind.txt'))).toBe(false);
+    expect(existsSync(join(second, '.git', 'hooks', 'post-checkout'))).toBe(false);
+    expect(() => runGit(second, ['config', 'core.hooksPath'])).toThrow();
+    expect(runGit(second, ['rev-parse', 'HEAD'])).toBe(runGit(other, ['rev-parse', 'HEAD']));
   });
 
   it.each([
