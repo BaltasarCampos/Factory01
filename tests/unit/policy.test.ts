@@ -75,11 +75,13 @@ describe('the role permission table (T074, T081)', () => {
     expect(row('builder').shell).toEqual(
       expect.arrayContaining([...npm, ...git, 'git merge origin/main', 'git merge --abort']),
     );
-    for (const role of ['define', 'builder'] as const)
+    // No bare vitest: it exists only in a clone's node_modules/.bin, never on a session's PATH.
+    for (const role of ['define', 'builder', 'test'] as const)
       expect(
         row(role).shell.filter((p) => !p.includes(' ')),
         role,
-      ).toEqual(role === 'builder' ? ['vitest'] : []);
+      ).toEqual([]);
+    expect(row('test').shell).toEqual(['npm test', 'npm run test', 'npx vitest']);
     expect(row('reviewer').shell).toEqual(['git diff', 'gh pr comment']);
     expect(row('security').shell).toEqual(['semgrep', 'gitleaks', 'npm audit']);
     expect(row('release').shell).toEqual(['git log', 'git show', 'git diff']);

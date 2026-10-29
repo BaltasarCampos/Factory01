@@ -95,6 +95,7 @@ const GUARDED = {
   '.claude/agents/define.md': DEFINE_ROLE,
   '.claude/agents/spec.md': roleFile('spec'),
   '.claude/agents/intake.md': roleFile('intake'),
+  '.claude/agents/security.md': roleFile('security'),
 };
 /** The project's gh token, which only roles with `gh` in their shell get. */
 const TOKEN = `github_pat_${'1'.repeat(22)}_${'a'.repeat(59)}`;
@@ -595,6 +596,49 @@ describe('LocalLauncher (research R8, R9)', () => {
         ? Promise.reject(new Error('spawn bash ENOENT'))
         : runner.run(program, args, options);
     await expect(setup({ run: broken }).launch(REQUEST)).rejects.toThrow(EnvironmentError);
+  });
+
+  describe("every program on the role's shell list, by real path", () => {
+    const SECURITY = { ...REQUEST, role: 'security', station: 5 } as const;
+    /** The tests' own stand-ins for semgrep and gitleaks (tests/helpers/bin). */
+    const bin = realpathSync(new URL('../helpers/bin', import.meta.url).pathname);
+    const without = (folder: string) =>
+      (gitEnv.PATH ?? '')
+        .split(':')
+        .filter((f) => f !== '' && !(existsSync(f) && realpathSync(f) === folder))
+        .join(':');
+
+    it('opens the folder of a program the sandbox could not read, read-only', async () => {
+      const t = setup();
+      await t.launch(SECURITY);
+      const settings = JSON.parse(
+        readFileSync(sessionFiles(t.home).settings, 'utf8'),
+      ) as SessionSettings;
+      // Under /home on the laptop, so denied whole unless opened.
+      expect(settings.sandbox.filesystem.allowRead).toContain(bin);
+      expect(settings.sandbox.filesystem.allowWrite).not.toContain(bin);
+    });
+
+    it("refuses a launch, by name, when one is not on the session's PATH", async () => {
+      const t = setup({ env: { ...gitEnv, PATH: without(bin) } });
+      const refused = t.launch(SECURITY);
+      await expect(refused).rejects.toThrow(LaunchRefused);
+      await expect(refused).rejects.toThrow(/semgrep, on the security role's shell list, is not/);
+      expect(t.sessions()).toEqual([]);
+    });
+
+    it('refuses a launch when one really lies in a shared temporary folder', async () => {
+      const elsewhere = tempDir();
+      const linked = join(homeDir(), 'bin');
+      mkdirSync(linked, { recursive: true });
+      for (const program of ['semgrep', 'gitleaks']) {
+        writeFileSync(join(elsewhere, program), '#!/bin/sh\n', { mode: 0o755 });
+        symlinkSync(join(elsewhere, program), join(linked, program));
+      }
+      const t = setup({ env: { ...gitEnv, PATH: `${linked}:${without(bin)}` } });
+      await expect(t.launch(SECURITY)).rejects.toThrow(/shared temporary folder/);
+      expect(t.sessions()).toEqual([]);
+    });
   });
 
   it('refuses a role whose role file the clone does not have, running nothing', async () => {

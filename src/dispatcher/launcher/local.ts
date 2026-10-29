@@ -193,6 +193,18 @@ function memoryAbove(clone: string): string[] {
   }
 }
 
+/**
+ * Folders the sandbox denies besides home: the shared temporary ones, and those Claude Code
+ * denies under `blockReadsOutsideWorkingDirectories`.
+ */
+const UNREAD = ['/home', '/root', '/mnt', '/media', '/srv', ...SHARED_TMP];
+
+/** Where `program` really is, the first on `folders` the Owner can run; undefined for none. */
+function located(program: string, folders: readonly string[]): string | undefined {
+  const at = folders.map((folder) => join(folder, program)).find(executable);
+  return at === undefined ? undefined : realpathSync(at);
+}
+
 /** Whether `path` is a file the Owner can run. */
 function executable(path: string): boolean {
   try {
@@ -585,7 +597,7 @@ export class LocalLauncher implements SessionLauncher {
         // The session's own PATH: what Claude Code finds there is what the session runs.
         const folders = env.PATH.split(':').filter((folder) => folder !== '');
         for (const program of this.options.sandbox ?? ['bwrap', 'socat'])
-          if (!folders.some((folder) => executable(join(folder, program))))
+          if (located(program, folders) === undefined)
             throw new LaunchRefused(
               `no local session started: ${program}, which Claude Code's sandbox needs, is not on the session's PATH (${env.PATH}); install it`,
             );
@@ -593,7 +605,7 @@ export class LocalLauncher implements SessionLauncher {
         await this.claudeVersion(cwd, env);
         step("writing the session's settings and record", () => {
           const tests = this.testFiles(cwd);
-          this.writeSettings(request, files, { clone: cwd, tmp, tests });
+          this.writeSettings(request, files, { clone: cwd, tmp, tests, folders });
           const record = {
             ...{ role: request.role, item: request.item, station: request.station },
             ...{ feature: request.feature, files: request.files, clone: cwd, model },
@@ -759,23 +771,45 @@ export class LocalLauncher implements SessionLauncher {
     return realpathSync(mkdtempSync(join(root, `factory-${String(item)}-`)));
   }
 
+  /**
+   * The real folder of every program on the role's shell list that the sandbox would not read,
+   * to open read-only, such as Security's semgrep under `~/.local`; a program not on the
+   * session's PATH refuses the launch by name, since the session could not run it (T061).
+   */
+  private programFolders(role: RoleName, folders: readonly string[], opened: readonly string[]) {
+    const home = realpathSync(this.options.home);
+    const programs = new Set(factoryPolicy().roles[role].shell.map((p) => p.split(' ')[0] ?? ''));
+    const out: string[] = [];
+    for (const program of programs) {
+      const real = located(program, folders);
+      if (real === undefined)
+        throw new LaunchRefused(
+          `no local session started: ${program}, on the ${role} role's shell list, is not on the session's PATH (${folders.join(':')}); install it`,
+        );
+      const folder = dirname(real);
+      const denied = [home, ...UNREAD].some((root) => under(folder, root));
+      if (denied && ![...opened, ...out].some((open) => under(folder, open))) out.push(folder);
+    }
+    return out;
+  }
+
   /** The session's `--settings` file and the factory's MCP config, from the installed factory. */
   private writeSettings(
     request: LaunchRequest,
     files: SessionFiles,
-    at: { clone: string; tmp: string; tests: readonly string[] },
+    at: { clone: string; tmp: string; tests: readonly string[]; folders: readonly string[] },
   ) {
     const policy = factoryPolicy();
     const factory = JSON.parse(factoryFile('settings/settings.json')) as Settings;
-    const tools = /^tools: (.*)$/m.exec(factoryFile(`roles/${request.role}.md`))?.[1] ?? '';
-    const mcp = tools.split(', ').filter((tool) => tool.startsWith('mcp__factory__'));
+    const named = /^tools: (.*)$/m.exec(factoryFile(`roles/${request.role}.md`))?.[1] ?? '';
+    const mcp = named.split(', ').filter((tool) => tool.startsWith('mcp__factory__'));
     // The roles whose shell runs npm read node's own folder, which may lie under home.
     const npm = policy.roles[request.role].shell.some((prefix) => /^(npm|npx)\b/.test(prefix));
     const node = dirname(dirname(realpathSync(process.execPath)));
-    const paths = {
-      ...{ home: realpathSync(this.options.home), clone: at.clone, tmp: at.tmp },
-      tools: npm ? [node] : [],
-    };
+    const home = realpathSync(this.options.home);
+    const opened = npm ? [node] : [];
+    const tools = [...opened, ...this.programFolders(request.role, at.folders, opened)];
+    const paths = { home, clone: at.clone, tmp: at.tmp, tools };
     const { role, feature, files: task } = request;
     const input = { role, paths, feature, files: task, tests: at.tests, factory, mcp };
     const settings = renderSessionSettings(policy, input);
