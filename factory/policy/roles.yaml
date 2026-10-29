@@ -4,8 +4,9 @@
 # and refuses anything it does not expect. Each role's `tools` equal its role file's.
 #
 # write:   paths the role may Write or Edit. `{feature}` is the item's feature folder,
-#          `specs/<issue>-<slug>`; `{task}` is the files `.station.json` lists, and
-#          `{task:tests}` those of them that are test files. `**` matches any depth.
+#          `specs/<issue>-<slug>`; `{task}` is the files `.station.json` lists, and `{tests}` a
+#          new test file by the installed release's patterns, never one the clone had at launch
+#          (T070). `**` matches any depth.
 # shell:   command prefixes, as words, that the role's shell may run. No shell has git network or
 #          changes a pull request: the launcher fetches before the session and, once it has
 #          ended, pushes the head the Stop hook recorded and opens and readies pull requests
@@ -101,7 +102,7 @@ roles:
     branch: item
   test:
     tools: [Read, Grep, Glob, Write, Edit, Bash]
-    write: ['{task:tests}']
+    write: ['{tests}']
     shell: [npm test, npm run test, npx vitest, vitest]
     blocked: []
     network: [registry.npmjs.org]

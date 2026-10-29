@@ -34,6 +34,7 @@ const render = (role: RoleName, more: { feature?: string; files?: string[] } = {
     paths,
     feature: more.feature ?? FEATURE,
     files: more.files ?? FILES,
+    tests: ['tests/login.test.ts'],
     factory: project,
     mcp: named(role),
   });
@@ -102,7 +103,10 @@ describe('the per-session settings (T061, T082)', () => {
       `Edit(/${CLONE}/src/login.ts)`,
       `Edit(/${CLONE}/tests/login.test.ts)`,
     ]);
-    expect(edits('test')).toEqual([`Edit(/${CLONE}/tests/login.test.ts)`]);
+    // Test writes new test files only, by the release's patterns (T070).
+    expect(edits('test')).toEqual([`Edit(/${CLONE}/tests/**/*.test.ts)`]);
+    expect(render('test').permissions.deny).toContain(`Edit(/${CLONE}/tests/login.test.ts)`);
+    expect(render('builder').permissions.deny).not.toContain(`Edit(/${CLONE}/tests/login.test.ts)`);
     expect(edits('spec')).toEqual([
       `Edit(/${CLONE}/${FEATURE}/spec.md)`,
       `Edit(/${CLONE}/${FEATURE}/checklists/requirements.md)`,
@@ -181,7 +185,7 @@ describe('the per-session settings (T061, T082)', () => {
     const inFactory = { ...paths, clone: `${HOME}/.factory/work/owner/project/42-add-login` };
     expect(() =>
       renderSessionSettings(policy, {
-        ...{ role: 'builder', paths: inFactory, feature: FEATURE, files: FILES },
+        ...{ role: 'builder', paths: inFactory, feature: FEATURE, files: FILES, tests: [] },
         ...{ factory: project, mcp: named('builder') },
       }),
     ).toThrow(/under the denied read ~\/\.factory/);

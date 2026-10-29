@@ -442,7 +442,8 @@ export class LocalLauncher implements SessionLauncher {
       const tmp = step("making the session's temporary folder", () => this.tmpFolder(request.item));
       try {
         step("writing the session's settings and record", () => {
-          this.writeSettings(request, files, { clone: cwd, tmp });
+          const tests = this.testFiles(cwd);
+          this.writeSettings(request, files, { clone: cwd, tmp, tests });
           const { repo, inbox_issue } = this.config(request.project, heads.main);
           const record = {
             ...{ role: request.role, item: request.item, station: request.station },
@@ -453,7 +454,7 @@ export class LocalLauncher implements SessionLauncher {
               inbox_issue,
               branch: request.branch,
               head: heads.head,
-              tests: this.testFiles(cwd),
+              tests,
             },
           };
           writeFileSync(files.record, `${JSON.stringify(record, null, 2)}\n`, WRITE_ONCE);
@@ -516,7 +517,7 @@ export class LocalLauncher implements SessionLauncher {
   private writeSettings(
     request: LaunchRequest,
     files: SessionFiles,
-    at: { clone: string; tmp: string },
+    at: { clone: string; tmp: string; tests: readonly string[] },
   ) {
     const policy = factoryPolicy();
     const factory = JSON.parse(factoryFile('settings/settings.json')) as Settings;
@@ -526,11 +527,11 @@ export class LocalLauncher implements SessionLauncher {
     const npm = policy.roles[request.role].shell.some((prefix) => /^(npm|npx)\b/.test(prefix));
     const node = dirname(dirname(realpathSync(process.execPath)));
     const paths = {
-      ...{ home: realpathSync(this.options.home), ...at },
+      ...{ home: realpathSync(this.options.home), clone: at.clone, tmp: at.tmp },
       tools: npm ? [node] : [],
     };
     const { role, feature, files: task } = request;
-    const input = { role, paths, feature, files: task, factory, mcp };
+    const input = { role, paths, feature, files: task, tests: at.tests, factory, mcp };
     const settings = renderSessionSettings(policy, input);
     writeFileSync(files.settings, `${JSON.stringify(settings, null, 2)}\n`, WRITE_ONCE);
     writeFileSync(files.mcp, MCP_JSON, WRITE_ONCE);

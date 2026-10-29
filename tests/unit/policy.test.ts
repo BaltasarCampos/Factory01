@@ -49,7 +49,7 @@ describe('the role permission table (T074, T081)', () => {
       ),
     );
     expect(row('builder').write).toEqual(['{task}']);
-    expect(row('test').write).toEqual(['{task:tests}']);
+    expect(row('test').write).toEqual(['{tests}']);
     // Each Verify and Integrate role writes only its own report; no row has reports/ as a folder.
     expect(row('reviewer').write).toEqual([`${F}/reports/verify.md`]);
     expect(row('security').write).toEqual([`${F}/reports/security.md`]);

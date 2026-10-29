@@ -13,7 +13,7 @@ export const BRANCHES = ['item', 'claude/factory-log', 'claude/define', 'none'] 
 
 export interface RolePolicy {
   tools: (typeof TOOLS)[number][];
-  /** Paths the role may Write or Edit; `{feature}`, `{task}` and `{task:tests}` as in the table. */
+  /** Paths the role may Write or Edit; `{feature}`, `{task}` and `{tests}` as in the table. */
   write: string[];
   /** Command prefixes, as words, that the role's shell may run. */
   shell: string[];

@@ -18,7 +18,7 @@ import { RefusedError } from '../cli/env.js';
 import { deniedWrites, type Policy } from '../guard/policy.js';
 import { isPlainPath } from '../model/naming.js';
 import type { RoleName } from '../model/types.js';
-import { isTestFile } from '../stations/edges.js';
+import { TEST_CONFIG } from '../stations/edges.js';
 import { renderSandbox, type SandboxSettings, type SessionPaths } from './sandbox.js';
 import { deniedTools, MCP_TOOLS, type Settings } from './settings.js';
 
@@ -35,6 +35,8 @@ export interface SessionInput {
   feature: string;
   /** The task's files, or a conflict session's conflicted files. */
   files: readonly string[];
+  /** The test files the clone had at launch, which Test may not change (T070). */
+  tests: readonly string[];
   /** The installed factory's own settings, never the release the branch pins. */
   factory: Settings;
   /** The factory MCP tools the role file names, as `mcp__factory__<tool>`. */
@@ -53,7 +55,8 @@ function writable(policy: Policy, { role, feature, files }: SessionInput): strin
     throw new RefusedError(`task file ${JSON.stringify(bad)} is not a plain path`);
   return policy.roles[role].write.flatMap((pattern) => {
     if (pattern === '{task}') return [...files];
-    if (pattern === '{task:tests}') return files.filter((file) => isTestFile(file));
+    // A new test file, by the installed release's patterns; the existing ones are denied.
+    if (pattern === '{tests}') return TEST_CONFIG.include;
     if (pattern.includes('{feature}') && feature === '')
       throw new RefusedError(`${role} writes in a feature folder, and the session has none`);
     return [pattern.replaceAll('{feature}', feature)];
@@ -86,6 +89,11 @@ export function renderSessionSettings(policy: Policy, input: SessionInput): Sess
     ...deniedTools(policy, role),
     // With --agent a session has only the MCP tools its role file names; denied as well.
     ...factoryTools.filter((tool) => !input.mcp.includes(tool)),
+    ...(policy.roles[role].write.includes('{tests}')
+      ? [...TEST_CONFIG.exclude, ...input.tests].map(
+          (path) => `Edit(${rulePath(path, paths.clone)})`,
+        )
+      : []),
     ...deniedWrites(policy, role).map((path) => `Edit(${rulePath(path, paths.clone)})`),
     ...policy.denyRead.map((path) => `Read(${rulePath(path, paths.clone)})`),
     ...shell.deny,

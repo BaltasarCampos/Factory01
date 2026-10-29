@@ -7,7 +7,7 @@ The pull request changes these files:
 {{changed}}
 
 Write only your own role's output, as your role file says: the Reviewer
-`{{feature}}/reports/verify.md`, Security `{{feature}}/reports/security.md`, and Test only the
-test files `{{feature}}/.station.json` names. CI, coverage and scan results come from the
+`{{feature}}/reports/verify.md`, Security `{{feature}}/reports/security.md`, and Test only new
+test files (`tests/**/*.test.ts`); never change an existing test. CI, coverage and scan results come from the
 required check runs; never write them. Write your result before you end your session or wait on
 the Owner.

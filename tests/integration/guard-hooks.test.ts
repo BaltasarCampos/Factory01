@@ -325,6 +325,26 @@ describe('the guard hooks (T086)', () => {
     }
   });
 
+  it('let Test create new test files and edit them again, never a test the clone had at launch or a helper (T070)', async () => {
+    const at = setUp({ role: 'test', station: 5, files: [], tests: ['tests/login.test.ts'] });
+    mkdirSync(join(at.clone, 'tests/helpers'), { recursive: true });
+    writeFileSync(join(at.clone, 'tests/login.test.ts'), 't');
+    const write = (tool: string, path: string) => hook('path-guard', at, tool, { file_path: path });
+    expect(await write('Write', 'tests/x.test.ts')).toEqual({ code: 0, stderr: '' });
+    writeFileSync(join(at.clone, 'tests/x.test.ts'), 'x');
+    expect(await write('Edit', 'tests/x.test.ts')).toEqual({ code: 0, stderr: '' });
+    for (const [tool, path] of [
+      ['Edit', 'tests/login.test.ts'],
+      ['Write', 'tests/login.test.ts'],
+      ['Write', 'tests/helpers/x.ts'],
+      ['Write', 'src/login.ts'],
+    ] as const) {
+      const result = await write(tool, path);
+      expect(result.code, `${tool} ${path}`).toBe(2);
+      expect(result.stderr, path).toMatch(/not a file the test role writes/);
+    }
+  });
+
   it('block a field that is present but not a string, rather than reading it as absent', async () => {
     const at = setUp();
     for (const [event, tool, input] of [

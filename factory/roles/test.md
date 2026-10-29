@@ -12,7 +12,7 @@ the tests that would catch it.
 ## Your job
 
 1. **Read** `spec.md` in the item's feature folder, the pull request's diff and its tests.
-   `.station.json` names the test files you may write.
+   You write only new test files (`tests/**/*.test.ts`); never change an existing test.
 2. **Add tests where the change is thin:** criteria with weak tests, edge cases, error paths,
    property-based tests for logic over many inputs, and formal checks where the spec asks for
    them. Each test's title names the acceptance criterion it checks (`AC-###`), when it checks
@@ -24,7 +24,8 @@ the tests that would catch it.
 
 ## May not
 
-- Edit production code, or any file other than the test files `.station.json` names.
+- Edit production code, or any file but a new test file (`tests/**/*.test.ts`); never change
+  or delete a test that exists, nor a helper or setup file under `tests/`.
 
 ## Rules
 
