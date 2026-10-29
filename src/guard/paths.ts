@@ -50,6 +50,15 @@ export const deniedRead = (policy: Policy, home: string, path: string) => {
   );
 };
 
+/** The kernel's folders: `/proc/<pid>/environ` shows a session's environment, its gh token too. */
+const SYSTEM = ['/proc', '/sys', '/dev'];
+
+/** The kernel folder holding the absolute `path`, `/dev/null` aside; undefined for none (T061). */
+export const systemFolder = (path: string) =>
+  path === '/dev/null'
+    ? undefined
+    : SYSTEM.find((folder) => path === folder || inside(folder, path) !== undefined);
+
 /** `path` relative to the folder `root`, or undefined when it is not inside it. */
 export const inside = (root: string, path: string) => {
   const relative = posix.relative(root, path);

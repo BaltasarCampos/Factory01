@@ -99,7 +99,7 @@ function checkOpened(policy: Policy, paths: SessionPaths) {
         throw new RefusedError(`${outer} holds the opened folder ${inner}`);
 }
 
-/** Whether the role's shell runs `gh`, which gets the project's comment-only token (T061). */
+/** Whether the role's shell runs `gh`, which gets the project's gh token (T061). */
 export const runsGh = (policy: Policy, role: RoleName) =>
   policy.roles[role].shell.some((prefix) => prefix.startsWith('gh '));
 

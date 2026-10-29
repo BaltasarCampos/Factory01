@@ -9,7 +9,8 @@
 // guard, and the role's own deny list, the other MCP tools included. It also keeps out every
 // `CLAUDE.md` a session would otherwise load from the folders above its clone, the Owner's own
 // and any under `node_modules` (A5-2), and carries every key of the installed factory's own
-// settings, its full hook set included, so nothing depends on the release a branch pins.
+// settings, its full hook set included, so nothing depends on the release a branch pins; only
+// its allow list is left out, so every allowed rule is the role's own.
 //
 // Rule paths are absolute (`//<path>`): a `/<path>` rule is read from the settings file's own
 // folder, which here is not the clone.
@@ -95,20 +96,22 @@ export function renderSessionSettings(policy: Policy, input: SessionInput): Sess
         )
       : []),
     ...deniedWrites(policy, role).map((path) => `Edit(${rulePath(path, paths.clone)})`),
+    // A secret at any depth, such as `**/.env*`, as the path guard refuses it: a task may list one.
+    ...policy.denyRead.filter((path) => !path.startsWith('~/')).map((path) => `Edit(${path})`),
     ...policy.denyRead.map((path) => `Read(${rulePath(path, paths.clone)})`),
     ...shell.deny,
     ...policy.denyShell.map((command) => `Bash(${command} *)`),
   ];
   // Every key of the factory's own settings, so nothing depends on the release the branch pins:
-  // the rest win by precedence over the project's, and lists merge, which only adds.
+  // the rest win by precedence over the project's, and the deny list merges, which only adds. The
+  // allow list is the role's own alone: one a later release adds to would reach every role.
   const { permissions: base, ...factory } = input.factory;
-  const merged = (rules: string[], more: string[]) => [...new Set([...rules, ...more])];
   return {
     ...factory,
     ...sandbox,
     permissions: {
-      allow: merged(base.allow, allow),
-      deny: merged(base.deny, deny),
+      allow: [...new Set(allow)],
+      deny: [...new Set([...base.deny, ...deny])],
       blockReadsOutsideWorkingDirectories: true,
     },
     claudeMdExcludes: [

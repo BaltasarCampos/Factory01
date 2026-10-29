@@ -118,7 +118,7 @@ describe('the sandbox settings for session shells (T183)', () => {
     expect(hosts.release).toEqual([]);
   });
 
-  it('gives the comment-only gh token only to roles with gh in their shell, and no other credential', () => {
+  it("gives the project's gh token only to roles with gh in their shell, and no other credential", () => {
     for (const role of ROLES) {
       const denied = sandbox(role).sandbox.credentials.envVars.map((v) => v.name);
       expect(denied, role).toEqual(

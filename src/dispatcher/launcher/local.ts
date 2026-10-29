@@ -33,9 +33,12 @@
 //
 // The session's environment is an allowlist, never the Owner's minus a list: their shell may hold
 // their own GitHub token, cloud keys or `ANTHROPIC_API_KEY`, which would also bill the session to
-// the API instead of the Owner's plan. A role with `gh` in its shell gets only the project's
-// comment-only token, which the Owner saves under `~/.factory/tokens/`; without it the role does
-// not start, and it never falls back to the Owner's own `gh` login, which can push.
+// the API instead of the Owner's plan. A role with `gh` in its shell gets only the project's gh
+// token, which the Owner saves under `~/.factory/tokens/`: a fine-grained token for the repository
+// only, with Issues read and write, Pull requests read and write, Contents read-only and Metadata
+// read-only, expiring soon after the run. GitHub has no comment-only permission, so it can also
+// change labels and close issues, which is why gates rest on signed records. Without it the role
+// does not start, and it never falls back to the Owner's own `gh` login, which can push.
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -49,7 +52,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
-import { roleVersion } from '../../events/schema.js';
+import { isFable, roleVersion } from '../../events/schema.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
@@ -109,8 +112,12 @@ const WRITE_ONCE = { flag: 'wx', mode: 0o600 } as const;
  * settings besides, only the factory's MCP server and `dontAsk`, so a tool call no rule allows is
  * refused; never auto mode, a resume or a skipped permission check.
  */
-export const localInvocation = (request: LaunchRequest, files: SessionFiles): readonly string[] => [
-  ...['-p', '--agent', request.role, '--model', 'sonnet', '--output-format', 'json'],
+export const localInvocation = (
+  request: LaunchRequest,
+  files: SessionFiles,
+  model: string,
+): readonly string[] => [
+  ...['-p', '--agent', request.role, '--model', model, '--output-format', 'json'],
   ...['--session-id', files.id, '--settings', files.settings, '--setting-sources', 'project'],
   ...['--strict-mcp-config', '--mcp-config', files.mcp, '--permission-mode', 'dontAsk'],
   request.prompt,
@@ -131,11 +138,23 @@ function expectedFeature(request: LaunchRequest): string | undefined {
   return dir?.startsWith(`specs/${String(request.item)}-`) === true ? dir : undefined;
 }
 
-/** Where the Owner saves the project's comment-only token, never their own `gh` login's. */
+/** Where the Owner saves the project's gh token, never their own `gh` login's. */
 const tokenFile = (home: string, repo: string) =>
   join(home, '.factory', 'tokens', ...repo.split('/'));
 /** A fine-grained token; the `gh` login's (`gho_`) and a classic one (`ghp_`) are not. */
 const FINE_GRAINED = /^github_pat_[A-Za-z0-9_]+$/;
+/** The project's gh token as the Owner sets it up, in the words the header above uses. */
+const tokenSetup = (repo: string) =>
+  `a fine-grained token for ${repo} only, with Issues read and write, Pull requests read and write, Contents read-only and Metadata read-only, expiring soon after the run. GitHub has no comment-only permission, so it can also change labels and close issues, which is why gates rest on signed records`;
+/** A model name, which cannot read as an option. */
+const MODEL = /^[a-z0-9][a-z0-9.[\]-]*$/i;
+
+/** The model a role file's frontmatter names; none for a missing, Fable or odd one (T078). */
+function roleModel(text: string): string | undefined {
+  const front = /^---\n([\s\S]*?)\n---/.exec(text)?.[1] ?? '';
+  const model = /^model: *(.*)$/m.exec(front)?.[1]?.trim();
+  return model !== undefined && MODEL.test(model) && !isFable(model) ? model : undefined;
+}
 /** The roles that run without the advisor (T097). */
 const NO_ADVISOR: ReadonlySet<string> = new Set(['intake', 'test']);
 
@@ -435,7 +454,7 @@ export class LocalLauncher implements SessionLauncher {
         this.config(request.project, heads.main),
       );
       const token = runsGh(factoryPolicy(), request.role)
-        ? step('reading the comment-only token', () => this.ghToken(request.role, repo))
+        ? step("reading the project's gh token", () => this.ghToken(request.role, repo))
         : undefined;
       const files = step("making the session's folder", () => this.sessionFolder());
       const cwd = step("making the session's clone", () =>
@@ -466,6 +485,13 @@ export class LocalLauncher implements SessionLauncher {
         throw new LaunchRefused(
           `no local session started: ${request.branch} has no .claude/agents/${request.role}.md`,
         );
+      // One value, matched to the release with the role file, for --model and the record.
+      const role = readFileSync(roleFile);
+      const model = roleModel(role.toString('utf8'));
+      if (model === undefined)
+        throw new LaunchRefused(
+          `no local session started: ${request.branch}'s .claude/agents/${request.role}.md names no model a session may run`,
+        );
       // git's identity in the clone's own config: the session's git reads no global config.
       step("setting git's identity in the session's clone", () => {
         this.isolated(cwd, ['config', 'user.name', `Factory ${request.role}`]);
@@ -481,8 +507,8 @@ export class LocalLauncher implements SessionLauncher {
           this.writeSettings(request, files, { clone: cwd, tmp, tests });
           const record = {
             ...{ role: request.role, item: request.item, station: request.station },
-            ...{ feature: request.feature, files: request.files, clone: cwd, model: 'sonnet' },
-            role_version: roleVersion(manifest.release, readFileSync(roleFile)),
+            ...{ feature: request.feature, files: request.files, clone: cwd, model },
+            role_version: roleVersion(manifest.release, role),
             ...{
               repo,
               inbox_issue,
@@ -493,7 +519,10 @@ export class LocalLauncher implements SessionLauncher {
           };
           writeFileSync(files.record, `${JSON.stringify(record, null, 2)}\n`, WRITE_ONCE);
         });
-        const result = await this.run('claude', localInvocation(request, files), { cwd, env });
+        const result = await this.run('claude', localInvocation(request, files, model), {
+          cwd,
+          env,
+        });
         if (result.status !== 0)
           throw new EnvironmentError(
             `claude exited ${String(result.status)}: ${result.stderr.trim()}`,
@@ -517,17 +546,17 @@ export class LocalLauncher implements SessionLauncher {
     }
   }
 
-  /** The project's comment-only token, for a role with `gh` in its shell. */
+  /** The project's gh token, for a role with `gh` in its shell. */
   private ghToken(role: RoleName, repo: string): string {
     const file = tokenFile(this.options.home, repo);
     const token = existsSync(file) ? readFileSync(file, 'utf8').trim() : undefined;
     if (token === undefined)
       throw new LaunchRefused(
-        `no local session started: ${role} runs gh, and no comment-only token is set up for ${repo}: save a fine-grained token for ${repo} alone, allowed only to comment on its issues and pull requests, in ${file}; a session never gets your own gh login`,
+        `no local session started: ${role} runs gh, and no gh token is set up for ${repo}: save in ${file} ${tokenSetup(repo)}. A session never gets your own gh login`,
       );
     if (!FINE_GRAINED.test(token))
       throw new LaunchRefused(
-        `no local session started: ${file} holds no fine-grained token (github_pat_…); save the comment-only token for ${repo} there`,
+        `no local session started: ${file} holds no fine-grained token (github_pat_…); save there ${tokenSetup(repo)}`,
       );
     return token;
   }

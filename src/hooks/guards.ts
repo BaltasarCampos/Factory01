@@ -79,7 +79,7 @@ function decide(kind: GuardKind, r: SessionRecord, input: HookInput, home: strin
     const command = text(t.command);
     return command === undefined
       ? missing('command')
-      : checkBash(policy, { role: r.role, command, cwd, home });
+      : checkBash(policy, { role: r.role, command, ...places });
   }
   if (kind === 'path-guard') {
     const path = text(t.file_path);

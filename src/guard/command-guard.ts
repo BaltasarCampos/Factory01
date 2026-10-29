@@ -11,13 +11,15 @@
 // in any form, `deny_shell`, a rewrite in any form, the role's `blocked` prefixes, `xargs` into git
 // or gh, an `owner:` or `state:` label added or removed or a `pause:` label removed, an option
 // that writes a file or runs a program, any program's, and a path no session may read, `~` after
-// `=` or `:` as home; the Reviewer's `git diff` must leave out the event logs. Last the role's
-// shell column, by prefix. An empty line is refused. Every reason says what to do instead, so a
-// session does not retry the same refused shape, and goes through `visible()`, since it quotes the
-// session's own command.
+// `=` or `:` as home, `/proc`, `/sys` and `/dev` among them, since they show the session's
+// environment and its gh token; gh's options that read a file only for one in the clone; `npm
+// run env`; Test's snapshot updates; the Reviewer's `git diff` must leave out the event logs. Last
+// the role's shell column, by prefix. An empty line is refused. Every reason says what to do
+// instead, so a session does not retry the same refused shape, and goes through `visible()`, since
+// it quotes the session's own command.
 import { visible } from '../notify/summary.js';
 import { ROLES, type RoleName } from '../model/types.js';
-import { absolute, deniedRead } from './paths.js';
+import { absolute, deniedRead, inside, PathError, realPath, systemFolder } from './paths.js';
 import type { Policy } from './policy.js';
 import { tokenize, type Redirection, type SimpleCommand } from './tokenizer.js';
 
@@ -40,6 +42,7 @@ export type CommandRule =
   | 'label'
   | 'option'
   | 'read'
+  | 'environment'
   | 'pathspec'
   | 'allowlist';
 
@@ -199,9 +202,10 @@ function gitWords(words: string[]): string[] {
   return ['git', ...rest];
 }
 
-/** Where the session runs: the hook input's `cwd`, and the home folder `~` stands for. */
+/** Where the session runs: the hook input's `cwd`, its clone and the home folder `~` stands for. */
 interface Places {
   cwd: string;
+  clone: string;
   home: string;
 }
 
@@ -258,15 +262,62 @@ function checkOptions(words: string[]) {
   }
 }
 
-/** A path no session may read, in a word or after its `=` or `:`, `~` there as home. */
+/**
+ * A path no session may read, in a word, after its `=`, `:` or `@` or after a short option's
+ * letter, `~` there as home: `deny_read`, and `/proc`, `/sys` and `/dev`, which show the session's
+ * environment, for every program.
+ */
 function checkReads(policy: Policy, { cwd, home }: Places, words: string[]) {
-  for (const word of words.slice(1))
-    for (const part of [word, ...word.split(/[=:]/).slice(1)]) {
-      const denied = part === '' ? undefined : deniedRead(policy, home, absolute(part, cwd, home));
+  for (const word of words.slice(1)) {
+    const attached = /^-[A-Za-z](.+)$/.exec(word)?.[1];
+    for (const part of [word, ...word.split(/[=:@]/).slice(1), attached ?? '']) {
+      if (part === '') continue;
+      const path = absolute(part, cwd, home);
+      const denied = deniedRead(policy, home, path);
       if (denied !== undefined)
         refuse('read', `${word}, a path no session may read (${denied}); leave it out`);
+      if (systemFolder(path) !== undefined)
+        refuse('read', `${word}: no session reads /proc, /sys or /dev, which show its environment`);
     }
+  }
 }
+
+/**
+ * gh's options that read a file whose text it posts: `--body-file` and `-F` on issue and pr
+ * commands, `--input` and a `-F`/`--field` value `<key>=@<path>` on gh api. The file must be in
+ * the clone, by its named and its real path, so no comment carries a file from elsewhere (T061).
+ */
+function checkGhFiles({ cwd, clone, home }: Places, words: string[]) {
+  if (words[0] !== 'gh') return;
+  const api = words[1] === 'api';
+  words.forEach((word, i) => {
+    const long = /^(--[a-z-]+)(?:=(.*))?$/s.exec(word);
+    const short = /^-F(.*)$/s.exec(word);
+    const reads = api ? ['--input', '--field'] : ['--body-file'];
+    let value = short === null ? undefined : short[1] || words[i + 1];
+    if (long !== null && reads.includes(long[1] ?? '')) value = long[2] ?? words[i + 1];
+    const field = api && long?.[1] !== '--input';
+    const file = field ? /=@(.*)$/s.exec(value ?? '')?.[1] : value;
+    if (file === undefined || file === '-') return;
+    const named = absolute(file, cwd, home);
+    let real: string;
+    try {
+      real = realPath(named);
+    } catch (error) {
+      if (!(error instanceof PathError)) throw error;
+      return refuse('read', `${word}: ${error.message}`);
+    }
+    if ([named, real].some((path) => path !== clone && inside(clone, path) === undefined))
+      refuse('read', `${word}: gh reads ${file}, outside the repository; give a file inside it`);
+  });
+}
+
+/** Test's runs that update snapshots: `-u` or `--update` rewrite existing ones (T070). */
+const updatesSnapshots = (words: string[]) =>
+  words.slice(1).some((word) => {
+    const name = word.split('=')[0] ?? '';
+    return name === '--update' || name === '--u' || cluster(word).includes('u');
+  });
 
 function checkCommand(policy: Policy, role: RoleName, places: Places, command: SimpleCommand) {
   if (command.then === '&')
@@ -325,6 +376,18 @@ function checkCommand(policy: Policy, role: RoleName, places: Places, command: S
   checkLabels(words);
   checkOptions(words);
   checkReads(policy, places, words);
+  checkGhFiles(places, words);
+  if (words[0] === 'npm' && ['run', 'run-script', 'rum', 'urn'].includes(sub))
+    if (words.slice(2).includes('env'))
+      refuse(
+        'environment',
+        `${shown}: npm run env prints the environment, which holds the session's credentials; run a script from package.json`,
+      );
+  if (role === 'test' && updatesSnapshots(words))
+    refuse(
+      'option',
+      `${shown}: -u and --update rewrite existing snapshots, which Test may not change; run the tests without them`,
+    );
   if (role === 'reviewer' && startsWith(words, 'git diff')) {
     const after = words.slice(words.indexOf('--') + 1);
     if (!words.includes('--') || !EXCLUDES.every((pathspec) => after.includes(pathspec)))

@@ -28,14 +28,17 @@ const named = (role: RoleName) => {
   return tools.filter((tool) => tool.startsWith('mcp__factory__'));
 };
 
-const render = (role: RoleName, more: { feature?: string; files?: string[] } = {}) =>
+const render = (
+  role: RoleName,
+  more: { feature?: string; files?: string[]; factory?: Settings } = {},
+) =>
   renderSessionSettings(policy, {
     role,
     paths,
     feature: more.feature ?? FEATURE,
     files: more.files ?? FILES,
     tests: ['tests/login.test.ts'],
-    factory: project,
+    factory: more.factory ?? project,
     mcp: named(role),
   });
 
@@ -45,7 +48,7 @@ describe('the per-session settings (T061, T082)', () => {
     expect(project.hooks.PreToolUse[0]?.matcher).toBe('*');
   });
 
-  it("carries every key of the installed factory's settings, its permissions merged with the role's", () => {
+  it("carries every key of the installed factory's settings, its denials merged with the role's", () => {
     for (const role of ROLES) {
       const settings = render(role) as unknown as Record<string, unknown>;
       for (const [key, value] of Object.entries(project)) {
@@ -54,7 +57,6 @@ describe('the per-session settings (T061, T082)', () => {
           continue;
         }
         const { allow, deny } = render(role).permissions;
-        expect(allow, role).toEqual(expect.arrayContaining(project.permissions.allow));
         expect(deny, role).toEqual(expect.arrayContaining(project.permissions.deny));
         expect(new Set(allow).size, role).toBe(allow.length);
         expect(new Set(deny).size, role).toBe(deny.length);
@@ -82,7 +84,6 @@ describe('the per-session settings (T061, T082)', () => {
   it("allows each role's own tools and the factory's MCP tools, never relying on the project's allow list", () => {
     for (const role of ROLES) {
       const { allow } = render(role).permissions;
-      for (const rule of project.permissions.allow) expect(allow, role).toContain(rule);
       for (const tool of ['ToolSearch', 'WaitForMcpServers']) expect(allow, role).toContain(tool);
       for (const tool of policy.roles[role].tools) {
         const covered =
@@ -94,6 +95,33 @@ describe('the per-session settings (T061, T082)', () => {
         expect(covered, `${role} ${tool}`).toBe(true);
       }
     }
+  });
+
+  it("allows only the role's own rules, never the factory settings' allow list", () => {
+    const more = ['WebFetch', 'mcp__factory__advance_item', 'Bash(curl *)', 'Edit(//etc/**)'];
+    const factory = { ...project, permissions: { ...project.permissions, allow: more } };
+    for (const role of ROLES) {
+      const row = policy.roles[role];
+      const own = (rule: string) => {
+        const bash = /^Bash\((.*?)(?: \*)?\)$/.exec(rule)?.[1];
+        if (bash !== undefined) return row.shell.includes(bash);
+        if (rule.startsWith('Edit(')) return rule.startsWith(`Edit(/${CLONE}/`);
+        const tools = [...row.tools, ...Object.keys(policy.keepTools), ...named(role)];
+        return tools.includes(rule) && rule !== 'Bash' && rule !== 'Write' && rule !== 'Edit';
+      };
+      const { allow } = render(role, { factory }).permissions;
+      for (const rule of allow) expect(own(rule), `${role} ${rule}`).toBe(true);
+      for (const rule of more.filter((r) => !named(role).includes(r)))
+        expect(allow, role).not.toContain(rule);
+    }
+  });
+
+  it('denies edits of every file deny_read names at any depth, even one the task lists', () => {
+    const { deny } = render('builder', { files: ['.env.local'] }).permissions;
+    expect(deny).toContain('Edit(**/.env*)');
+    for (const role of ROLES)
+      for (const pattern of policy.denyRead.filter((p) => !p.startsWith('~/')))
+        expect(render(role).permissions.deny, role).toContain(`Edit(${pattern})`);
   });
 
   it("allows edits of exactly the session's writable paths, by absolute path in the clone", () => {

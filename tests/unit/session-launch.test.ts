@@ -75,7 +75,7 @@ const GUARDED = {
   '.claude/agents/spec.md': roleFile('spec'),
   '.claude/agents/intake.md': roleFile('intake'),
 };
-/** The project's comment-only token, which only roles with `gh` in their shell get. */
+/** The project's gh token, which only roles with `gh` in their shell get. */
 const TOKEN = `github_pat_${'1'.repeat(22)}_${'a'.repeat(59)}`;
 const tokenFile = (home: string) => join(home, '.factory', 'tokens', 'owner', 'project');
 /** The session's record, as the launcher wrote it. */
@@ -92,7 +92,7 @@ function setup(
     mainFiles?: Record<string, string | null>;
     release?: (pin: ReleasePin) => GuardrailManifest;
     env?: NodeJS.ProcessEnv;
-    /** The project's comment-only token in `~/.factory/tokens/`; null for none. */
+    /** The project's gh token in `~/.factory/tokens/`; null for none. */
     token?: string | null;
   } = {},
 ) {
@@ -155,7 +155,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     const clone = work(t.home, '42-add-login');
     expect(launch?.cwd).toBe(clone);
     const request = { ...REQUEST, project: t.repo.path };
-    expect(launch?.args).toEqual(localInvocation(request, sessionFiles(t.home)));
+    expect(launch?.args).toEqual(localInvocation(request, sessionFiles(t.home), 'sonnet'));
     expect(launch?.env).toMatchObject({ FACTORY_ITEM: '42', FACTORY_STATION: '2' });
     // The release's commands take the feature folder from the prompt (T171, T172).
     expect(launch?.env).not.toHaveProperty('SPECIFY_FEATURE');
@@ -415,7 +415,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(runGit(clone, ['config', '--local', 'user.email'])).toBe('spec@factory.invalid');
   });
 
-  it("gives a role with gh in its shell the project's comment-only token, never the Owner's", async () => {
+  it("gives a role with gh in its shell the project's gh token, never the Owner's", async () => {
     const owners = { GH_TOKEN: 'gho_owner', GITHUB_TOKEN: 'ghs_owner' };
     const t = setup({ env: { ...gitEnv, ...owners } });
 
@@ -445,8 +445,42 @@ describe('LocalLauncher (research R8, R9)', () => {
 
     await expect(refused).rejects.toThrow(LaunchRefused);
     await expect(refused).rejects.toThrow(tokenFile(t.home));
+    // GitHub has no comment-only permission: the setup names the token's real ones.
+    await expect(refused).rejects.toThrow(
+      /owner\/project only, with Issues read and write, Pull requests read and write, Contents read-only and Metadata read-only, expiring soon after the run/,
+    );
+    await expect(refused).rejects.toThrow(
+      /can also change labels and close issues, which is why gates rest on signed records/,
+    );
     expect(t.sessions()).toEqual([]);
     expect(existsSync(join(t.home, 'factory-work'))).toBe(false);
+  });
+
+  it('launches the model the role file names, one value for --model and the record', async () => {
+    const spec = roleFile('spec').replace('model: sonnet', 'model: opus');
+    const files = { ...GUARDED, '.claude/agents/spec.md': spec };
+    const t = setup({ mainFiles: files, release: () => manifestOf(files) });
+
+    await t.launch(REQUEST);
+
+    const args = t.sessions()[0]?.args ?? [];
+    expect(args[args.indexOf('--model') + 1]).toBe('opus');
+    expect(recordOf(t.home).model).toBe('opus');
+  });
+
+  it.each([
+    ['names no model', roleFile('spec').replace('model: sonnet\n', '')],
+    ['names a Fable model', roleFile('spec').replace('model: sonnet', 'model: fable')],
+    ['names a model that reads as an option', roleFile('spec').replace('sonnet', '--debug')],
+  ])('refuses a role file that %s, running nothing', async (_name, spec) => {
+    const files = { ...GUARDED, '.claude/agents/spec.md': spec };
+    const t = setup({ mainFiles: files, release: () => manifestOf(files) });
+
+    const refused = t.launch(REQUEST);
+
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(/\.claude\/agents\/spec\.md names no model/);
+    expect(t.sessions()).toEqual([]);
   });
 
   it('refuses a role whose role file the clone does not have, running nothing', async () => {
