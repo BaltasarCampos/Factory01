@@ -75,6 +75,9 @@ function setUp(record: Record<string, unknown> = {}, { passed = true } = {}) {
     role_version: VERSION,
     repo: 'owner/project',
     inbox_issue: 1,
+    branch: 'claude/42-add-login',
+    head: 'c'.repeat(40),
+    tests: [],
   };
   write(
     join(home, '.factory/sessions', SESSION, 'session.json'),
@@ -254,6 +257,9 @@ describe('the guard hooks (T086)', () => {
       ['role_version', 5],
       ['repo', 'owner/project/../x'],
       ['inbox_issue', 0],
+      ['branch', ''],
+      ['head', 'HEAD'],
+      ['tests', 'tests/login.test.ts'],
     ] as const) {
       const at = setUp({ [field]: value });
       const result = await hook('command-guard', at, 'Bash', { command: 'npm test' });
@@ -316,6 +322,26 @@ describe('the guard hooks (T086)', () => {
       const record = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
       writeFileSync(path, JSON.stringify({ ...record, role, station }));
       expect(readSessionRecord(at.home, SESSION), role).toMatchObject({ role, station });
+    }
+  });
+
+  it('let Test create new test files and edit them again, never a test the clone had at launch or a helper (T070)', async () => {
+    const at = setUp({ role: 'test', station: 5, files: [], tests: ['tests/login.test.ts'] });
+    mkdirSync(join(at.clone, 'tests/helpers'), { recursive: true });
+    writeFileSync(join(at.clone, 'tests/login.test.ts'), 't');
+    const write = (tool: string, path: string) => hook('path-guard', at, tool, { file_path: path });
+    expect(await write('Write', 'tests/x.test.ts')).toEqual({ code: 0, stderr: '' });
+    writeFileSync(join(at.clone, 'tests/x.test.ts'), 'x');
+    expect(await write('Edit', 'tests/x.test.ts')).toEqual({ code: 0, stderr: '' });
+    for (const [tool, path] of [
+      ['Edit', 'tests/login.test.ts'],
+      ['Write', 'tests/login.test.ts'],
+      ['Write', 'tests/helpers/x.ts'],
+      ['Write', 'src/login.ts'],
+    ] as const) {
+      const result = await write(tool, path);
+      expect(result.code, `${tool} ${path}`).toBe(2);
+      expect(result.stderr, path).toMatch(/not a file the test role writes/);
     }
   });
 

@@ -85,7 +85,12 @@ function decide(kind: GuardKind, r: SessionRecord, input: HookInput, home: strin
     const path = text(t.file_path);
     return path === undefined
       ? missing('file_path')
-      : checkWrite(policy, { role: r.role, path, ...places, feature: r.feature, files: r.files });
+      : checkWrite(policy, {
+          role: r.role,
+          path,
+          ...places,
+          ...{ feature: r.feature, files: r.files, tests: r.tests },
+        });
   }
   const path = text(tool === 'Read' ? t.file_path : t.path);
   if (tool === 'Read' && path === undefined) return missing('file_path');

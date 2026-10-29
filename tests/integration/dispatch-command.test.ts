@@ -39,6 +39,8 @@ interface Setup {
   settings?: string;
   /** `.claude/settings.json` on an item branch pushed before the pass. */
   branchSettings?: string;
+  /** More files on main, such as the role file a launched session runs. */
+  mainFiles?: Record<string, string>;
   /** Keys the pinned factory commit's own allowed_signers lists before the Owner's newest. */
   releaseSigners?: TestKeys[];
 }
@@ -62,6 +64,7 @@ function setup(options: Setup = {}) {
   const files = {
     '.factory/config': config,
     ...(options.settings === undefined ? {} : { '.claude/settings.json': options.settings }),
+    ...options.mainFiles,
   };
   const project = makeRepo({ files, signWith: owner });
   mergeBrief(project, { signWith: owner });
@@ -230,8 +233,10 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
   });
 
   it('with hooks matching the pinned release, the session runs in its own clone and the Owner’s checkout is unchanged', async () => {
-    const t = setup({ settings: HOOKED_SETTINGS });
-    const local = t.realLocal(manifestOf({ '.claude/settings.json': HOOKED_SETTINGS }));
+    // The role file the session runs, which the release installs.
+    const role = { '.claude/agents/spec.md': '---\nname: spec\nmodel: sonnet\n---\nSpec.\n' };
+    const t = setup({ settings: HOOKED_SETTINGS, mainFiles: role });
+    const local = t.realLocal(manifestOf({ '.claude/settings.json': HOOKED_SETTINGS, ...role }));
     const before = t.checkout();
 
     const r = await t.cli(['dispatch'], { launchers: { local } });
@@ -239,7 +244,8 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
     expect(r.stdout).toContain(
       `started spec (station 2) for #2 on ${BRANCH}: local session ${SESSION_ID}`,
     );
-    const worktree = join(realpathSync(t.home), 'factory-work', 'owner', 'project', '2-add-login');
+    const clone = `2-add-login-${SESSION_ID}`;
+    const worktree = join(realpathSync(t.home), 'factory-work', 'owner', 'project', clone);
     expect(t.sessions.filter((s) => s.args[0] === '-p').map((s) => s.cwd)).toEqual([worktree]);
     expect(t.checkout()).toEqual(before);
     expect(t.inbox()).toEqual([]);

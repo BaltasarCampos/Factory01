@@ -61,9 +61,10 @@ const sandboxPath = (path: string, clone: string) =>
   path.startsWith('~/') ? path.replace(/\/\*\*$/, '') : `${clone}/${path}`;
 
 /** Temporary folders every process on the machine shares; only the session's own is opened. */
-const SHARED_TMP = ['/tmp', '/var/tmp', '/dev/shm'];
+export const SHARED_TMP = ['/tmp', '/var/tmp', '/dev/shm'];
 
-const under = (path: string, folder: string) => path === folder || path.startsWith(`${folder}/`);
+export const under = (path: string, folder: string) =>
+  path === folder || path.startsWith(`${folder}/`);
 
 /**
  * Refuses an opened folder that would open home or a shared temporary folder, or re-open a path
@@ -98,6 +99,10 @@ function checkOpened(policy: Policy, paths: SessionPaths) {
         throw new RefusedError(`${outer} holds the opened folder ${inner}`);
 }
 
+/** Whether the role's shell runs `gh`, which gets the project's comment-only token (T061). */
+export const runsGh = (policy: Policy, role: RoleName) =>
+  policy.roles[role].shell.some((prefix) => prefix.startsWith('gh '));
+
 /** The `--settings` file for a session of `role` working at `paths`. */
 export function renderSandbox(
   policy: Policy,
@@ -106,8 +111,7 @@ export function renderSandbox(
 ): SandboxSettings {
   const row = policy.roles[role];
   checkOpened(policy, paths);
-  const gh = row.shell.some((prefix) => prefix.startsWith('gh '));
-  const denied = gh ? CREDENTIALS : ['GH_TOKEN', ...CREDENTIALS];
+  const denied = runsGh(policy, role) ? CREDENTIALS : ['GH_TOKEN', ...CREDENTIALS];
   return {
     sandbox: {
       enabled: true,

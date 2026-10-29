@@ -5,7 +5,8 @@
 // guardrail files, the station manifest and the event logs, nor the relative `deny_read` patterns
 // such as `.env*`, compared lower-cased. Then only the role's `write` patterns: `{feature}` is the
 // item's feature folder, `{task}` the manifest's files, compared as written since a session's
-// `tasks.md` lists them, and `{task:tests}` those that are test files. The Builder never writes
+// `tasks.md` lists them, and `{tests}` a new test file, by the installed release's patterns, never
+// one the session's record lists as there at launch, so Test only adds tests. The Builder never writes
 // `tasks.md`, which the dispatcher ticks (T174). Reasons go through `visible()`.
 import { posix } from 'node:path';
 import { visible } from '../notify/summary.js';
@@ -29,6 +30,8 @@ export interface WriteInput {
   /** From the station manifest: the item's feature folder, `specs/<issue>-<slug>`, and its files. */
   feature: string;
   files: string[];
+  /** From the session's record: the test files the clone had at launch. */
+  tests: readonly string[];
 }
 
 class Refused<Rule extends string> extends Error {
@@ -86,13 +89,12 @@ export function checkWrite(policy: Policy, input: WriteInput): GuardDecision<Pat
         `${relative}: the dispatcher ticks tasks.md; the Builder never writes it`,
       );
     const files = input.files.map((file) => posix.normalize(file).replace(/^\.\//, ''));
-    const tests = files.filter((file) => isTestFile(file));
     const may = (path: string) =>
       row.write.some((pattern) =>
         pattern === '{task}'
           ? files.includes(path)
-          : pattern === '{task:tests}'
-            ? tests.includes(path)
+          : pattern === '{tests}'
+            ? isTestFile(path) && !input.tests.includes(path)
             : matchesPath(pattern.replaceAll('{feature}', input.feature), path),
       );
     if (!may(relative) || !may(real))

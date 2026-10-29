@@ -419,7 +419,7 @@ const FILES = [
   'specs/12-x/tasks.md',
   '.github/workflows/x.yml',
 ].concat(['src/.env.local', 'linked/x.ts', 'src/key.ts', 'src/dangling.ts', 'src/**']);
-const write = (role: string, path: string, files = FILES) => {
+const write = (role: string, path: string, files = FILES, tests: string[] = []) => {
   const decision = checkWrite(policy, {
     role,
     path,
@@ -428,6 +428,7 @@ const write = (role: string, path: string, files = FILES) => {
     home,
     feature: 'specs/12-x',
     files,
+    tests,
   });
   return decision.allowed ? 'allowed' : `${decision.rule}: ${decision.reason}`;
 };
@@ -446,6 +447,11 @@ const read = (role: string, tool: ReadInput['tool'], path?: string, glob?: strin
 };
 
 describe('the path guard: each role writes only its own files, inside the clone (T085, T075)', () => {
+  it('lets Test write a new test file, never one the clone had at launch (T070)', () => {
+    expect(write('test', 'tests/b.test.ts', [], ['tests/a.test.ts'])).toBe('allowed');
+    expect(write('test', 'tests/a.test.ts', [], ['tests/a.test.ts'])).toMatch(/^not-writable: /);
+  });
+
   it.each([
     ['builder', 'src/a.ts', /^allowed$/],
     ['builder', join(clone, 'src/a.ts'), /^allowed$/],
@@ -465,6 +471,7 @@ describe('the path guard: each role writes only its own files, inside the clone 
     ],
     ['builder', 'src/x/y.ts', /^not-writable: /],
     ['test', 'src/a.ts', /^not-writable: /],
+    ['test', 'tests/helpers/a.ts', /^not-writable: /],
     [
       'spec',
       'src/a.ts',

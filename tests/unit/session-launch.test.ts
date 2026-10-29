@@ -21,6 +21,8 @@ import {
   type Runner,
 } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, type LaunchRequest } from '../../src/dispatcher/launcher/types.js';
+import { roleVersion } from '../../src/events/schema.js';
+import { readSessionRecord } from '../../src/hooks/session.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
 import { MCP_JSON } from '../../src/install/render.js';
 import type { SessionSettings } from '../../src/install/session-settings.js';
@@ -63,12 +65,24 @@ const sessionIds = () => {
 };
 const FIRST = '0b6c7f3e-2a4d-4c1e-9f00-000000000001';
 
-const DEFINE_ROLE = '---\nname: define\nmodel: sonnet\ntools: Read\nversion: 1\n---\nDefine.\n';
+const roleFile = (role: string) =>
+  `---\nname: ${role}\nmodel: sonnet\ntools: Read\nversion: 1\n---\n`;
+const DEFINE_ROLE = `${roleFile('define')}Define.\n`;
 /** Main's protected files: what the pinned release's manifest lists. */
 const GUARDED = {
   '.claude/settings.json': HOOKED_SETTINGS,
   '.claude/agents/define.md': DEFINE_ROLE,
+  '.claude/agents/spec.md': roleFile('spec'),
+  '.claude/agents/intake.md': roleFile('intake'),
 };
+/** The project's comment-only token, which only roles with `gh` in their shell get. */
+const TOKEN = `github_pat_${'1'.repeat(22)}_${'a'.repeat(59)}`;
+const tokenFile = (home: string) => join(home, '.factory', 'tokens', 'owner', 'project');
+/** The session's record, as the launcher wrote it. */
+const recordOf = (home: string, id = FIRST) =>
+  JSON.parse(
+    readFileSync(join(home, '.factory', 'sessions', id, 'session.json'), 'utf8'),
+  ) as Record<string, unknown>;
 
 /** The Owner's clone, with the release's protected files on main and an item branch on origin. */
 function setup(
@@ -78,6 +92,8 @@ function setup(
     mainFiles?: Record<string, string | null>;
     release?: (pin: ReleasePin) => GuardrailManifest;
     env?: NodeJS.ProcessEnv;
+    /** The project's comment-only token in `~/.factory/tokens/`; null for none. */
+    token?: string | null;
   } = {},
 ) {
   const repo = makeRepo({ files: { '.factory/config': CONFIG, ...GUARDED } });
@@ -94,6 +110,10 @@ function setup(
   repo.checkout('main');
   repo.git(['fetch', '-q', 'origin']);
   const home = homeDir();
+  if (options.token !== null) {
+    mkdirSync(dirname(tokenFile(home)), { recursive: true });
+    writeFileSync(tokenFile(home), `${options.token ?? TOKEN}\n`, { mode: 0o600 });
+  }
   const runner = fakeRunner();
   const launcher = new LocalLauncher({
     ...{ home, env: options.env ?? gitEnv },
@@ -113,12 +133,14 @@ function setup(
   return { repo, home, launch, available, sessions, owner };
 }
 const FACTORY_SETTINGS = new URL('../../factory/settings/settings.json', import.meta.url);
-const work = (home: string, name: string) =>
-  join(realpathSync(home), 'factory-work', 'owner', 'project', name);
+/** The session's clone: a folder of its own for each launch, named with its session id. */
+const work = (home: string, name: string, id = FIRST) =>
+  join(realpathSync(home), 'factory-work', 'owner', 'project', `${name}-${id}`);
 /** The session's own files, in its folder under `~/.factory/sessions/`. */
 const sessionFiles = (home: string, id = FIRST) => {
   const dir = join(home, '.factory', 'sessions', id);
-  return { id, settings: join(dir, 'settings.json'), mcp: join(dir, 'mcp.json') };
+  const at = (name: string) => join(dir, name);
+  return { id, settings: at('settings.json'), mcp: at('mcp.json'), record: at('session.json') };
 };
 
 describe('LocalLauncher (research R8, R9)', () => {
@@ -186,6 +208,21 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(existsSync(tmp)).toBe(false);
   });
 
+  it.each<[string, Partial<LaunchRequest>]>([
+    ['another item’s folder', { feature: 'specs/43-add-login' }],
+    ['a folder outside specs/', { feature: 'src/42-add-login' }],
+    ['a path past the folder', { feature: 'specs/42-add-login/..' }],
+    ['no folder for an item role', { feature: '' }],
+    ['the clone itself', { feature: '.' }],
+    ['a folder for Intake, on a fixed branch', { role: 'intake', station: 1, branch: 'main' }],
+  ])('refuses a feature folder that is not the item branch’s: %s', async (_name, over) => {
+    const t = setup();
+    const refused = t.launch({ ...REQUEST, ...over });
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(/feature folder/);
+    expect(t.sessions()).toEqual([]);
+  });
+
   it('refuses a launch whose session folder already exists, running nothing', async () => {
     const t = setup();
     const folder = dirname(sessionFiles(t.home).settings);
@@ -204,7 +241,7 @@ describe('LocalLauncher (research R8, R9)', () => {
   it('runs Intake in a detached clone of main, with its item and station', async () => {
     const t = setup();
 
-    await t.launch({ ...REQUEST, role: 'intake', station: 1, branch: 'main' });
+    await t.launch({ ...REQUEST, role: 'intake', station: 1, branch: 'main', feature: '' });
 
     const launch = t.sessions().at(-1);
     expect(launch?.cwd).toBe(work(t.home, 'main'));
@@ -214,7 +251,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     );
   });
 
-  it('starts every launch from a fresh clone: files, config and hooks a session left are gone', async () => {
+  it('starts every launch in a fresh clone of its own: files, config and hooks a session left are not in it', async () => {
     const t = setup();
     await t.launch(REQUEST);
     const clone = work(t.home, '42-add-login');
@@ -228,10 +265,13 @@ describe('LocalLauncher (research R8, R9)', () => {
 
     await t.launch(REQUEST);
 
-    expect(existsSync(join(clone, 'left-behind.txt'))).toBe(false);
-    expect(existsSync(join(clone, '.git', 'hooks', 'post-checkout'))).toBe(false);
-    expect(() => runGit(clone, ['config', 'core.hooksPath'])).toThrow();
-    expect(runGit(clone, ['rev-parse', 'HEAD'])).toBe(runGit(other, ['rev-parse', 'HEAD']));
+    // Another folder, so no path the Owner once trusted in Claude Code is a later session's.
+    const second = work(t.home, '42-add-login', '0b6c7f3e-2a4d-4c1e-9f00-000000000002');
+    expect(t.sessions().map((s) => s.cwd)).toEqual([clone, second]);
+    expect(existsSync(join(second, 'left-behind.txt'))).toBe(false);
+    expect(existsSync(join(second, '.git', 'hooks', 'post-checkout'))).toBe(false);
+    expect(() => runGit(second, ['config', 'core.hooksPath'])).toThrow();
+    expect(runGit(second, ['rev-parse', 'HEAD'])).toBe(runGit(other, ['rev-parse', 'HEAD']));
   });
 
   it.each([
@@ -277,7 +317,8 @@ describe('LocalLauncher (research R8, R9)', () => {
     async (branch) => {
       const t = setup();
       await expect(t.launch({ ...REQUEST, branch })).rejects.toThrow(/not a session branch/);
-      expect(existsSync(join(t.home, '.factory'))).toBe(false);
+      expect(existsSync(join(t.home, '.factory', 'sessions'))).toBe(false);
+      expect(existsSync(join(t.home, 'factory-work'))).toBe(false);
     },
   );
 
@@ -310,6 +351,109 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(launch?.env.FACTORY_STATION).toBe('0');
     const at = pushed ? `origin/${DEFINE_BRANCH}` : 'origin/main';
     expect(runGit(clone, ['rev-parse', 'HEAD'])).toBe(t.repo.revParse(at));
+    // The record the hooks take Define's facts from: the project, not an item.
+    expect(recordOf(t.home)).toMatchObject({
+      ...{ role: 'define', item: 0, station: 0, feature: '', files: [], clone },
+      ...{ branch: DEFINE_BRANCH, head: t.repo.revParse(at) },
+    });
+  });
+
+  it("writes the session's record before launch, and FACTORY_SESSION is always the id it launches with", async () => {
+    const t = setup({ branchFiles: { 'tests/login.test.ts': 't\n', 'tests/helpers/x.ts': 'h\n' } });
+
+    await t.launch({ ...REQUEST, files: ['specs/42-add-login/spec.md'] });
+
+    const [launch] = t.sessions();
+    const id = launchedId(launch?.args ?? []) ?? '';
+    expect(launch?.env).toMatchObject({ FACTORY_SESSION: id, FACTORY_ROLE: 'spec' });
+    const folder = join(t.home, '.factory', 'sessions', id);
+    expect(statSync(join(folder, 'session.json')).mode & 0o777).toBe(0o600);
+    expect(recordOf(t.home, id)).toEqual({
+      ...{ role: 'spec', item: 42, station: 2, feature: 'specs/42-add-login' },
+      ...{ files: ['specs/42-add-login/spec.md'], clone: work(t.home, '42-add-login') },
+      ...{ model: 'sonnet', role_version: roleVersion('v1.0.0', roleFile('spec')) },
+      ...{ repo: 'owner/project', inbox_issue: 1, branch: BRANCH },
+      ...{ head: t.repo.revParse(`origin/${BRANCH}`), tests: ['tests/login.test.ts'] },
+    });
+    // The hooks read it as written.
+    expect(readSessionRecord(t.home, id)).toEqual(recordOf(t.home, id));
+  });
+
+  it("builds the session's environment from an allowlist, never from the Owner's", async () => {
+    const owners = {
+      ...{ GH_TOKEN: 'gho_owner', GITHUB_TOKEN: 'ghs_owner', ANTHROPIC_API_KEY: 'sk-ant-x' },
+      ...{
+        AWS_SECRET_ACCESS_KEY: 'x',
+        FACTORY_SOURCE: '/elsewhere',
+        LANG: 'C.UTF-8',
+        TERM: 'dumb',
+      },
+    };
+    // node's and git's folders, which the launcher itself runs git from.
+    const git = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    const folders = [process.execPath, git].map((program) => realpathSync(dirname(program)));
+    const tools = [...new Set(folders)].join(':');
+    const PATH = ['bin', '', '/tmp', '/var/tmp/', '/no/such/folder', tools].join(':');
+    const t = setup({ env: { ...gitEnv, ...owners, PATH } });
+
+    await t.launch(REQUEST);
+
+    const env = t.sessions()[0]?.env ?? {};
+    const tmp = env.TMPDIR ?? '';
+    expect(Object.keys(env).sort()).toEqual(
+      ['CLAUDE_CODE_TMPDIR', 'FACTORY_ITEM', 'FACTORY_ROLE', 'FACTORY_SESSION', 'FACTORY_STATION']
+        .concat(['HOME', 'LANG', 'PATH', 'TERM', 'TMPDIR', 'npm_config_cache'])
+        .sort(),
+    );
+    // Absolute folders only, none in a temporary folder: the hooks run `factory` by name.
+    expect(env).toMatchObject({ PATH: tools, HOME: realpathSync(t.home), LANG: 'C.UTF-8' });
+    expect(tmp).toMatch(/^\/tmp\/factory-42-/);
+    expect(env).toMatchObject({ CLAUDE_CODE_TMPDIR: tmp, npm_config_cache: join(tmp, 'npm') });
+    // git's identity in the clone's own config, so the Owner's global config never reaches it.
+    const clone = work(t.home, '42-add-login');
+    expect(runGit(clone, ['config', '--local', 'user.name'])).toBe('Factory spec');
+    expect(runGit(clone, ['config', '--local', 'user.email'])).toBe('spec@factory.invalid');
+  });
+
+  it("gives a role with gh in its shell the project's comment-only token, never the Owner's", async () => {
+    const owners = { GH_TOKEN: 'gho_owner', GITHUB_TOKEN: 'ghs_owner' };
+    const t = setup({ env: { ...gitEnv, ...owners } });
+
+    await t.launch({ ...REQUEST, role: 'intake', station: 1, branch: 'main', feature: '' });
+
+    const env = t.sessions()[0]?.env ?? {};
+    expect(env.GH_TOKEN).toBe(TOKEN);
+    expect(env).not.toHaveProperty('GITHUB_TOKEN');
+    // Intake and Test run without the advisor (T097).
+    expect(env.CLAUDE_CODE_DISABLE_ADVISOR_TOOL).toBe('1');
+  });
+
+  it.each([
+    ['no token is set up', null],
+    ["the file holds the Owner's gh login token", 'gho_abc123'],
+    ['the file holds a classic token', `ghp_${'a'.repeat(36)}`],
+  ])('refuses a role with gh when %s, running nothing', async (_name, token) => {
+    const t = setup({ env: { ...gitEnv, GH_TOKEN: 'gho_owner' }, token });
+
+    const refused = t.launch({
+      ...REQUEST,
+      role: 'intake',
+      station: 1,
+      branch: 'main',
+      feature: '',
+    });
+
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(tokenFile(t.home));
+    expect(t.sessions()).toEqual([]);
+    expect(existsSync(join(t.home, 'factory-work'))).toBe(false);
+  });
+
+  it('refuses a role whose role file the clone does not have, running nothing', async () => {
+    const t = setup();
+    const refused = t.launch({ ...REQUEST, role: 'planner', station: 3 });
+    await expect(refused).rejects.toThrow(/\.claude\/agents\/planner\.md/);
+    expect(t.sessions()).toEqual([]);
   });
 
   it('runs one session at a time', async () => {
@@ -422,7 +566,7 @@ describe("LocalLauncher: the branch's history, checked in the factory's own clon
     t.repo.commit({ 'specs/43-after/spec.md': '# Spec\n' }, 's');
     t.repo.push('claude/43-after');
     t.repo.checkout('main');
-    await t.launch({ ...REQUEST, item: 43, branch: 'claude/43-after' });
+    await t.launch({ ...REQUEST, item: 43, branch: 'claude/43-after', feature: 'specs/43-after' });
     expect(pins).toEqual(['v1.0.0', 'v1.1.0']);
     expect(t.sessions()).toHaveLength(2);
   });

@@ -1,10 +1,11 @@
 // Local sessions (research R8, FR-031): `claude -p` on the laptop, one at a time, each in a
-// fresh clone of its own under `~/factory-work/<repo>/<name>`, never in the Owner's working copy
-// and never in a worktree of it: a worktree shares `.git/config`, `.git/hooks` and the local
-// branches, so a session could plant a hook that runs when the Owner signs a merge (Owner review
-// 2026-10-07). The clone is made anew for every launch, its `origin` set to the project's
-// GitHub remote, so nothing a session left in it (config, hooks, files) carries over. The
-// launch resolves when the session ends, so `factory run` works the line one session at a time.
+// fresh clone of its own under `~/factory-work/<repo>/<name>-<session id>`, never in the Owner's
+// working copy and never in a worktree of it: a worktree shares `.git/config`, `.git/hooks` and
+// the local branches, so a session could plant a hook that runs when the Owner signs a merge
+// (Owner review 2026-10-07). The clone is made anew for every launch, its `origin` set to the
+// project's GitHub remote, so nothing a session left in it (config, hooks, files) carries over.
+// The launch resolves when the session ends, so `factory run` works the line one session at a
+// time.
 //
 // No local session starts before the guards exist: the release pinned on main must have a tag
 // the Owner signed (checked with main's pinned key lists), the protected files on main and in
@@ -29,6 +30,12 @@
 // `--settings` file and the factory's MCP config, read by Claude Code outside the sandbox, which
 // denies all of `~/.factory/` to the session's shell; the clone and the session's temporary
 // folder stay outside it, opened by real path.
+//
+// The session's environment is an allowlist, never the Owner's minus a list: their shell may hold
+// their own GitHub token, cloud keys or `ANTHROPIC_API_KEY`, which would also bill the session to
+// the API instead of the Owner's plan. A role with `gh` in its shell gets only the project's
+// comment-only token, which the Owner saves under `~/.factory/tokens/`; without it the role does
+// not start, and it never falls back to the Owner's own `gh` login, which can push.
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
@@ -42,18 +49,22 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
+import { roleVersion } from '../../events/schema.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
 import { MCP_JSON } from '../../install/render.js';
+import { runsGh, SHARED_TMP, under } from '../../install/sandbox.js';
 import { renderSessionSettings } from '../../install/session-settings.js';
 import type { Settings } from '../../install/settings.js';
 import { pathRule } from '../../merge/rules.js';
 import { parseConfig } from '../../model/config.js';
+import { branchFeatureDir } from '../../model/naming.js';
 import { visible } from '../../notify/summary.js';
-import type { GuardrailManifest, ProjectConfig, ReleasePin } from '../../model/types.js';
+import type { GuardrailManifest, ProjectConfig, ReleasePin, RoleName } from '../../model/types.js';
 import { ReleaseTagError } from '../../release/tag.js';
+import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
 import {
   LaunchRefused,
@@ -86,7 +97,12 @@ export interface SessionFiles {
   id: string;
   settings: string;
   mcp: string;
+  /** The session's record, which the hooks and the MCP server read (src/hooks/session.ts). */
+  record: string;
 }
+
+/** The session's own files are written once, readable only by the Owner. */
+const WRITE_ONCE = { flag: 'wx', mode: 0o600 } as const;
 
 /**
  * The `claude` arguments for a local session (T061): its id, its own settings, only the project's
@@ -101,6 +117,40 @@ export const localInvocation = (request: LaunchRequest, files: SessionFiles): re
 ];
 
 const FACTORY = new URL('../../../factory/', import.meta.url);
+/** A file of the installed factory, never the release a branch pins. */
+const factoryFile = (path: string) => readFileSync(new URL(path, FACTORY), 'utf8');
+const factoryPolicy = () => loadPolicy(factoryFile('policy/roles.yaml'));
+
+/**
+ * The feature folder a session must have: its item branch's, `specs/<issue>-<slug>`, for a role on
+ * an item branch, and none for a role on a fixed branch; it becomes the session's Edit rules.
+ */
+function expectedFeature(request: LaunchRequest): string | undefined {
+  if (factoryPolicy().roles[request.role].branch !== 'item') return '';
+  const dir = branchFeatureDir(request.branch);
+  return dir?.startsWith(`specs/${String(request.item)}-`) === true ? dir : undefined;
+}
+
+/** Where the Owner saves the project's comment-only token, never their own `gh` login's. */
+const tokenFile = (home: string, repo: string) =>
+  join(home, '.factory', 'tokens', ...repo.split('/'));
+/** A fine-grained token; the `gh` login's (`gho_`) and a classic one (`ghp_`) are not. */
+const FINE_GRAINED = /^github_pat_[A-Za-z0-9_]+$/;
+/** The roles that run without the advisor (T097). */
+const NO_ADVISOR: ReadonlySet<string> = new Set(['intake', 'test']);
+
+/**
+ * The Owner's PATH, its absolute folders by real path, none inside a clone or a temporary folder,
+ * since the hooks run `factory` by name outside the sandbox (T061).
+ */
+function sessionPath(path: string | undefined, outside: readonly string[]): string {
+  const folders = (path ?? '').split(':').flatMap((dir) => {
+    if (!dir.startsWith('/') || !existsSync(dir)) return [];
+    const real = realpathSync(dir);
+    return outside.some((folder) => under(real, folder)) ? [] : [real];
+  });
+  return [...new Set(folders)].join(':');
+}
 
 type Unavailable = Extract<Availability, { ok: false }>;
 
@@ -340,13 +390,14 @@ export class LocalLauncher implements SessionLauncher {
 
   /**
    * A fresh clone for the session, from the factory's own clone at exactly the checked commits,
-   * its `origin` the project's GitHub remote, never fetched.
+   * its `origin` the project's GitHub remote, never fetched. Each launch gets a folder of its own,
+   * named with its session id: a clone path the Owner once trusted in Claude Code would otherwise
+   * load the pinned release's allow rules into a later session.
    */
-  private clone(project: string, branch: string, heads: Heads): string {
+  private clone(project: string, repo: string, branch: string, heads: Heads, session: string) {
     const { home } = this.options;
-    const repo = this.config(project, heads.main).repo;
     const name = branch === 'main' ? 'main' : branch.slice('claude/'.length);
-    const dir = join(realpathSync(home), 'factory-work', ...repo.split('/'), name);
+    const dir = join(realpathSync(home), 'factory-work', ...repo.split('/'), `${name}-${session}`);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dirname(dir), { recursive: true });
     this.isolated(home, ['init', '-q', '-b', 'main', dir]);
@@ -369,6 +420,10 @@ export class LocalLauncher implements SessionLauncher {
       throw new LaunchRefused(
         `no local session started: ${request.branch} is not a session branch`,
       );
+    if (request.feature !== expectedFeature(request))
+      throw new LaunchRefused(
+        `no local session started: ${JSON.stringify(request.feature)} is not the feature folder of ${request.role} on ${request.branch}`,
+      );
     if (this.running) throw new LaunchRefused('a local session is already running');
     this.running = true;
     try {
@@ -376,8 +431,15 @@ export class LocalLauncher implements SessionLauncher {
         this.heads(request.project, request.branch),
       );
       const manifest = this.history(request.project, request.branch, heads);
+      const { repo, inbox_issue } = step("reading main's config", () =>
+        this.config(request.project, heads.main),
+      );
+      const token = runsGh(factoryPolicy(), request.role)
+        ? step('reading the comment-only token', () => this.ghToken(request.role, repo))
+        : undefined;
+      const files = step("making the session's folder", () => this.sessionFolder());
       const cwd = step("making the session's clone", () =>
-        this.clone(request.project, request.branch, heads),
+        this.clone(request.project, repo, request.branch, heads, files.id),
       );
       // The tree first: a symlinked `.claude` would pass a walk of the files it points at.
       const tree = step("reading the session's clone", () =>
@@ -399,18 +461,37 @@ export class LocalLauncher implements SessionLauncher {
       const check = guardrailCheck(found, settings, manifest, request.branch);
       if (!check.ok)
         throw new LaunchRefused(`no local session started: ${check.reason}`, check.urgent);
-      // No Spec Kit variables: the release's commands take the feature folder from the prompt.
-      const env = {
-        ...this.options.env,
-        // Define works for the project, not an item: it gets a station and no item.
-        ...(request.item > 0 ? { FACTORY_ITEM: String(request.item) } : {}),
-        FACTORY_STATION: String(request.station),
-      };
-      const files = step("making the session's folder", () => this.sessionFolder());
+      const roleFile = join(cwd, '.claude', 'agents', `${request.role}.md`);
+      if (!existsSync(roleFile))
+        throw new LaunchRefused(
+          `no local session started: ${request.branch} has no .claude/agents/${request.role}.md`,
+        );
+      // git's identity in the clone's own config: the session's git reads no global config.
+      step("setting git's identity in the session's clone", () => {
+        this.isolated(cwd, ['config', 'user.name', `Factory ${request.role}`]);
+        this.isolated(cwd, ['config', 'user.email', `${request.role}@factory.invalid`]);
+      });
       const tmp = step("making the session's temporary folder", () => this.tmpFolder(request.item));
       try {
-        step("writing the session's settings", () => {
-          this.writeSettings(request, files, { clone: cwd, tmp });
+        const env = step("building the session's environment", () =>
+          this.sessionEnv(request, files.id, tmp, token),
+        );
+        step("writing the session's settings and record", () => {
+          const tests = this.testFiles(cwd);
+          this.writeSettings(request, files, { clone: cwd, tmp, tests });
+          const record = {
+            ...{ role: request.role, item: request.item, station: request.station },
+            ...{ feature: request.feature, files: request.files, clone: cwd, model: 'sonnet' },
+            role_version: roleVersion(manifest.release, readFileSync(roleFile)),
+            ...{
+              repo,
+              inbox_issue,
+              branch: request.branch,
+              head: heads.head,
+              tests,
+            },
+          };
+          writeFileSync(files.record, `${JSON.stringify(record, null, 2)}\n`, WRITE_ONCE);
         });
         const result = await this.run('claude', localInvocation(request, files), { cwd, env });
         if (result.status !== 0)
@@ -436,6 +517,42 @@ export class LocalLauncher implements SessionLauncher {
     }
   }
 
+  /** The project's comment-only token, for a role with `gh` in its shell. */
+  private ghToken(role: RoleName, repo: string): string {
+    const file = tokenFile(this.options.home, repo);
+    const token = existsSync(file) ? readFileSync(file, 'utf8').trim() : undefined;
+    if (token === undefined)
+      throw new LaunchRefused(
+        `no local session started: ${role} runs gh, and no comment-only token is set up for ${repo}: save a fine-grained token for ${repo} alone, allowed only to comment on its issues and pull requests, in ${file}; a session never gets your own gh login`,
+      );
+    if (!FINE_GRAINED.test(token))
+      throw new LaunchRefused(
+        `no local session started: ${file} holds no fine-grained token (github_pat_…); save the comment-only token for ${repo} there`,
+      );
+    return token;
+  }
+
+  /** The session's environment, from the allowlist alone; no Spec Kit variables (T171). */
+  private sessionEnv(request: LaunchRequest, id: string, tmp: string, token?: string) {
+    const { env } = this.options;
+    const home = realpathSync(this.options.home);
+    const outside = [join(home, 'factory-work'), dirname(tmp), ...SHARED_TMP];
+    return {
+      ...{ PATH: sessionPath(env.PATH, outside), HOME: home },
+      ...(env.LANG === undefined ? {} : { LANG: env.LANG }),
+      ...(env.TERM === undefined ? {} : { TERM: env.TERM }),
+      // Define works for the project, not an item: it gets a station and no item.
+      ...(request.item > 0 ? { FACTORY_ITEM: String(request.item) } : {}),
+      FACTORY_STATION: String(request.station),
+      // What the MCP server takes its session from; the hooks read it from their input.
+      ...{ FACTORY_ROLE: request.role, FACTORY_SESSION: id },
+      ...(token === undefined ? {} : { GH_TOKEN: token }),
+      ...(NO_ADVISOR.has(request.role) ? { CLAUDE_CODE_DISABLE_ADVISOR_TOOL: '1' } : {}),
+      // Home is unreadable to sandboxed shells (T183): their temporary files and npm's cache here.
+      ...{ TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, npm_config_cache: join(tmp, 'npm') },
+    };
+  }
+
   /** The session's own folder under `~/.factory/sessions/`, made for this launch alone. */
   private sessionFolder(): SessionFiles {
     const id = (this.options.sessionId ?? randomUUID)();
@@ -447,7 +564,17 @@ export class LocalLauncher implements SessionLauncher {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
       throw new LaunchRefused(`no local session started: the session folder ${dir} already exists`);
     }
-    return { id, settings: join(dir, 'settings.json'), mcp: join(dir, 'mcp.json') };
+    const at = (name: string) => join(dir, name);
+    return { id, settings: at('settings.json'), mcp: at('mcp.json'), record: at('session.json') };
+  }
+
+  /** The test files at the clone's head, read without the Owner's config (T070). */
+  private testFiles(clone: string): string[] {
+    const paths = this.isolated(clone, ['ls-tree', '-r', '-z', '--name-only', 'HEAD']);
+    return paths
+      .toString()
+      .split('\0')
+      .filter((path) => path !== '' && isTestFile(path));
   }
 
   /** A fresh, short temporary folder for the session, by its real path (T061). */
@@ -460,22 +587,23 @@ export class LocalLauncher implements SessionLauncher {
   private writeSettings(
     request: LaunchRequest,
     files: SessionFiles,
-    at: { clone: string; tmp: string },
+    at: { clone: string; tmp: string; tests: readonly string[] },
   ) {
-    const policy = loadPolicy(readFileSync(new URL('policy/roles.yaml', FACTORY), 'utf8'));
-    const project = readFileSync(new URL('settings/settings.json', FACTORY), 'utf8');
-    const { hooks } = JSON.parse(project) as Settings;
+    const policy = factoryPolicy();
+    const factory = JSON.parse(factoryFile('settings/settings.json')) as Settings;
+    const tools = /^tools: (.*)$/m.exec(factoryFile(`roles/${request.role}.md`))?.[1] ?? '';
+    const mcp = tools.split(', ').filter((tool) => tool.startsWith('mcp__factory__'));
     // The roles whose shell runs npm read node's own folder, which may lie under home.
     const npm = policy.roles[request.role].shell.some((prefix) => /^(npm|npx)\b/.test(prefix));
     const node = dirname(dirname(realpathSync(process.execPath)));
     const paths = {
-      ...{ home: realpathSync(this.options.home), ...at },
+      ...{ home: realpathSync(this.options.home), clone: at.clone, tmp: at.tmp },
       tools: npm ? [node] : [],
     };
     const { role, feature, files: task } = request;
-    const settings = renderSessionSettings(policy, { role, paths, feature, files: task, hooks });
-    const write = { flag: 'wx', mode: 0o600 } as const;
-    writeFileSync(files.settings, `${JSON.stringify(settings, null, 2)}\n`, write);
-    writeFileSync(files.mcp, MCP_JSON, write);
+    const input = { role, paths, feature, files: task, tests: at.tests, factory, mcp };
+    const settings = renderSessionSettings(policy, input);
+    writeFileSync(files.settings, `${JSON.stringify(settings, null, 2)}\n`, WRITE_ONCE);
+    writeFileSync(files.mcp, MCP_JSON, WRITE_ONCE);
   }
 }
