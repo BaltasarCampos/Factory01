@@ -42,12 +42,15 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  accessSync,
+  constants,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -171,6 +174,16 @@ function sessionPath(path: string | undefined, outside: readonly string[]): stri
   return [...new Set(folders)].join(':');
 }
 
+/** Whether `path` is a file the Owner can run. */
+function executable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 type Unavailable = Extract<Availability, { ok: false }>;
 
 /** The commits a session starts from, as fetched into the factory's own clone. */
@@ -205,17 +218,39 @@ const HOOK_EVENTS = ['SessionStart', 'PreToolUse', 'PostToolUse', 'Stop', 'PreCo
 const SETTINGS = '.claude/settings.json';
 const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex');
 
-/** Whether settings register every factory hook: the release ships the guards yet. */
-function hasFactoryHooks(settings: Buffer | undefined): boolean {
+/** The events whose hooks are guards: one that cannot run must block the action (T082). */
+const GUARD_EVENTS = new Set(['SessionStart', 'PreToolUse', 'PreCompact']);
+const NO_HOOKS = 'installs no factory hooks; local sessions wait for the guards (slice 28)';
+const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
+
+/**
+ * Why settings do not install the factory's hooks: every event registered, every hook `factory
+ * hook <name>` in exec form, with no shell, and every guard with `onFailure: "block"`, which
+ * needs Claude Code 2.1.295 or later; undefined when they do.
+ */
+function hookProblem(settings: Buffer | undefined): string | undefined {
   let hooks: unknown;
   try {
     hooks = (JSON.parse(settings?.toString('utf8') ?? '') as { hooks?: unknown }).hooks;
   } catch {
-    return false;
+    return NO_HOOKS;
   }
-  if (typeof hooks !== 'object' || hooks === null) return false;
+  if (typeof hooks !== 'object' || hooks === null) return NO_HOOKS;
   const byEvent = hooks as Record<string, unknown>;
-  return HOOK_EVENTS.every((e) => JSON.stringify(byEvent[e] ?? null).includes('factory hook'));
+  if (!HOOK_EVENTS.every((event) => list(byEvent[event] ?? []).length > 0)) return NO_HOOKS;
+  for (const [event, groups] of Object.entries(byEvent))
+    for (const group of list(groups))
+      for (const one of list((group as { hooks?: unknown } | null)?.hooks)) {
+        const hook = (one ?? {}) as { type?: unknown; command?: unknown; args?: unknown };
+        const args = list(hook.args);
+        if (hook.type !== 'command' || hook.command !== 'factory' || args.length !== 2)
+          return `registers a ${event} hook that is not factory hook <name> in exec form`;
+        if (args[0] !== 'hook' || typeof args[1] !== 'string')
+          return `registers a ${event} hook that is not factory hook <name> in exec form`;
+        if (GUARD_EVENTS.has(event) && (one as { onFailure?: unknown }).onFailure !== 'block')
+          return `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"`;
+      }
+  return undefined;
 }
 
 /**
@@ -239,11 +274,8 @@ export function guardrailCheck(
   }
   for (const path of Object.keys(found))
     if (manifest.files[path] === undefined) return tampered(`${path} is not in the manifest`);
-  if (!hasFactoryHooks(settings))
-    return {
-      ok: false,
-      reason: `release ${manifest.release} installs no factory hooks; local sessions wait for the guards (slice 28)`,
-    };
+  const problem = hookProblem(settings);
+  if (problem !== undefined) return { ok: false, reason: `release ${manifest.release} ${problem}` };
   return { ok: true };
 }
 
@@ -263,6 +295,8 @@ export interface LocalOptions {
   sessionId?: () => string;
   /** Where the session's temporary folder is made, kept short (T061); default `/tmp`. */
   tmpRoot?: string;
+  /** The programs Claude Code's sandbox runs, on the session's PATH; default bwrap and socat. */
+  sandbox?: readonly string[];
 }
 
 export class LocalLauncher implements SessionLauncher {
@@ -502,6 +536,14 @@ export class LocalLauncher implements SessionLauncher {
         const env = step("building the session's environment", () =>
           this.sessionEnv(request, files.id, tmp, token),
         );
+        // The session's own PATH: what Claude Code finds there is what the session runs.
+        const folders = env.PATH.split(':').filter((folder) => folder !== '');
+        for (const program of this.options.sandbox ?? ['bwrap', 'socat'])
+          if (!folders.some((folder) => executable(join(folder, program))))
+            throw new LaunchRefused(
+              `no local session started: ${program}, which Claude Code's sandbox needs, is not on the session's PATH (${env.PATH}); install it`,
+            );
+        await this.claudeVersion(cwd, env);
         step("writing the session's settings and record", () => {
           const tests = this.testFiles(cwd);
           this.writeSettings(request, files, { clone: cwd, tmp, tests });
@@ -544,6 +586,19 @@ export class LocalLauncher implements SessionLauncher {
     } finally {
       this.running = false;
     }
+  }
+
+  /** Claude Code as the session runs it: 2.1.295 or later, for `onFailure: "block"` (T082). */
+  private async claudeVersion(cwd: string, env: NodeJS.ProcessEnv) {
+    const result = await this.run('claude', ['--version'], { cwd, env });
+    const [major = 0, minor = 0, patch = 0] = (/^(\d+)\.(\d+)\.(\d+)/.exec(result.stdout) ?? [])
+      .slice(1)
+      .map(Number);
+    const old = major * 1e8 + minor * 1e4 + patch < 2 * 1e8 + 1 * 1e4 + 295;
+    if (result.status !== 0 || old)
+      throw new LaunchRefused(
+        `no local session started: the session's claude reports ${JSON.stringify(visible(result.stdout.trim()))}; local sessions need Claude Code 2.1.295 or later`,
+      );
   }
 
   /** The project's gh token, for a role with `gh` in its shell. */

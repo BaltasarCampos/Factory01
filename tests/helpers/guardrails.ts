@@ -1,16 +1,17 @@
 // Guardrail fixtures: hook settings a factory release would install, and a release manifest.
 import { createHash } from 'node:crypto';
+import { readFileSync, realpathSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type { GuardrailManifest } from '../../src/model/types.js';
 
-/** `.claude/settings.json` registering every factory hook. */
-export const HOOKED_SETTINGS = `${JSON.stringify({
-  hooks: Object.fromEntries(
-    ['SessionStart', 'PreToolUse', 'PostToolUse', 'Stop', 'PreCompact'].map((event) => [
-      event,
-      [{ hooks: [{ type: 'command', command: `factory hook ${event}` }] }],
-    ]),
-  ),
-})}\n`;
+/** `.claude/settings.json` registering every factory hook: the installed factory's own. */
+export const HOOKED_SETTINGS = readFileSync(
+  new URL('../../factory/settings/settings.json', import.meta.url),
+  'utf8',
+);
+
+/** Stand-ins for the programs Claude Code's sandbox needs, for a launch test's PATH. */
+export const SANDBOX_BIN = realpathSync(fileURLToPath(new URL('./sandbox-bin', import.meta.url)));
 
 /** A release manifest listing these files with their hashes. */
 export const manifestOf = (files: Record<string, string>): GuardrailManifest => ({
