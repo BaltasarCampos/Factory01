@@ -512,6 +512,9 @@ describe('LocalLauncher (research R8, R9)', () => {
       await expect(refused).rejects.toThrow(LaunchRefused);
       await expect(refused).rejects.toThrow(/Claude Code 2\.1\.295 or later/);
     }
+    // A claude that cannot start is an error, never a refusal or a pass.
+    const missing: Runner = () => Promise.reject(new Error('spawn claude ENOENT'));
+    await expect(setup({ run: missing }).launch(REQUEST)).rejects.toThrow(EnvironmentError);
   });
 
   it("refuses a launch when a program Claude Code's sandbox needs is not on the session's PATH", async () => {
@@ -805,6 +808,9 @@ describe('LocalLauncher availability: main against the pinned release', () => {
 
   type Hooks = Record<string, { hooks: Record<string, unknown>[] }[]>;
   const shell = (command: string) => [{ hooks: [{ type: 'command', command }] }];
+  const served = (name: string) => [
+    { hooks: [{ type: 'command', command: 'factory', args: ['hook', name] }] },
+  ];
   it.each([
     ['in shell form', (h: Hooks) => (h.Stop = shell('factory hook stop'))],
     [
@@ -816,6 +822,7 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     ],
     ['a hook of another event', (h: Hooks) => (h.Notification = shell('notify-send x'))],
     ['no Stop hook', (h: Hooks) => (h.Stop = [])],
+    ['a hook the factory does not serve', (h: Hooks) => (h.Stop = served('nope'))],
   ])('waits, without alarm, for a release whose settings register %s', (_name, change) => {
     const settings = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
     change(settings.hooks);
@@ -825,6 +832,21 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       reason: /^release v1\.0\.0 (registers|installs)/,
     });
     expect(check).not.toHaveProperty('urgent');
+  });
+
+  it('refuses a clone whose settings name a hook the factory does not serve, running nothing', async () => {
+    const hooked = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+    hooked.hooks.PostToolUse = served('lint');
+    const files = { ...GUARDED, '.claude/settings.json': `${JSON.stringify(hooked)}\n` };
+    const t = setup({ mainFiles: files, release: () => manifestOf(files) });
+
+    const refused = t.launch(REQUEST);
+
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(
+      /registers the PostToolUse hook factory hook lint, which the installed factory does not serve/,
+    );
+    expect(t.sessions()).toEqual([]);
   });
 
   it('accepts the installed factory’s own settings: every hook in exec form, every guard blocking', () => {

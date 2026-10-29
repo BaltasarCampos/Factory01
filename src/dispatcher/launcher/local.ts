@@ -55,6 +55,7 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
+import { SERVED_HOOKS } from '../../commands/hook.js';
 import { isFable, roleVersion } from '../../events/schema.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
@@ -225,8 +226,9 @@ const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [val
 
 /**
  * Why settings do not install the factory's hooks: every event registered, every hook `factory
- * hook <name>` in exec form, with no shell, and every guard with `onFailure: "block"`, which
- * needs Claude Code 2.1.295 or later; undefined when they do.
+ * hook <name>` in exec form, with no shell, naming a hook the installed factory serves, since
+ * any other blocks every call, and every guard with `onFailure: "block"`, which needs Claude
+ * Code 2.1.295 or later; undefined when they do.
  */
 function hookProblem(settings: Buffer | undefined): string | undefined {
   let hooks: unknown;
@@ -247,6 +249,8 @@ function hookProblem(settings: Buffer | undefined): string | undefined {
           return `registers a ${event} hook that is not factory hook <name> in exec form`;
         if (args[0] !== 'hook' || typeof args[1] !== 'string')
           return `registers a ${event} hook that is not factory hook <name> in exec form`;
+        if (!SERVED_HOOKS.includes(args[1]))
+          return `registers the ${event} hook factory hook ${visible(args[1])}, which the installed factory does not serve`;
         if (GUARD_EVENTS.has(event) && (one as { onFailure?: unknown }).onFailure !== 'block')
           return `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"`;
       }
@@ -590,7 +594,13 @@ export class LocalLauncher implements SessionLauncher {
 
   /** Claude Code as the session runs it: 2.1.295 or later, for `onFailure: "block"` (T082). */
   private async claudeVersion(cwd: string, env: NodeJS.ProcessEnv) {
-    const result = await this.run('claude', ['--version'], { cwd, env });
+    let result: Awaited<ReturnType<Runner>>;
+    try {
+      result = await this.run('claude', ['--version'], { cwd, env });
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      throw new EnvironmentError(`no local session started: claude --version: ${visible(why)}`);
+    }
     const [major = 0, minor = 0, patch = 0] = (/^(\d+)\.(\d+)\.(\d+)/.exec(result.stdout) ?? [])
       .slice(1)
       .map(Number);

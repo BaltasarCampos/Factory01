@@ -5,6 +5,7 @@ import type { CommandContext } from '../cli/commands.js';
 import { gateHook, guardHook } from '../hooks/guards.js';
 import { runLog, type HookContext, type HookInput, type HookResult } from '../hooks/log.js';
 import { runPostEdit } from '../hooks/post-edit.js';
+import { runPreCompact } from '../hooks/pre-compact.js';
 import { runSessionStart } from '../hooks/session-start.js';
 import { runStop } from '../hooks/stop.js';
 import { visible } from '../notify/summary.js';
@@ -21,8 +22,12 @@ const HOOKS: Readonly<Record<string, (input: HookInput, ctx: HookContext) => Pro
     'read-guard': guardHook('read-guard'),
     'command-guard': guardHook('command-guard'),
     'session-start': runSessionStart,
+    'pre-compact': runPreCompact,
     gate: gateHook,
   };
+
+/** The hooks this build serves; a release's settings naming another are refused (T061). */
+export const SERVED_HOOKS: readonly string[] = Object.keys(HOOKS);
 
 export async function hook(ctx: CommandContext): Promise<number> {
   const event = ctx.positionals[0] ?? '';
