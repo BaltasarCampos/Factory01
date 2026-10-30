@@ -46,7 +46,7 @@ import {
 } from './branch.js';
 import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
-import { LaunchRefused, type Launchers } from './launcher/types.js';
+import { LaunchRefused, SessionFailed, type Launchers } from './launcher/types.js';
 import { tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
@@ -493,8 +493,9 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     return refuse(err.message, false, 'release-incomplete');
   }
   let sessionId: string;
+  let notices: readonly string[] = [];
   try {
-    ({ sessionId } = await launcher.launch({
+    ({ sessionId, notices = [] } = await launcher.launch({
       project: ctx.projectDir,
       role,
       station,
@@ -504,9 +505,15 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       prompt,
     }));
   } catch (err) {
+    if (err instanceof SessionFailed) {
+      const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed`;
+      await alertOnce({ urgency: 'urgent', kind: 'session-failed', text });
+      return { ...result, refused: err.message };
+    }
     if (!(err instanceof LaunchRefused)) throw err;
     return refuse(err.message, err.urgent);
   }
+  for (const text of notices) await alertOnce({ urgency: 'info', kind: 'claude-version', text });
   const mode = launcher.mode;
   return {
     ...result,
