@@ -938,7 +938,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     }
   });
 
-  describe("the session's stream-json, checked after the session (T061)", () => {
+  describe("the session's stream-json (T061)", () => {
     const streamed = (change: StreamChange | ((args: readonly string[]) => string)) =>
       setup({
         run: fakeRunner(0, (args) =>
@@ -1096,6 +1096,67 @@ describe('LocalLauncher (research R8, R9)', () => {
       expect(sessionTools('builder')).toEqual(expect.arrayContaining(['Agent', 'Task']));
       const build = { ...REQUEST, role: 'builder', station: 4, files: ['src/login.ts'] } as const;
       await expect(t.launch(build)).resolves.toEqual({ sessionId: FIRST });
+    });
+
+    describe('read live, while the session runs (T061)', () => {
+      /**
+       * A launch whose session is a real program in its own process group: it prints `stream`,
+       * with the passed record written or not, then waits on a child unless `ends`.
+       */
+      const running = (stream: StreamChange | string, at: { passed: boolean; ends?: boolean }) => {
+        let home = '';
+        const base = fakeRunner();
+        const run: Runner = (program, args, options) => {
+          if (args[0] !== '-p') return base.run(program, args, options);
+          const dir = join(home, '.factory', 'sessions', FIRST);
+          const passed = JSON.stringify({ session: FIRST });
+          if (at.passed) writeFileSync(join(dir, 'passed.json'), passed);
+          const text = typeof stream === 'string' ? stream : sessionStream(args, stream);
+          writeFileSync(join(dir, 'stream.jsonl'), text);
+          const wait = at.ends === true ? '' : '; sleep 30 & echo $! > left.pid; wait';
+          const script = `cat stream.jsonl${wait}`;
+          // The stand-in's own PATH: the session's holds no cat or sleep.
+          return runProcess('bash', ['-c', script], { ...options, cwd: dir, env: gitEnv });
+        };
+        const t = setup({ run });
+        home = t.home;
+        return t;
+      };
+      const left = (home: string) =>
+        Number(readFileSync(join(home, '.factory', 'sessions', FIRST, 'left.pid'), 'utf8'));
+
+      it('stops a session at once when its init message does not match its launch, and what it started', async () => {
+        const t = running({ init: { permissionMode: 'bypassPermissions' } }, { passed: true });
+        const started = Date.now();
+        const stopped = t.launch(REQUEST);
+        await expect(stopped).rejects.toThrow(SessionFailed);
+        await expect(stopped).rejects.toThrow(/permission mode "bypassPermissions", not dontAsk/);
+        expect(Date.now() - started).toBeLessThan(10_000);
+        await vi.waitFor(() => {
+          expect(() => process.kill(left(t.home), 0)).toThrow();
+        });
+      }, 30_000);
+
+      it('stops a session that has no passed record by its first assistant message', async () => {
+        const t = running({}, { passed: false });
+        const started = Date.now();
+        const stopped = t.launch(REQUEST);
+        await expect(stopped).rejects.toThrow(SessionFailed);
+        await expect(stopped).rejects.toThrow(/no passed record by its first assistant message/);
+        expect(Date.now() - started).toBeLessThan(10_000);
+      }, 30_000);
+
+      it('stops a session whose stream is out of order, a failed session', async () => {
+        const t = running(`{"type":"assistant","message":{}}\n`, { passed: true });
+        const stopped = t.launch(REQUEST);
+        await expect(stopped).rejects.toThrow(EnvironmentError);
+        await expect(stopped).rejects.toThrow(/a line of type assistant before its init message/);
+      }, 30_000);
+
+      it('lets a session that started as launched run to its end', async () => {
+        const t = running({}, { passed: true, ends: true });
+        await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+      }, 30_000);
     });
   });
 });
@@ -1458,6 +1519,39 @@ describe('runProcess', () => {
     const result = await runProcess('bash', ['-c', script], { cwd: tempDir('run-'), env: gitEnv });
     expect(result).toMatchObject({ status: 0, stdout: 'early\nlate\n' });
   });
+
+  // A grouped run, as a session's: nothing it started outlives it (T061).
+  const left = (dir: string) => Number(readFileSync(join(dir, 'left.pid'), 'utf8'));
+  const gone = async (pid: number) => {
+    await vi.waitFor(() => {
+      expect(() => process.kill(pid, 0)).toThrow();
+    });
+  };
+
+  it('stops a grouped run, and what it started, as soon as a line asks', async () => {
+    const dir = tempDir('run-');
+    const script = 'sleep 30 & echo $! > left.pid; echo one; echo two; wait; echo never';
+    const started = Date.now();
+    const line = (text: string) => (text === 'two' ? 'stop' : undefined);
+    const result = await runProcess('bash', ['-c', script], {
+      cwd: dir,
+      env: gitEnv,
+      group: true,
+      line,
+    });
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(result.stdout).toContain('one\ntwo\n');
+    expect(result.stdout).not.toContain('never');
+    await gone(left(dir));
+  }, 15_000);
+
+  it("stops what is left of a grouped run's process group once the program exits", async () => {
+    const dir = tempDir('run-');
+    const script = 'sleep 30 & echo $! > left.pid';
+    const result = await runProcess('bash', ['-c', script], { cwd: dir, env: gitEnv, group: true });
+    expect(result.status).toBe(0);
+    await gone(left(dir));
+  }, 15_000);
 });
 
 describe('CloudLauncher until the Phase 0 probe (T125)', () => {

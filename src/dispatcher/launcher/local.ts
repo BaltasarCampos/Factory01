@@ -60,6 +60,7 @@ import { EnvironmentError } from '../../cli/env.js';
 import { SERVED_HOOKS } from '../../commands/hook.js';
 import { WRAPPERS } from '../../guard/command-guard.js';
 import { isFable, roleVersion } from '../../events/schema.js';
+import { hasPassed } from '../../hooks/session.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
@@ -89,8 +90,16 @@ import {
 export type Runner = (
   program: string,
   args: readonly string[],
-  /** `timeout`, in ms, kills the program's whole process group when it is reached. */
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeout?: number },
+  options: {
+    cwd: string;
+    env: NodeJS.ProcessEnv;
+    /** In ms; kills the program's whole process group when it is reached. */
+    timeout?: number;
+    /** Runs the program in a process group of its own, as a timeout does. */
+    group?: boolean;
+    /** Each line of its output as it comes; a reason returned stops the run, group and all. */
+    line?: (line: string) => string | undefined;
+  },
 ) => Promise<{ status: number | null; stdout: string; stderr: string; timedOut?: boolean }>;
 
 /**
@@ -104,25 +113,29 @@ const DRAIN = { timed: 200, untimed: 2000 };
  * when it exits, whatever it leaves running: a child that keeps the output pipes open, such as one
  * a startup file starts with `setsid`, cannot hold the launch. The output drains for a moment, then
  * the pipes are destroyed; with a timeout, the program runs in a process group of its own, and what
- * is left of the group is stopped then too. On timeout the group is stopped and the run settles.
- * Once it has settled, nothing that happens later changes the result.
+ * is left of the group is stopped then too. On timeout the group is stopped and the run settles,
+ * and so it does as soon as `line` asks. Once it has settled, nothing later changes the result.
  */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
-    const { timeout, ...spawned } = options;
+    const { timeout, group, line, ...spawned } = options;
+    const grouped = timeout !== undefined || group === true;
     const child = spawn(program, args, {
       ...spawned,
       stdio: ['ignore', 'pipe', 'pipe'],
-      detached: timeout !== undefined,
+      detached: grouped,
     });
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     let stdout = '';
     let stderr = '';
     let timedOut = false;
     let settled = false;
     let drain: NodeJS.Timeout | undefined;
+    let pending = '';
     const stopGroup = () => {
       try {
-        if (timeout !== undefined && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+        if (grouped && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
       } catch {
         // The group has already ended.
       }
@@ -144,8 +157,17 @@ export const runProcess: Runner = (program, args, options) =>
             timedOut = true;
             settle(null);
           }, timeout);
-    child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
-    child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+    child.stdout.on('data', (chunk: string) => {
+      stdout += chunk;
+      if (line === undefined) return;
+      pending += chunk;
+      for (let end = pending.indexOf('\n'); end !== -1 && !settled; end = pending.indexOf('\n')) {
+        const stop = line(pending.slice(0, end));
+        pending = pending.slice(end + 1);
+        if (stop !== undefined) settle(null);
+      }
+    });
+    child.stderr.on('data', (chunk: string) => (stderr += chunk));
     child.on('error', (error) => {
       if (settled) return;
       settled = true;
@@ -451,6 +473,44 @@ function initCheck(init: Message, role: RoleName, model: string) {
     problems.push(`its model ${id || 'none'} is not ${family ? `of the ${model} family` : model}`);
   const missing = [...expected].filter((name) => !tools.has(name));
   return { problems: problems.map((problem) => visible(problem)), missing };
+}
+
+const mismatch = (problems: readonly string[]) =>
+  new SessionFailed(`its init message does not match its launch: ${problems.join('; ')}`);
+
+/**
+ * The checks made while the session runs, so one that did not start as launched is stopped at
+ * once, not after it has run (T061): each line in order, the init check as soon as the init
+ * message comes, and the passed record at the first assistant message, by when the SessionStart
+ * hook has run, whatever order T125 shows, and before any tool call. `failure` is why it stopped.
+ */
+function liveCheck(id: string, role: RoleName, model: string, passed: () => boolean) {
+  let init = false;
+  let assistant = false;
+  const check: { failure?: Error; line: (line: string) => string | undefined } = {
+    line: (text) => {
+      if (text.trim() === '') return undefined;
+      try {
+        const m = message(text);
+        if (!init) {
+          init = isInit(m, id);
+          const { problems } = init ? initCheck(m, role, model) : { problems: [] };
+          if (problems.length > 0) throw mismatch(problems);
+        } else if (m.type === 'assistant' && !assistant) {
+          assistant = true;
+          if (!passed())
+            throw new SessionFailed(
+              'its start check did not pass: it has no passed record by its first assistant message',
+            );
+        }
+        return undefined;
+      } catch (err) {
+        check.failure = err instanceof Error ? err : new Error(String(err));
+        return check.failure.message;
+      }
+    },
+  };
+  return check;
 }
 
 type Unavailable = Extract<Availability, { ok: false }>;
@@ -868,10 +928,15 @@ export class LocalLauncher implements SessionLauncher {
           };
           writeFileSync(files.record, `${JSON.stringify(record, null, 2)}\n`, WRITE_ONCE);
         });
+        // In a process group of its own, so stopping it stops what it started.
+        const live = liveCheck(files.id, request.role, model, () =>
+          hasPassed(this.options.home, files.id),
+        );
         const result = await this.run('claude', localInvocation(request, files, model), {
-          cwd,
-          env,
+          ...{ cwd, env, group: true },
+          line: live.line,
         });
+        if (live.failure !== undefined) throw live.failure;
         if (result.status !== 0)
           throw new EnvironmentError(
             `claude exited ${String(result.status)}: ${visible(result.stderr.trim())}`,
@@ -885,12 +950,9 @@ export class LocalLauncher implements SessionLauncher {
           const file = join(dirname(files.record), 'result.json');
           writeFileSync(file, `${JSON.stringify(reported(init, last), null, 2)}\n`, WRITE_ONCE);
         });
-        // Found only after the session has run until 28-4c-3 reads the stream live.
+        // Checked live above, and again on the whole stream.
         const { problems, missing } = initCheck(init, request.role, model);
-        if (problems.length > 0)
-          throw new SessionFailed(
-            `its init message does not match its launch: ${problems.join('; ')}`,
-          );
+        if (problems.length > 0) throw mismatch(problems);
         const notices: Notice[] = [];
         if (missing.length > 0)
           notices.push({
