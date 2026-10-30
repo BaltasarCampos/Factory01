@@ -45,6 +45,7 @@ import {
   accessSync,
   constants,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -85,19 +86,43 @@ import {
 export type Runner = (
   program: string,
   args: readonly string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv },
-) => Promise<{ status: number | null; stdout: string; stderr: string }>;
+  /** `timeout`, in ms, kills the program's whole process group when it is reached. */
+  options: { cwd: string; env: NodeJS.ProcessEnv; timeout?: number },
+) => Promise<{ status: number | null; stdout: string; stderr: string; timedOut?: boolean }>;
 
+/** A program with stdin from /dev/null, so nothing it runs can wait for input. */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
-    const child = spawn(program, args, { ...options, stdio: ['ignore', 'pipe', 'pipe'] });
+    const { timeout, ...spawned } = options;
+    const child = spawn(program, args, {
+      ...spawned,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // A group of its own, so a timeout stops everything it started.
+      detached: timeout !== undefined,
+    });
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    const timer =
+      timeout === undefined
+        ? undefined
+        : setTimeout(() => {
+            timedOut = true;
+            try {
+              if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+            } catch {
+              // The group has already ended.
+            }
+          }, timeout);
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
-    child.on('error', reject);
+    child.on('error', (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
     child.on('close', (status) => {
-      resolve({ status, stdout, stderr });
+      clearTimeout(timer);
+      resolve({ status, stdout, stderr, ...(timedOut ? { timedOut } : {}) });
     });
   });
 
@@ -179,16 +204,45 @@ function sessionPath(path: string | undefined, outside: readonly string[]): stri
 
 /** `CLAUDE.md` and `CLAUDE.local.md` in any letter case, as a disk that ignores case reads them. */
 const MEMORY = /^claude(\.local)?\.md$/i;
+/** What Claude Code loads from a `.claude` folder above where it runs, in any letter case. */
+const RULES = /^(claude\.md|rules)$/i;
 
-/** The memory files in every folder above `clone`, up to `/` (T061). */
-function memoryAbove(clone: string): string[] {
+const errno = (error: unknown) => (error as NodeJS.ErrnoException).code;
+
+/**
+ * The names in `dir` that `match`; none when it is missing. A folder that can be searched but not
+ * listed, such as a parent of mode 711, is checked for the `exact` names alone, by lstat.
+ */
+function namesIn(dir: string, match: RegExp, exact: readonly string[]): string[] {
+  try {
+    return readdirSync(dir).filter((name) => match.test(name));
+  } catch (error) {
+    if (errno(error) === 'ENOENT' || errno(error) === 'ENOTDIR') return [];
+    if (errno(error) !== 'EACCES') throw error;
+    return exact.filter((name) => {
+      try {
+        lstatSync(join(dir, name));
+        return true;
+      } catch (missing) {
+        if (errno(missing) === 'ENOENT') return false;
+        throw missing;
+      }
+    });
+  }
+}
+
+/**
+ * The memory files Claude Code would load from every folder above `clone`, up to `/`: each one's
+ * `CLAUDE.md` and `CLAUDE.local.md`, and its `.claude/CLAUDE.md` and `.claude/rules/` but home's,
+ * which the per-session settings' `claudeMdExcludes` keep out (T061).
+ */
+function memoryAbove(clone: string, home: string): string[] {
   const found: string[] = [];
   for (let dir = dirname(clone); ; dir = dirname(dir)) {
-    found.push(
-      ...readdirSync(dir)
-        .filter((name) => MEMORY.test(name))
-        .map((n) => join(dir, n)),
-    );
+    found.push(...namesIn(dir, MEMORY, ['CLAUDE.md', 'CLAUDE.local.md']).map((n) => join(dir, n)));
+    const claude = join(dir, '.claude');
+    if (dir !== home)
+      found.push(...namesIn(claude, RULES, ['CLAUDE.md', 'rules']).map((n) => join(claude, n)));
     if (dir === '/') return found;
   }
 }
@@ -199,11 +253,22 @@ function memoryAbove(clone: string): string[] {
  */
 const UNREAD = ['/home', '/root', '/mnt', '/media', '/srv', ...SHARED_TMP];
 
-/** Where `program` really is, the first on `folders` the Owner can run; undefined for none. */
-function located(program: string, folders: readonly string[]): string | undefined {
+/**
+ * The first `program` on `folders` the Owner can run, as found there and where it really is;
+ * undefined for none.
+ */
+function located(program: string, folders: readonly string[]) {
   const at = folders.map((folder) => join(folder, program)).find(executable);
-  return at === undefined ? undefined : realpathSync(at);
+  return at === undefined ? undefined : { at, real: realpathSync(at) };
 }
+
+/** How long a check before launch may run, in ms. */
+const CHECK_TIMEOUT = 10_000;
+/**
+ * Shell words the session's commands rely on that a startup file could redefine: Claude Code's
+ * own wrapper runs some of them, and rvm and some nvm setups override `cd`.
+ */
+const SHELL_WORDS = ['cd', 'pwd', 'source', 'eval', 'exec', 'exit'];
 
 /** Whether `path` is a file the Owner can run. */
 function executable(path: string): boolean {
@@ -342,6 +407,8 @@ export interface LocalOptions {
   /** Default `origin/main`. */
   mainRef?: string;
   run?: Runner;
+  /** How long the shell check and `claude --version` may run, in ms; default 10 s. */
+  checkTimeout?: number;
   /** A fresh session id for each launch; default a random UUID. */
   sessionId?: () => string;
   /** Where the session's temporary folder is made, kept short (T061); default `/tmp`. */
@@ -544,7 +611,9 @@ export class LocalLauncher implements SessionLauncher {
         this.clone(request.project, repo, request.branch, heads, files.id),
       );
       // Claude Code loads these from every folder above where it runs, whatever the settings say.
-      const memory = step('reading the folders above the clone', () => memoryAbove(cwd));
+      const memory = step('reading the folders above the clone', () =>
+        memoryAbove(cwd, realpathSync(this.options.home)),
+      );
       if (memory.length > 0)
         throw new LaunchRefused(
           `no local session started: Claude Code would load ${memory.map(visible).join(', ')}, above the session's clone; move it away`,
@@ -599,7 +668,11 @@ export class LocalLauncher implements SessionLauncher {
             throw new LaunchRefused(
               `no local session started: ${program}, which Claude Code's sandbox needs, is not on the session's PATH (${env.PATH}); install it`,
             );
-        await this.shellNames(cwd, env);
+        // An empty folder of the check's own: a tool manager a startup file activates, such as
+        // mise, asdf or nvm's auto-use, reads its configuration from where the shell starts.
+        const empty = join(tmp, 'shell-check');
+        mkdirSync(empty);
+        await this.shellNames(empty, env);
         await this.claudeVersion(cwd, env);
         step("writing the session's settings and record", () => {
           const tests = this.testFiles(cwd);
@@ -653,22 +726,22 @@ export class LocalLauncher implements SessionLauncher {
   private async shellNames(cwd: string, env: NodeJS.ProcessEnv) {
     const commands = Object.values(factoryPolicy().roles).flatMap((row) => row.shell);
     const names = new Set([...commands.map((prefix) => prefix.split(' ')[0] ?? ''), ...WRAPPERS]);
+    for (const name of SHELL_WORDS) names.add(name);
+    // An end line no startup file can know, so one that exits or starts another shell is seen.
+    const end = `factory-shell-check-${randomUUID()}`;
     for (const mode of ['-lc', '-ic']) {
-      let result: Awaited<ReturnType<Runner>>;
-      try {
-        result = await this.run('bash', [mode, 'compgen -A function -A alias || true'], {
-          cwd,
-          env,
-        });
-      } catch (err) {
-        const why = err instanceof Error ? err.message : String(err);
-        throw new EnvironmentError(`no local session started: bash ${mode}: ${visible(why)}`);
-      }
+      const command = `compgen -A function -A alias; echo ${end}`;
+      const result = await this.checked(`bash ${mode}`, 'bash', [mode, command], cwd, env);
+      const lines = result.stdout.split('\n').map((line) => line.trim());
+      if (!lines.includes(end))
+        throw new EnvironmentError(
+          `no local session started: bash ${mode} printed no end line, so its startup files may exit or start another shell first; the check cannot read its functions and aliases`,
+        );
       if (result.status !== 0)
         throw new EnvironmentError(
           `no local session started: bash ${mode} exited ${String(result.status)}: ${visible(result.stderr.trim())}`,
         );
-      const clash = result.stdout.split('\n').filter((name) => names.has(name.trim()));
+      const clash = lines.slice(0, lines.indexOf(end)).filter((name) => names.has(name));
       if (clash.length > 0)
         throw new LaunchRefused(
           `no local session started: bash ${mode} defines ${clash.map(visible).join(', ')} as a function or alias, the name of a command a session runs; remove it from your shell's startup files`,
@@ -681,13 +754,7 @@ export class LocalLauncher implements SessionLauncher {
    * 2.1.295 is only the floor for `onFailure: "block"`, and the guards rely on more (T082).
    */
   private async claudeVersion(cwd: string, env: NodeJS.ProcessEnv) {
-    let result: Awaited<ReturnType<Runner>>;
-    try {
-      result = await this.run('claude', ['--version'], { cwd, env });
-    } catch (err) {
-      const why = err instanceof Error ? err.message : String(err);
-      throw new EnvironmentError(`no local session started: claude --version: ${visible(why)}`);
-    }
+    const result = await this.checked('claude --version', 'claude', ['--version'], cwd, env);
     const [major = 0, minor = 0, patch = 0] = (/^(\d+)\.(\d+)\.(\d+)/.exec(result.stdout) ?? [])
       .slice(1)
       .map(Number);
@@ -699,6 +766,32 @@ export class LocalLauncher implements SessionLauncher {
       throw new LaunchRefused(
         `no local session started: the session's claude reports ${JSON.stringify(visible(result.stdout.trim()))}; local sessions need Claude Code ${CLAUDE_CODE_VERSION} or later`,
       );
+  }
+
+  /**
+   * A check before launch, run with stdin from /dev/null and a short timeout that kills it: one
+   * that cannot start or does not finish is an error, never a pass.
+   */
+  private async checked(
+    what: string,
+    program: string,
+    args: readonly string[],
+    cwd: string,
+    env: NodeJS.ProcessEnv,
+  ) {
+    const timeout = this.options.checkTimeout ?? CHECK_TIMEOUT;
+    let result: Awaited<ReturnType<Runner>>;
+    try {
+      result = await this.run(program, args, { cwd, env, timeout });
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      throw new EnvironmentError(`no local session started: ${what}: ${visible(why)}`);
+    }
+    if (result.timedOut === true)
+      throw new EnvironmentError(
+        `no local session started: ${what} did not finish within ${String(timeout / 1000)} s`,
+      );
+    return result;
   }
 
   /** The project's gh token, for a role with `gh` in its shell. */
@@ -770,8 +863,9 @@ export class LocalLauncher implements SessionLauncher {
   }
 
   /**
-   * The real folder of every program on the role's shell list that the sandbox would not read,
-   * to open read-only, such as Security's semgrep under `~/.local`; a program not on the
+   * The folders of every program on the role's shell list that the sandbox would not read, to
+   * open read-only, such as Security's semgrep under `~/.local`, through the sandbox's own check
+   * that no opened folder overlaps a denied one; a program not on the
    * session's PATH refuses the launch by name, since the session could not run it (T061).
    */
   private programFolders(role: RoleName, folders: readonly string[], opened: readonly string[]) {
@@ -779,14 +873,19 @@ export class LocalLauncher implements SessionLauncher {
     const programs = new Set(factoryPolicy().roles[role].shell.map((p) => p.split(' ')[0] ?? ''));
     const out: string[] = [];
     for (const program of programs) {
-      const real = located(program, folders);
-      if (real === undefined)
+      const found = located(program, folders);
+      if (found === undefined)
         throw new LaunchRefused(
           `no local session started: ${program}, on the ${role} role's shell list, is not on the session's PATH (${folders.join(':')}); install it`,
         );
-      const folder = dirname(real);
-      const denied = [home, ...UNREAD].some((root) => under(folder, root));
-      if (denied && ![...opened, ...out].some((open) => under(folder, open))) out.push(folder);
+      // A virtual environment's root, which its bin needs, and the PATH folder of a link to it,
+      // such as pipx's ~/.local/bin/semgrep, which the shell reads first.
+      const bin = dirname(found.real);
+      const venv = existsSync(join(dirname(bin), 'pyvenv.cfg')) ? dirname(bin) : bin;
+      for (const folder of new Set([dirname(found.at), venv])) {
+        const denied = [home, ...UNREAD].some((root) => under(folder, root));
+        if (denied && ![...opened, ...out].some((open) => under(folder, open))) out.push(folder);
+      }
     }
     return out;
   }

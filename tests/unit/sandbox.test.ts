@@ -62,6 +62,9 @@ describe('the sandbox settings for session shells (T183)', () => {
       /\.factory\/bin is under the denied read ~\/\.factory/,
     );
     expect(open([`${HOME}/.ssh`])).toThrow(/is under the denied read ~\/\.ssh/);
+    // Never one that holds a denied read either: opened and denied folders never overlap.
+    expect(open([`${HOME}/.config`])).toThrow(/\.config holds the denied read ~\/\.config\/gh/);
+    expect(open([`${HOME}/.claude`])).toThrow(/\.claude holds the denied read ~\/\.claude\//);
     expect(() =>
       renderSandbox(policy, 'builder', { ...session, clone: `${HOME}/.factory/work/x` }),
     ).toThrow(/is under the denied read ~\/\.factory/);

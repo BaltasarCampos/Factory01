@@ -197,6 +197,7 @@ describe('the per-session settings (T061, T082)', () => {
       ...above.flatMap((dir) => [`${dir}/CLAUDE.md`, `${dir}/CLAUDE.local.md`]),
       `${HOME}/.claude/CLAUDE.md`,
       `${HOME}/.claude/CLAUDE.local.md`,
+      `${HOME}/.claude/rules/**`,
       `${CLONE}/**/node_modules/**`,
     ]);
   });
