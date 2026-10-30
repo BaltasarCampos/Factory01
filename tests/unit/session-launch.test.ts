@@ -55,6 +55,30 @@ const withStubs = (env: NodeJS.ProcessEnv) => ({
   PATH: `${SANDBOX_BIN}:${env.PATH ?? ''}`,
 });
 
+/**
+ * A PATH folder of the test's own, holding only what a launch itself runs: git, and node with npm
+ * and npx. A test about programs on the PATH builds its PATH from this and folders it makes, never
+ * from what the machine running it has installed (T061).
+ */
+function launchFolder(): string {
+  const dir = join(homeDir(), 'launch-bin');
+  mkdirSync(dir);
+  const git = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+  const node = dirname(process.execPath);
+  for (const program of [git, process.execPath, join(node, 'npm'), join(node, 'npx')])
+    symlinkSync(realpathSync(program), join(dir, program.split('/').at(-1) ?? ''));
+  return dir;
+}
+
+/** A folder of the test's own with stand-ins for `programs`. */
+function standIns(...programs: string[]): string {
+  const dir = join(homeDir(), 'stand-ins');
+  mkdirSync(dir);
+  for (const program of programs)
+    writeFileSync(join(dir, program), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  return realpathSync(dir);
+}
+
 /** What `claude --version` prints for a version the launcher accepts. */
 const VERSION = { status: 0, stdout: '2.1.309 (Claude Code)\n', stderr: '' };
 
@@ -116,8 +140,8 @@ function setup(
     env?: NodeJS.ProcessEnv;
     /** The project's gh token in `~/.factory/tokens/`; null for none. */
     token?: string | null;
-    /** The programs the sandbox needs on the session's PATH; default bwrap and socat. */
-    sandbox?: string[];
+    /** Whether the PATH starts with stand-ins for bwrap and socat; default yes. */
+    stubs?: boolean;
   } = {},
 ) {
   const repo = makeRepo({ files: { '.factory/config': CONFIG, ...GUARDED } });
@@ -140,8 +164,10 @@ function setup(
   }
   const runner = fakeRunner();
   const launcher = new LocalLauncher({
-    ...{ home, env: withStubs(options.env ?? gitEnv) },
-    ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+    ...{
+      home,
+      env: (options.stubs ?? true) ? withStubs(options.env ?? gitEnv) : (options.env ?? gitEnv),
+    },
     release: options.release ?? (() => manifestOf(GUARDED)),
     run: options.run ?? runner.run,
     sessionId: sessionIds(),
@@ -416,10 +442,7 @@ describe('LocalLauncher (research R8, R9)', () => {
         TERM: 'dumb',
       },
     };
-    // node's and git's folders, which the launcher itself runs git from.
-    const git = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
-    const folders = [process.execPath, git].map((program) => realpathSync(dirname(program)));
-    const tools = [...new Set(folders)].join(':');
+    const tools = realpathSync(launchFolder());
     const PATH = ['bin', '', '/tmp', '/var/tmp/', '/no/such/folder', tools].join(':');
     const t = setup({ env: { ...gitEnv, ...owners, PATH } });
 
@@ -542,10 +565,11 @@ describe('LocalLauncher (research R8, R9)', () => {
   });
 
   it("refuses a launch when a program Claude Code's sandbox needs is not on the session's PATH", async () => {
-    const t = setup({ sandbox: ['bwrap', 'factory-no-such-program'] });
+    const PATH = `${standIns('bwrap')}:${launchFolder()}`;
+    const t = setup({ stubs: false, env: { ...gitEnv, PATH } });
     const refused = t.launch(REQUEST);
     await expect(refused).rejects.toThrow(LaunchRefused);
-    await expect(refused).rejects.toThrow(/factory-no-such-program, which Claude Code's sandbox/);
+    await expect(refused).rejects.toThrow(/socat, which Claude Code's sandbox needs/);
     expect(t.sessions()).toEqual([]);
   });
 
@@ -608,27 +632,22 @@ describe('LocalLauncher (research R8, R9)', () => {
 
   describe("every program on the role's shell list, by real path", () => {
     const SECURITY = { ...REQUEST, role: 'security', station: 5 } as const;
-    /** The tests' own stand-ins for semgrep and gitleaks (tests/helpers/bin). */
-    const bin = realpathSync(new URL('../helpers/bin', import.meta.url).pathname);
-    const without = (folder: string) =>
-      (gitEnv.PATH ?? '')
-        .split(':')
-        .filter((f) => f !== '' && !(existsSync(f) && realpathSync(f) === folder))
-        .join(':');
 
     it('opens the folder of a program the sandbox could not read, read-only', async () => {
-      const t = setup();
+      // Under the test's home, which the sandbox denies whole unless a folder is opened.
+      const bin = standIns('semgrep', 'gitleaks');
+      const t = setup({ env: { ...gitEnv, PATH: `${bin}:${launchFolder()}` } });
       await t.launch(SECURITY);
       const settings = JSON.parse(
         readFileSync(sessionFiles(t.home).settings, 'utf8'),
       ) as SessionSettings;
-      // Under /home on the laptop, so denied whole unless opened.
       expect(settings.sandbox.filesystem.allowRead).toContain(bin);
       expect(settings.sandbox.filesystem.allowWrite).not.toContain(bin);
     });
 
     it("refuses a launch, by name, when one is not on the session's PATH", async () => {
-      const t = setup({ env: { ...gitEnv, PATH: without(bin) } });
+      const PATH = `${standIns('gitleaks')}:${launchFolder()}`;
+      const t = setup({ env: { ...gitEnv, PATH } });
       const refused = t.launch(SECURITY);
       await expect(refused).rejects.toThrow(LaunchRefused);
       await expect(refused).rejects.toThrow(/semgrep, on the security role's shell list, is not/);
@@ -643,7 +662,7 @@ describe('LocalLauncher (research R8, R9)', () => {
         writeFileSync(join(elsewhere, program), '#!/bin/sh\n', { mode: 0o755 });
         symlinkSync(join(elsewhere, program), join(linked, program));
       }
-      const t = setup({ env: { ...gitEnv, PATH: `${linked}:${without(bin)}` } });
+      const t = setup({ env: { ...gitEnv, PATH: `${linked}:${launchFolder()}` } });
       await expect(t.launch(SECURITY)).rejects.toThrow(/shared temporary folder/);
       expect(t.sessions()).toEqual([]);
     });
