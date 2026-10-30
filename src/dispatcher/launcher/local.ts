@@ -346,8 +346,6 @@ export interface LocalOptions {
   sessionId?: () => string;
   /** Where the session's temporary folder is made, kept short (T061); default `/tmp`. */
   tmpRoot?: string;
-  /** The programs Claude Code's sandbox runs, on the session's PATH; default bwrap and socat. */
-  sandbox?: readonly string[];
 }
 
 export class LocalLauncher implements SessionLauncher {
@@ -596,7 +594,7 @@ export class LocalLauncher implements SessionLauncher {
         );
         // The session's own PATH: what Claude Code finds there is what the session runs.
         const folders = env.PATH.split(':').filter((folder) => folder !== '');
-        for (const program of this.options.sandbox ?? ['bwrap', 'socat'])
+        for (const program of ['bwrap', 'socat'])
           if (located(program, folders) === undefined)
             throw new LaunchRefused(
               `no local session started: ${program}, which Claude Code's sandbox needs, is not on the session's PATH (${env.PATH}); install it`,
