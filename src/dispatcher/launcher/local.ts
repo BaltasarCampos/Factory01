@@ -82,6 +82,7 @@ import {
   type Availability,
   type LaunchRequest,
   type LaunchResult,
+  type Notice,
   type SessionLauncher,
 } from './types.js';
 
@@ -92,8 +93,11 @@ export type Runner = (
   options: { cwd: string; env: NodeJS.ProcessEnv; timeout?: number },
 ) => Promise<{ status: number | null; stdout: string; stderr: string; timedOut?: boolean }>;
 
-/** How long a program's output may drain once it has exited, in ms. */
-const DRAIN = 200;
+/**
+ * How long a program's output may drain once it has exited, in ms: a check's is short, and an
+ * untimed run's, such as a session's, longer, so its last lines are not lost.
+ */
+const DRAIN = { timed: 200, untimed: 2000 };
 
 /**
  * A program with stdin from /dev/null, so nothing it runs can wait for input. It has finished
@@ -101,6 +105,7 @@ const DRAIN = 200;
  * a startup file starts with `setsid`, cannot hold the launch. The output drains for a moment, then
  * the pipes are destroyed; with a timeout, the program runs in a process group of its own, and what
  * is left of the group is stopped then too. On timeout the group is stopped and the run settles.
+ * Once it has settled, nothing that happens later changes the result.
  */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
@@ -113,6 +118,7 @@ export const runProcess: Runner = (program, args, options) =>
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let settled = false;
     let drain: NodeJS.Timeout | undefined;
     const stopGroup = () => {
       try {
@@ -122,6 +128,8 @@ export const runProcess: Runner = (program, args, options) =>
       }
     };
     const settle = (status: number | null) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       clearTimeout(drain);
       child.stdout.destroy();
@@ -139,13 +147,17 @@ export const runProcess: Runner = (program, args, options) =>
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
     child.on('error', (error) => {
+      if (settled) return;
+      settled = true;
       clearTimeout(timer);
       reject(error);
     });
     child.on('exit', (status) => {
+      if (settled) return;
+      const wait = timeout === undefined ? DRAIN.untimed : DRAIN.timed;
       drain = setTimeout(() => {
         settle(status);
-      }, DRAIN);
+      }, wait);
     });
     child.on('close', (status) => {
       settle(status);
@@ -204,8 +216,10 @@ const FINE_GRAINED = /^github_pat_[A-Za-z0-9_]+$/;
 /** The project's gh token as the Owner sets it up, in the words the header above uses. */
 const tokenSetup = (repo: string) =>
   `a fine-grained token for ${repo} only, with Issues read and write, Pull requests read and write, Contents read-only and Metadata read-only, expiring soon after the run. GitHub has no comment-only permission, so it can also change labels and close issues, which is why gates rest on signed records`;
-/** A model name, which cannot read as an option. */
-const MODEL = /^[a-z0-9][a-z0-9.[\]-]*$/i;
+/** The model families a role file may name, whose init message must name a model of it. */
+const FAMILIES = ['sonnet', 'opus', 'haiku'];
+/** A plain family or a full Claude id: no alias such as `opusplan` or `sonnet[1m]` (T061). */
+const MODEL = /^(sonnet|opus|haiku|claude-[a-z0-9]+(-[a-z0-9.]+)*)$/;
 
 /** The model a role file's frontmatter names; none for a missing, Fable or odd one (T078). */
 function roleModel(text: string): string | undefined {
@@ -326,33 +340,60 @@ export function sessionTools(role: RoleName): string[] {
 
 type Message = Record<string, unknown>;
 
+const streamFailed = (why: string) => new EnvironmentError(`the session failed: ${why}`);
+
+/** A line of the session's `stream-json`; one that is not a JSON object fails the session. */
+function message(line: string): Message {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    value = undefined;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value))
+    throw streamFailed(
+      `its stream has a line that is not a JSON object: ${visible(line.slice(0, 200))}`,
+    );
+  return value as Message;
+}
+
 /**
- * The session's `stream-json`, one message a line: a line that is not a JSON object, or a stream
- * with no init message or no result line, is a failed session, never an empty one (T061).
+ * Whether `m` is the main session's init message, read in order: the first system/init line,
+ * before any assistant, user or result line, carrying the launched session id. Other system lines,
+ * such as a hook's, may come before it, and no subagent starts before the main session's first
+ * assistant message, so it is never a subagent's (T061).
  */
-function readStream(stdout: string): { init: Message; result: Message } {
+function isInit(m: Message, id: string): boolean {
+  if (m.type !== 'system')
+    throw streamFailed(
+      `its stream has a line of type ${visible(String(m.type))} before its init message`,
+    );
+  if (m.subtype !== 'init') return false;
+  if (m.session_id !== id)
+    throw streamFailed(
+      `its init message reports session ${visible(JSON.stringify(m.session_id ?? null))}, not ${id} as launched`,
+    );
+  return true;
+}
+
+/**
+ * The session's `stream-json`, one message a line: its init message, as `isInit` reads it, and
+ * its result, the final line. Any other stream is a failed session, never an empty one (T061).
+ */
+function readStream(stdout: string, id: string): { init: Message; result: Message } {
   const messages = stdout
     .split('\n')
     .filter((line) => line.trim() !== '')
-    .map((line) => {
-      let message: unknown;
-      try {
-        message = JSON.parse(line);
-      } catch {
-        message = undefined;
-      }
-      if (typeof message !== 'object' || message === null || Array.isArray(message))
-        throw new EnvironmentError(
-          `the session failed: its stream has a line that is not a JSON object: ${visible(line.slice(0, 200))}`,
-        );
-      return message as Message;
-    });
-  const init = messages.find((m) => m.type === 'system' && m.subtype === 'init');
-  const result = messages.find((m) => m.type === 'result');
-  if (result === undefined)
-    throw new EnvironmentError('the session failed: its stream has no result line');
-  if (init === undefined)
-    throw new EnvironmentError('the session failed: its stream has no init message');
+    .map(message);
+  const init = messages.find((m) => isInit(m, id));
+  if (init === undefined) throw streamFailed('its stream has no init message');
+  const result = messages.at(-1);
+  if (result?.type !== 'result')
+    throw streamFailed(
+      messages.some((m) => m.type === 'result')
+        ? 'its stream goes on after its result line'
+        : 'its stream has no result line',
+    );
   return { init, result };
 }
 
@@ -382,34 +423,34 @@ function reported(init: Message, result: Message) {
   };
 }
 
+/** Agent and Task are one tool: 2.1.309's init lists Task where a role file names Agent (A3c). */
+const tool = (name: string) => (name === 'Agent' ? 'Task' : name);
+
 /**
- * How the init message differs from the launch: the tools exactly the role's, no MCP server but
- * the factory's, `permissionMode` `dontAsk` and a model of the role file's family, never Fable,
- * since the hook input has no model field (T061, T078).
+ * How the init message differs from the launch: no tool beyond the role's, no MCP server but the
+ * factory's, `permissionMode` `dontAsk`, and the role file's model, a family by a model of it and a
+ * full id by itself, never Fable, since the hook input has no model field (T061, T078). A missing
+ * tool can only take something away, so it is not a problem, only `missing`.
  */
-function initProblems(init: Message, role: RoleName, model: string): string[] {
+function initCheck(init: Message, role: RoleName, model: string) {
   const problems: string[] = [];
-  const tools = strings(init.tools);
-  const expected = sessionTools(role);
-  const extra = tools.filter((tool) => !expected.includes(tool));
-  const missing = expected.filter((tool) => !tools.includes(tool));
-  if (extra.length + missing.length > 0) {
-    const also = extra.length > 0 ? [`also ${extra.join(', ')}`] : [];
-    const without = missing.length > 0 ? [`without ${missing.join(', ')}`] : [];
-    problems.push(
-      `its tools are not exactly the ${role} role's: ${[...also, ...without].join('; ')}`,
-    );
-  }
+  const tools = new Set(strings(init.tools).map(tool));
+  const expected = new Set(sessionTools(role).map(tool));
+  const extra = [...tools].filter((name) => !expected.has(name));
+  if (extra.length > 0)
+    problems.push(`it has ${extra.join(', ')}, beyond the ${role} role's tools`);
   const servers = strings(init.mcp_servers, 'name').filter((name) => name !== 'factory');
   if (servers.length > 0)
     problems.push(`it has the MCP server ${servers.join(', ')}, which is not the factory's`);
   if (init.permissionMode !== 'dontAsk')
     problems.push(`its permission mode ${JSON.stringify(init.permissionMode)}, not dontAsk`);
   const id = typeof init.model === 'string' ? init.model : '';
+  const family = FAMILIES.includes(model);
   if (isFable(id)) problems.push(`its model ${id} is a Fable model`);
-  else if (!id.toLowerCase().includes(model.toLowerCase()))
-    problems.push(`its model ${id || 'none'} is not of the ${model} family`);
-  return problems.map((problem) => visible(problem));
+  else if (family ? !id.split('-').includes(model) : id !== model)
+    problems.push(`its model ${id || 'none'} is not ${family ? `of the ${model} family` : model}`);
+  const missing = [...expected].filter((name) => !tools.has(name));
+  return { problems: problems.map((problem) => visible(problem)), missing };
 }
 
 type Unavailable = Extract<Availability, { ok: false }>;
@@ -835,7 +876,7 @@ export class LocalLauncher implements SessionLauncher {
           throw new EnvironmentError(
             `claude exited ${String(result.status)}: ${visible(result.stderr.trim())}`,
           );
-        const { init, result: last } = readStream(result.stdout);
+        const { init, result: last } = readStream(result.stdout, files.id);
         if (last.session_id !== files.id)
           throw new EnvironmentError(
             `claude reported session ${visible(JSON.stringify(last.session_id ?? null))}, not ${files.id} as launched`,
@@ -845,15 +886,25 @@ export class LocalLauncher implements SessionLauncher {
           writeFileSync(file, `${JSON.stringify(reported(init, last), null, 2)}\n`, WRITE_ONCE);
         });
         // Found only after the session has run until 28-4c-3 reads the stream live.
-        const problems = initProblems(init, request.role, model);
+        const { problems, missing } = initCheck(init, request.role, model);
         if (problems.length > 0)
           throw new SessionFailed(
             `its init message does not match its launch: ${problems.join('; ')}`,
           );
+        const notices: Notice[] = [];
+        if (missing.length > 0)
+          notices.push({
+            kind: 'session-tools',
+            text: `a ${request.role} session ran without ${missing.join(', ')}, which its role has; set the expected tools from T125's part (7)`,
+          });
+        // No role in the text, so the inbox gets one alert per version.
         const version = init.claude_code_version;
-        if (version === CLAUDE_CODE_VERSION) return { sessionId: files.id };
-        const notice = `Claude Code ${visible(String(version))} ran a ${request.role} session; the release was checked against ${CLAUDE_CODE_VERSION}, so re-run T125's A8`;
-        return { sessionId: files.id, notices: [notice] };
+        if (version !== CLAUDE_CODE_VERSION)
+          notices.push({
+            kind: 'claude-version',
+            text: `Claude Code ${visible(String(version))} ran a session; the release was checked against ${CLAUDE_CODE_VERSION}, so re-run T125's A8`,
+          });
+        return { sessionId: files.id, ...(notices.length > 0 ? { notices } : {}) };
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }

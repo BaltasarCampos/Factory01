@@ -22,10 +22,16 @@ export interface LaunchRequest {
 /** Whether a session can start now; if not, why, and whether it is tampering (urgent). */
 export type Availability = { ok: true } | { ok: false; reason: string; urgent?: boolean };
 
-/** A session that ran; `notices` are info alerts for the Owner, such as another Claude Code version. */
+/** An info alert for the Owner about a session that ran, such as another Claude Code version. */
+export interface Notice {
+  kind: 'claude-version' | 'session-tools';
+  text: string;
+}
+
+/** A session that ran, with its notices. */
 export interface LaunchResult {
   sessionId: string;
-  notices?: readonly string[];
+  notices?: readonly Notice[];
 }
 
 export interface SessionLauncher {
@@ -51,11 +57,8 @@ export class LaunchRefused extends RefusedError {
 }
 
 /**
- * A session that ran but did not run as launched, such as an init message naming another
- * permission mode: a failure with an urgent alert, and nothing of it is pushed (T061, T086).
+ * A session that ran, used the Owner's plan and failed, never "no session started", such as one
+ * whose init message names another permission mode: an urgent alert, and nothing of it is pushed
+ * (T061, T086).
  */
-export class SessionFailed extends LaunchRefused {
-  constructor(message: string) {
-    super(message, true);
-  }
-}
+export class SessionFailed extends RefusedError {}

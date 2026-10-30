@@ -23,6 +23,7 @@ import {
   LocalLauncher,
   localInvocation,
   runProcess,
+  sessionTools,
   type Runner,
 } from '../../src/dispatcher/launcher/local.js';
 import {
@@ -61,6 +62,8 @@ const REQUEST = {
 const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: owner/project\ninbox_issue: 1\n`;
 /** The session id `claude` was launched with, which its JSON output reports back. */
 const launchedId = (args: readonly string[]) => args[args.indexOf('--session-id') + 1];
+/** A hook's own system line, which may come before the init message. */
+const HOOK_LINE = JSON.stringify({ type: 'system', subtype: 'hook_response', hook_name: 'x' });
 const echo = (args: readonly string[]) => sessionStream(args);
 
 /** Programs Claude Code's sandbox needs, as stand-ins on the session's PATH. */
@@ -554,6 +557,8 @@ describe('LocalLauncher (research R8, R9)', () => {
     ['names no model', roleFile('spec').replace('model: sonnet\n', '')],
     ['names a Fable model', roleFile('spec').replace('model: sonnet', 'model: fable')],
     ['names a model that reads as an option', roleFile('spec').replace('sonnet', '--debug')],
+    ['names sonnet[1m]', roleFile('spec').replace('sonnet', 'sonnet[1m]')],
+    ['names opusplan', roleFile('spec').replace('sonnet', 'opusplan')],
   ])('refuses a role file that %s, running nothing', async (_name, spec) => {
     const files = { ...GUARDED, '.claude/agents/spec.md': spec };
     const t = setup({ mainFiles: files, release: () => manifestOf(files) });
@@ -940,6 +945,16 @@ describe('LocalLauncher (research R8, R9)', () => {
           typeof change === 'function' ? change(args) : sessionStream(args, change),
         ).run,
       });
+    /** A launch of the spec role file `spec`, whose session's stream is as `change` says. */
+    const modelled = (spec: string, change: StreamChange) => {
+      const files = { ...GUARDED, '.claude/agents/spec.md': spec };
+      const stream = (args: readonly string[]) => sessionStream(args, change);
+      return setup({
+        mainFiles: files,
+        release: () => manifestOf(files),
+        run: fakeRunner(0, stream).run,
+      });
+    };
 
     it('records the model, the version, the permission denials and the models it used', async () => {
       const t = streamed({
@@ -971,15 +986,31 @@ describe('LocalLauncher (research R8, R9)', () => {
         (args: readonly string[]) => `oops\n${sessionStream(args)}`,
         /not a JSON object: oops/,
       ],
+      ['no init message', () => `${HOOK_LINE}\n`, /no init message/],
       [
-        'no init message',
-        (args: readonly string[]) => sessionStream(args).split('\n').slice(1).join('\n'),
-        /no init message/,
+        'an assistant line before the init',
+        (args: readonly string[]) => `{"type":"assistant","message":{}}\n${sessionStream(args)}`,
+        /a line of type assistant before its init message/,
+      ],
+      [
+        'an init with another session id',
+        (args: readonly string[]) => sessionStream(args, { init: { session_id: 's-other' } }),
+        new RegExp(`init message reports session "s-other", not ${FIRST} as launched`),
+      ],
+      [
+        'a result line followed by another message',
+        (args: readonly string[]) => `${sessionStream(args)}{"type":"assistant","message":{}}\n`,
+        /goes on after its result line/,
       ],
     ])('a stream with %s is a failed session, never an empty one', async (_name, stream, why) => {
       const refused = streamed(stream).launch(REQUEST);
       await expect(refused).rejects.toThrow(EnvironmentError);
       await expect(refused).rejects.toThrow(why);
+    });
+
+    it('reads the init message after a hook system line that comes before it', async () => {
+      const t = streamed((args) => `${HOOK_LINE}\n${sessionStream(args)}`);
+      await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
     });
 
     it.each([
@@ -991,7 +1022,7 @@ describe('LocalLauncher (research R8, R9)', () => {
       [
         'a tool the role lacks',
         { init: { tools: ['Read', 'Grep', 'Glob', 'WebFetch'] } },
-        /tools are not exactly the spec role's: also WebFetch/,
+        /it has WebFetch, beyond the spec role's tools/,
       ],
       [
         "an MCP server not the factory's",
@@ -1008,12 +1039,20 @@ describe('LocalLauncher (research R8, R9)', () => {
         { init: { model: 'claude-sonnet-fable-5-1' } },
         /claude-sonnet-fable-5-1 is a Fable model/,
       ],
+      [
+        'a full id other than the role file names',
+        { init: { model: 'claude-sonnet-5-6' } },
+        /claude-sonnet-5-6 is not claude-sonnet-5-5/,
+        'claude-sonnet-5-5',
+      ],
     ])(
       'a session whose init message names %s is a failure, with an urgent alert',
-      async (_name, change, why) => {
-        const refused = streamed(change).launch(REQUEST);
+      async (_name, change, why, model?: string) => {
+        const spec = model === undefined ? undefined : roleFile('spec').replace('sonnet', model);
+        const refused = (spec === undefined ? streamed(change) : modelled(spec, change)).launch(
+          REQUEST,
+        );
         await expect(refused).rejects.toThrow(SessionFailed);
-        await expect(refused).rejects.toMatchObject({ urgent: true });
         await expect(refused).rejects.toThrow(why);
       },
     );
@@ -1021,10 +1060,42 @@ describe('LocalLauncher (research R8, R9)', () => {
     it('notices a Claude Code version other than the one the release was checked against', async () => {
       await expect(streamed({}).launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
       const newer = streamed({ init: { claude_code_version: '2.1.310' } });
-      await expect(newer.launch(REQUEST)).resolves.toEqual({
-        sessionId: FIRST,
-        notices: [expect.stringMatching(/Claude Code 2\.1\.310 ran .*2\.1\.309.*A8/) as string],
+      const { notices } = await newer.launch(REQUEST);
+      expect(notices).toEqual([
+        {
+          kind: 'claude-version',
+          text: expect.stringMatching(/Claude Code 2\.1\.310 ran .*2\.1\.309.*A8/) as string,
+        },
+      ]);
+      // No role in the text, so the inbox gets one alert per version, whatever role ran.
+      expect(notices?.[0]?.text).not.toContain('spec');
+    });
+
+    it('notices a tool missing from the init message, which can only take one away, and goes ahead', async () => {
+      const tools = sessionTools('spec').filter((name) => name !== 'ToolSearch');
+      const { notices } = await streamed({ init: { tools } }).launch(REQUEST);
+      expect(notices).toEqual([
+        {
+          kind: 'session-tools',
+          text: expect.stringMatching(/a spec session ran without ToolSearch/) as string,
+        },
+      ]);
+    });
+
+    it('takes Agent and Task as one tool: a Builder init listing Task alone passes', async () => {
+      const builder = roleFile('builder');
+      const files = { ...GUARDED, '.claude/agents/builder.md': builder };
+      const t = setup({
+        mainFiles: files,
+        release: () => manifestOf(files),
+        run: fakeRunner(0, (args) => {
+          const tools = sessionTools('builder').filter((name) => name !== 'Agent');
+          return sessionStream(args, { init: { tools } });
+        }).run,
       });
+      expect(sessionTools('builder')).toEqual(expect.arrayContaining(['Agent', 'Task']));
+      const build = { ...REQUEST, role: 'builder', station: 4, files: ['src/login.ts'] } as const;
+      await expect(t.launch(build)).resolves.toEqual({ sessionId: FIRST });
     });
   });
 });
@@ -1381,6 +1452,14 @@ describe('LocalLauncher availability: main against the pinned release', () => {
   });
 });
 
+describe('runProcess', () => {
+  it("keeps an untimed run's output that comes soon after the program exits", async () => {
+    const script = '(sleep 0.5; echo late) & echo early';
+    const result = await runProcess('bash', ['-c', script], { cwd: tempDir('run-'), env: gitEnv });
+    expect(result).toMatchObject({ status: 0, stdout: 'early\nlate\n' });
+  });
+});
+
 describe('CloudLauncher until the Phase 0 probe (T125)', () => {
   it('is unavailable and starts nothing: the cloud command is not confirmed', async () => {
     const launcher = new CloudLauncher();
@@ -1410,7 +1489,7 @@ describe('factory run loop (FR-005)', () => {
     });
   });
 
-  it('stops at a halt or a refused launch', async () => {
+  it('stops at a halt, a failed session or a refused launch', async () => {
     expect(await runLoop(passes(launched, pass({ halted: 'pause:line in effect' })), {})).toEqual({
       passes: 2,
       reason: 'pause:line in effect',
@@ -1418,6 +1497,12 @@ describe('factory run loop (FR-005)', () => {
     expect(await runLoop(passes(pass({ refused: 'no launcher' })), {})).toEqual({
       passes: 1,
       reason: 'no launcher',
+    });
+    // A session that ran and failed stops the loop in its own words, never "no session started".
+    const failed = 'a spec session for owner/project#2 failed: its permission mode "default"';
+    expect(await runLoop(passes(launched, pass({ failed })), {})).toEqual({
+      passes: 2,
+      reason: failed,
     });
   });
 

@@ -70,6 +70,7 @@ export function passLines(r: PassResult): string {
           `started ${r.launched.role} (station ${String(r.launched.station)}) for #${String(r.launched.issue)} on ${r.launched.branch}: ${r.launched.mode} session ${r.launched.sessionId}`,
         ]),
     ...(r.refused === undefined ? [] : [`no session started: ${r.refused}`]),
+    ...(r.failed === undefined ? [] : [r.failed]),
   ];
   return lines.map((l) => `${l}\n`).join('');
 }

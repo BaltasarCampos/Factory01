@@ -46,7 +46,7 @@ import {
 } from './branch.js';
 import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
-import { LaunchRefused, SessionFailed, type Launchers } from './launcher/types.js';
+import { LaunchRefused, SessionFailed, type Launchers, type Notice } from './launcher/types.js';
 import { tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
@@ -140,6 +140,8 @@ export interface PassResult {
   };
   /** Why a ready session was not started. */
   refused?: string;
+  /** A session that ran and failed, which used the Owner's plan: never "no session started". */
+  failed?: string;
 }
 
 /** The station whose session works on an item in each state; other states wait. */
@@ -493,7 +495,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     return refuse(err.message, false, 'release-incomplete');
   }
   let sessionId: string;
-  let notices: readonly string[] = [];
+  let notices: readonly Notice[] = [];
   try {
     ({ sessionId, notices = [] } = await launcher.launch({
       project: ctx.projectDir,
@@ -508,12 +510,12 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     if (err instanceof SessionFailed) {
       const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed`;
       await alertOnce({ urgency: 'urgent', kind: 'session-failed', text });
-      return { ...result, refused: err.message };
+      return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;
     return refuse(err.message, err.urgent);
   }
-  for (const text of notices) await alertOnce({ urgency: 'info', kind: 'claude-version', text });
+  for (const { kind, text } of notices) await alertOnce({ urgency: 'info', kind, text });
   const mode = launcher.mode;
   return {
     ...result,

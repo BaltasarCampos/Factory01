@@ -270,6 +270,8 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
     const r = await t.cli(['dispatch'], { launchers: { local } });
 
     expect(r.stdout).toMatch(/permission mode "bypassPermissions", not dontAsk/);
+    // A session that ran and failed, never "no session started".
+    expect(r.stdout).not.toMatch(/no session started/);
     expect(t.inbox()).toHaveLength(1);
     expect(t.inbox()[0]?.body).toMatch(/urgency=urgent kind=session-failed/);
     expect(t.inbox()[0]?.body).toMatch(/a spec session for owner\/project#2 failed/);
