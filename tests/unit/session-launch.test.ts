@@ -613,6 +613,7 @@ describe('LocalLauncher (research R8, R9)', () => {
   it.each([
     ['factory-work/.claude/CLAUDE.md', 'factory-work/.claude/CLAUDE.md'],
     ['factory-work/owner/.claude/rules/style.md', 'factory-work/owner/.claude/rules'],
+    ['factory-work/.claude/CLAUDE.local.md', 'factory-work/.claude/CLAUDE.local.md'],
   ])(
     "refuses, urgent, a launch with an ancestor's %s, which Claude Code would load",
     async (file, named) => {
@@ -696,15 +697,54 @@ describe('LocalLauncher (research R8, R9)', () => {
       return { t, shells };
     };
 
-    it('runs both shells in an empty folder of their own, never in the clone', async () => {
+    it("runs both shells in an empty folder of their own in the session's folder, never in the clone", async () => {
       const { t, shells } = real({ '.bashrc': 'alias ll="ls -l"\n' });
       await t.launch(REQUEST);
       expect(shells).toHaveLength(2);
+      // Every folder above it is the Owner's but /home and /: no shared /tmp for a tool manager.
+      const folder = join(t.home, '.factory', 'sessions', FIRST, 'shell-check');
       for (const { cwd, listed } of shells) {
-        expect(cwd.startsWith(work(t.home, '42-add-login'))).toBe(false);
+        expect(cwd).toBe(folder);
         expect(listed).toEqual([]);
       }
     });
+
+    // What a startup file leaves running must not hold the check: it ends when bash itself has
+    // exited with its end line, whatever children it leaves.
+    const program = (name: string) =>
+      execFileSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    it('goes ahead when a .bashrc leaves a child in its own session holding the output', async () => {
+      const sleep = `${program('setsid')} ${program('sleep')} 30`;
+      const { t } = real({ '.bashrc': `${sleep} & echo $! > "$HOME/left.pid"\n` }, 3000);
+      const started = Date.now();
+      try {
+        await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+        expect(Date.now() - started).toBeLessThan(3000);
+      } finally {
+        process.kill(Number(readFileSync(join(t.home, 'left.pid'), 'utf8')), 'SIGKILL');
+      }
+    }, 15_000);
+
+    it("goes ahead when a .bashrc leaves a child in the shell's group, and stops that child", async () => {
+      const sleep = `${program('sleep')} 30`;
+      const { t } = real({ '.bashrc': `(${sleep} & echo $! > "$HOME/left.pid")\n` }, 3000);
+      const started = Date.now();
+      await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+      expect(Date.now() - started).toBeLessThan(3000);
+      const left = Number(readFileSync(join(t.home, 'left.pid'), 'utf8'));
+      await vi.waitFor(() => {
+        expect(alive(left)).toBe(false);
+      });
+    }, 15_000);
 
     it.each([
       [

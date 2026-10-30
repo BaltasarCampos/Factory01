@@ -90,29 +90,49 @@ export type Runner = (
   options: { cwd: string; env: NodeJS.ProcessEnv; timeout?: number },
 ) => Promise<{ status: number | null; stdout: string; stderr: string; timedOut?: boolean }>;
 
-/** A program with stdin from /dev/null, so nothing it runs can wait for input. */
+/** How long a program's output may drain once it has exited, in ms. */
+const DRAIN = 200;
+
+/**
+ * A program with stdin from /dev/null, so nothing it runs can wait for input. It has finished
+ * when it exits, whatever it leaves running: a child that keeps the output pipes open, such as one
+ * a startup file starts with `setsid`, cannot hold the launch. The output drains for a moment, then
+ * the pipes are destroyed; with a timeout, the program runs in a process group of its own, and what
+ * is left of the group is stopped then too. On timeout the group is stopped and the run settles.
+ */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
     const { timeout, ...spawned } = options;
     const child = spawn(program, args, {
       ...spawned,
       stdio: ['ignore', 'pipe', 'pipe'],
-      // A group of its own, so a timeout stops everything it started.
       detached: timeout !== undefined,
     });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let drain: NodeJS.Timeout | undefined;
+    const stopGroup = () => {
+      try {
+        if (timeout !== undefined && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // The group has already ended.
+      }
+    };
+    const settle = (status: number | null) => {
+      clearTimeout(timer);
+      clearTimeout(drain);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      stopGroup();
+      resolve({ status, stdout, stderr, ...(timedOut ? { timedOut } : {}) });
+    };
     const timer =
       timeout === undefined
         ? undefined
         : setTimeout(() => {
             timedOut = true;
-            try {
-              if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-            } catch {
-              // The group has already ended.
-            }
+            settle(null);
           }, timeout);
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
@@ -120,9 +140,13 @@ export const runProcess: Runner = (program, args, options) =>
       clearTimeout(timer);
       reject(error);
     });
+    child.on('exit', (status) => {
+      drain = setTimeout(() => {
+        settle(status);
+      }, DRAIN);
+    });
     child.on('close', (status) => {
-      clearTimeout(timer);
-      resolve({ status, stdout, stderr, ...(timedOut ? { timedOut } : {}) });
+      settle(status);
     });
   });
 
@@ -205,7 +229,7 @@ function sessionPath(path: string | undefined, outside: readonly string[]): stri
 /** `CLAUDE.md` and `CLAUDE.local.md` in any letter case, as a disk that ignores case reads them. */
 const MEMORY = /^claude(\.local)?\.md$/i;
 /** What Claude Code loads from a `.claude` folder above where it runs, in any letter case. */
-const RULES = /^(claude\.md|rules)$/i;
+const RULES = /^(claude(\.local)?\.md|rules)$/i;
 
 const errno = (error: unknown) => (error as NodeJS.ErrnoException).code;
 
@@ -233,7 +257,7 @@ function namesIn(dir: string, match: RegExp, exact: readonly string[]): string[]
 
 /**
  * The memory files Claude Code would load from every folder above `clone`, up to `/`: each one's
- * `CLAUDE.md` and `CLAUDE.local.md`, and its `.claude/CLAUDE.md` and `.claude/rules/` but home's,
+ * `CLAUDE.md` and `CLAUDE.local.md`, and those and `rules/` in its `.claude` but home's,
  * which the per-session settings' `claudeMdExcludes` keep out (T061).
  */
 function memoryAbove(clone: string, home: string): string[] {
@@ -242,7 +266,11 @@ function memoryAbove(clone: string, home: string): string[] {
     found.push(...namesIn(dir, MEMORY, ['CLAUDE.md', 'CLAUDE.local.md']).map((n) => join(dir, n)));
     const claude = join(dir, '.claude');
     if (dir !== home)
-      found.push(...namesIn(claude, RULES, ['CLAUDE.md', 'rules']).map((n) => join(claude, n)));
+      found.push(
+        ...namesIn(claude, RULES, ['CLAUDE.md', 'CLAUDE.local.md', 'rules']).map((n) =>
+          join(claude, n),
+        ),
+      );
     if (dir === '/') return found;
   }
 }
@@ -668,10 +696,14 @@ export class LocalLauncher implements SessionLauncher {
             throw new LaunchRefused(
               `no local session started: ${program}, which Claude Code's sandbox needs, is not on the session's PATH (${env.PATH}); install it`,
             );
-        // An empty folder of the check's own: a tool manager a startup file activates, such as
-        // mise, asdf or nvm's auto-use, reads its configuration from where the shell starts.
-        const empty = join(tmp, 'shell-check');
-        mkdirSync(empty);
+        // An empty folder of the check's own, in the session's: a tool manager a startup file
+        // activates, such as mise, asdf or nvm's auto-use, reads its configuration from where the
+        // shell starts and the folders above it, every one the Owner's but /home and /.
+        const empty = step("making the shell check's folder", () => {
+          const folder = join(dirname(files.record), 'shell-check');
+          mkdirSync(folder, { mode: 0o700 });
+          return folder;
+        });
         await this.shellNames(empty, env);
         await this.claudeVersion(cwd, env);
         step("writing the session's settings and record", () => {
