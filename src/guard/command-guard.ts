@@ -283,8 +283,8 @@ function checkReads(policy: Policy, { cwd, home }: Places, words: string[]) {
 }
 
 /**
- * gh's options that read a file whose text it posts: `--body-file` and `-F` on issue and pr
- * commands, `--input` and a `-F`/`--field` value `<key>=@<path>` on gh api. The file must be in
+ * gh's options that read a file whose text it posts: `--body-file`, `-F` and `--recover` on issue
+ * and pr commands, `--input` and a `-F`/`--field` value `<key>=@<path>` on gh api. The file must be in
  * the clone, by its named and its real path, so no comment carries a file from elsewhere (T061).
  */
 function checkGhFiles({ cwd, clone, home }: Places, words: string[]) {
@@ -294,7 +294,7 @@ function checkGhFiles({ cwd, clone, home }: Places, words: string[]) {
     const long = /^(--[a-z-]+)(?:=(.*))?$/s.exec(word);
     // A short-option cluster, such as `-wF<file>`, with the file attached or as the next word.
     const short = /^-[A-Za-z]*F(.*)$/s.exec(word);
-    const reads = api ? ['--input', '--field'] : ['--body-file'];
+    const reads = api ? ['--input', '--field'] : ['--body-file', '--recover'];
     let value = short === null ? undefined : short[1] || words[i + 1];
     if (long !== null && reads.includes(long[1] ?? '')) value = long[2] ?? words[i + 1];
     const field = api && long?.[1] !== '--input';

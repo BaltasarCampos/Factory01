@@ -47,6 +47,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -56,6 +57,7 @@ import {
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../../cli/env.js';
 import { SERVED_HOOKS } from '../../commands/hook.js';
+import { WRAPPERS } from '../../guard/command-guard.js';
 import { isFable, roleVersion } from '../../events/schema.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
@@ -64,7 +66,7 @@ import { DEFINE_BRANCH } from '../../install/project.js';
 import { MCP_JSON } from '../../install/render.js';
 import { runsGh, SHARED_TMP, under } from '../../install/sandbox.js';
 import { renderSessionSettings } from '../../install/session-settings.js';
-import type { Settings } from '../../install/settings.js';
+import { CLAUDE_CODE_VERSION, type Settings } from '../../install/settings.js';
 import { pathRule } from '../../merge/rules.js';
 import { parseConfig } from '../../model/config.js';
 import { branchFeatureDir } from '../../model/naming.js';
@@ -175,6 +177,34 @@ function sessionPath(path: string | undefined, outside: readonly string[]): stri
   return [...new Set(folders)].join(':');
 }
 
+/** `CLAUDE.md` and `CLAUDE.local.md` in any letter case, as a disk that ignores case reads them. */
+const MEMORY = /^claude(\.local)?\.md$/i;
+
+/** The memory files in every folder above `clone`, up to `/` (T061). */
+function memoryAbove(clone: string): string[] {
+  const found: string[] = [];
+  for (let dir = dirname(clone); ; dir = dirname(dir)) {
+    found.push(
+      ...readdirSync(dir)
+        .filter((name) => MEMORY.test(name))
+        .map((n) => join(dir, n)),
+    );
+    if (dir === '/') return found;
+  }
+}
+
+/**
+ * Folders the sandbox denies besides home: the shared temporary ones, and those Claude Code
+ * denies under `blockReadsOutsideWorkingDirectories`.
+ */
+const UNREAD = ['/home', '/root', '/mnt', '/media', '/srv', ...SHARED_TMP];
+
+/** Where `program` really is, the first on `folders` the Owner can run; undefined for none. */
+function located(program: string, folders: readonly string[]): string | undefined {
+  const at = folders.map((folder) => join(folder, program)).find(executable);
+  return at === undefined ? undefined : realpathSync(at);
+}
+
 /** Whether `path` is a file the Owner can run. */
 function executable(path: string): boolean {
   try {
@@ -225,6 +255,19 @@ const NO_HOOKS = 'installs no factory hooks; local sessions wait for the guards 
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
 
 /**
+ * The events each hook may be registered under, from the installed factory's own settings, which
+ * every session's `--settings` file carries: `stop` under `PreToolUse` would block every call.
+ */
+function hookEvents(): Map<string, Set<string>> {
+  const { hooks } = JSON.parse(factoryFile('settings/settings.json')) as Settings;
+  const events = new Map<string, Set<string>>();
+  for (const [event, groups] of Object.entries(hooks))
+    for (const { args } of groups.flatMap((group) => group.hooks))
+      events.set(args[1] ?? '', new Set([...(events.get(args[1] ?? '') ?? []), event]));
+  return events;
+}
+
+/**
  * Why settings do not install the factory's hooks: every event registered, every hook `factory
  * hook <name>` in exec form, with no shell, naming a hook the installed factory serves, since
  * any other blocks every call, and every guard with `onFailure: "block"`, which needs Claude
@@ -240,6 +283,7 @@ function hookProblem(settings: Buffer | undefined): string | undefined {
   if (typeof hooks !== 'object' || hooks === null) return NO_HOOKS;
   const byEvent = hooks as Record<string, unknown>;
   if (!HOOK_EVENTS.every((event) => list(byEvent[event] ?? []).length > 0)) return NO_HOOKS;
+  const events = hookEvents();
   for (const [event, groups] of Object.entries(byEvent))
     for (const group of list(groups))
       for (const one of list((group as { hooks?: unknown } | null)?.hooks)) {
@@ -251,6 +295,9 @@ function hookProblem(settings: Buffer | undefined): string | undefined {
           return `registers a ${event} hook that is not factory hook <name> in exec form`;
         if (!SERVED_HOOKS.includes(args[1]))
           return `registers the ${event} hook factory hook ${visible(args[1])}, which the installed factory does not serve`;
+        const served = events.get(args[1]) ?? new Set<string>();
+        if (!served.has(event))
+          return `registers factory hook ${args[1]} under ${visible(event)}; the installed factory serves it under ${[...served].join(', ') || 'no event'}`;
         if (GUARD_EVENTS.has(event) && (one as { onFailure?: unknown }).onFailure !== 'block')
           return `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"`;
       }
@@ -498,6 +545,13 @@ export class LocalLauncher implements SessionLauncher {
       const cwd = step("making the session's clone", () =>
         this.clone(request.project, repo, request.branch, heads, files.id),
       );
+      // Claude Code loads these from every folder above where it runs, whatever the settings say.
+      const memory = step('reading the folders above the clone', () => memoryAbove(cwd));
+      if (memory.length > 0)
+        throw new LaunchRefused(
+          `no local session started: Claude Code would load ${memory.map(visible).join(', ')}, above the session's clone; move it away`,
+          true,
+        );
       // The tree first: a symlinked `.claude` would pass a walk of the files it points at.
       const tree = step("reading the session's clone", () =>
         this.treeFiles(cwd, 'HEAD', request.branch),
@@ -543,14 +597,15 @@ export class LocalLauncher implements SessionLauncher {
         // The session's own PATH: what Claude Code finds there is what the session runs.
         const folders = env.PATH.split(':').filter((folder) => folder !== '');
         for (const program of this.options.sandbox ?? ['bwrap', 'socat'])
-          if (!folders.some((folder) => executable(join(folder, program))))
+          if (located(program, folders) === undefined)
             throw new LaunchRefused(
               `no local session started: ${program}, which Claude Code's sandbox needs, is not on the session's PATH (${env.PATH}); install it`,
             );
+        await this.shellNames(cwd, env);
         await this.claudeVersion(cwd, env);
         step("writing the session's settings and record", () => {
           const tests = this.testFiles(cwd);
-          this.writeSettings(request, files, { clone: cwd, tmp, tests });
+          this.writeSettings(request, files, { clone: cwd, tmp, tests, folders });
           const record = {
             ...{ role: request.role, item: request.item, station: request.station },
             ...{ feature: request.feature, files: request.files, clone: cwd, model },
@@ -592,7 +647,41 @@ export class LocalLauncher implements SessionLauncher {
     }
   }
 
-  /** Claude Code as the session runs it: 2.1.295 or later, for `onFailure: "block"` (T082). */
+  /**
+   * The functions and aliases of a login and an interactive shell, with the session's own
+   * environment, since T125's A8 matched neither to the session's: none may have the name of a
+   * command any role's shell column starts with, or of a wrapper the command guard sees through.
+   */
+  private async shellNames(cwd: string, env: NodeJS.ProcessEnv) {
+    const commands = Object.values(factoryPolicy().roles).flatMap((row) => row.shell);
+    const names = new Set([...commands.map((prefix) => prefix.split(' ')[0] ?? ''), ...WRAPPERS]);
+    for (const mode of ['-lc', '-ic']) {
+      let result: Awaited<ReturnType<Runner>>;
+      try {
+        result = await this.run('bash', [mode, 'compgen -A function -A alias || true'], {
+          cwd,
+          env,
+        });
+      } catch (err) {
+        const why = err instanceof Error ? err.message : String(err);
+        throw new EnvironmentError(`no local session started: bash ${mode}: ${visible(why)}`);
+      }
+      if (result.status !== 0)
+        throw new EnvironmentError(
+          `no local session started: bash ${mode} exited ${String(result.status)}: ${visible(result.stderr.trim())}`,
+        );
+      const clash = result.stdout.split('\n').filter((name) => names.has(name.trim()));
+      if (clash.length > 0)
+        throw new LaunchRefused(
+          `no local session started: bash ${mode} defines ${clash.map(visible).join(', ')} as a function or alias, the name of a command a session runs; remove it from your shell's startup files`,
+        );
+    }
+  }
+
+  /**
+   * Claude Code as the session runs it: the version the release was probed on, 2.1.309, or later;
+   * 2.1.295 is only the floor for `onFailure: "block"`, and the guards rely on more (T082).
+   */
   private async claudeVersion(cwd: string, env: NodeJS.ProcessEnv) {
     let result: Awaited<ReturnType<Runner>>;
     try {
@@ -604,10 +693,13 @@ export class LocalLauncher implements SessionLauncher {
     const [major = 0, minor = 0, patch = 0] = (/^(\d+)\.(\d+)\.(\d+)/.exec(result.stdout) ?? [])
       .slice(1)
       .map(Number);
-    const old = major * 1e8 + minor * 1e4 + patch < 2 * 1e8 + 1 * 1e4 + 295;
+    const [floorMajor = 0, floorMinor = 0, floorPatch = 0] =
+      CLAUDE_CODE_VERSION.split('.').map(Number);
+    const old =
+      major * 1e8 + minor * 1e4 + patch < floorMajor * 1e8 + floorMinor * 1e4 + floorPatch;
     if (result.status !== 0 || old)
       throw new LaunchRefused(
-        `no local session started: the session's claude reports ${JSON.stringify(visible(result.stdout.trim()))}; local sessions need Claude Code 2.1.295 or later`,
+        `no local session started: the session's claude reports ${JSON.stringify(visible(result.stdout.trim()))}; local sessions need Claude Code ${CLAUDE_CODE_VERSION} or later`,
       );
   }
 
@@ -633,6 +725,8 @@ export class LocalLauncher implements SessionLauncher {
     const outside = [join(home, 'factory-work'), dirname(tmp), ...SHARED_TMP];
     return {
       ...{ PATH: sessionPath(env.PATH, outside), HOME: home },
+      // Every Bash command starts in the clone, a second layer beside the guard's refusal of cd.
+      CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: '1',
       ...(env.LANG === undefined ? {} : { LANG: env.LANG }),
       ...(env.TERM === undefined ? {} : { TERM: env.TERM }),
       // Define works for the project, not an item: it gets a station and no item.
@@ -677,23 +771,45 @@ export class LocalLauncher implements SessionLauncher {
     return realpathSync(mkdtempSync(join(root, `factory-${String(item)}-`)));
   }
 
+  /**
+   * The real folder of every program on the role's shell list that the sandbox would not read,
+   * to open read-only, such as Security's semgrep under `~/.local`; a program not on the
+   * session's PATH refuses the launch by name, since the session could not run it (T061).
+   */
+  private programFolders(role: RoleName, folders: readonly string[], opened: readonly string[]) {
+    const home = realpathSync(this.options.home);
+    const programs = new Set(factoryPolicy().roles[role].shell.map((p) => p.split(' ')[0] ?? ''));
+    const out: string[] = [];
+    for (const program of programs) {
+      const real = located(program, folders);
+      if (real === undefined)
+        throw new LaunchRefused(
+          `no local session started: ${program}, on the ${role} role's shell list, is not on the session's PATH (${folders.join(':')}); install it`,
+        );
+      const folder = dirname(real);
+      const denied = [home, ...UNREAD].some((root) => under(folder, root));
+      if (denied && ![...opened, ...out].some((open) => under(folder, open))) out.push(folder);
+    }
+    return out;
+  }
+
   /** The session's `--settings` file and the factory's MCP config, from the installed factory. */
   private writeSettings(
     request: LaunchRequest,
     files: SessionFiles,
-    at: { clone: string; tmp: string; tests: readonly string[] },
+    at: { clone: string; tmp: string; tests: readonly string[]; folders: readonly string[] },
   ) {
     const policy = factoryPolicy();
     const factory = JSON.parse(factoryFile('settings/settings.json')) as Settings;
-    const tools = /^tools: (.*)$/m.exec(factoryFile(`roles/${request.role}.md`))?.[1] ?? '';
-    const mcp = tools.split(', ').filter((tool) => tool.startsWith('mcp__factory__'));
+    const named = /^tools: (.*)$/m.exec(factoryFile(`roles/${request.role}.md`))?.[1] ?? '';
+    const mcp = named.split(', ').filter((tool) => tool.startsWith('mcp__factory__'));
     // The roles whose shell runs npm read node's own folder, which may lie under home.
     const npm = policy.roles[request.role].shell.some((prefix) => /^(npm|npx)\b/.test(prefix));
     const node = dirname(dirname(realpathSync(process.execPath)));
-    const paths = {
-      ...{ home: realpathSync(this.options.home), clone: at.clone, tmp: at.tmp },
-      tools: npm ? [node] : [],
-    };
+    const home = realpathSync(this.options.home);
+    const opened = npm ? [node] : [];
+    const tools = [...opened, ...this.programFolders(request.role, at.folders, opened)];
+    const paths = { home, clone: at.clone, tmp: at.tmp, tools };
     const { role, feature, files: task } = request;
     const input = { role, paths, feature, files: task, tests: at.tests, factory, mcp };
     const settings = renderSessionSettings(policy, input);

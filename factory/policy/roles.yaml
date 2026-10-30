@@ -82,7 +82,6 @@ roles:
       - npm ci
       - npm install
       - npx vitest
-      - vitest
       - git status
       - git diff
       - git log
@@ -103,7 +102,7 @@ roles:
   test:
     tools: [Read, Grep, Glob, Write, Edit, Bash]
     write: ['{tests}']
-    shell: [npm test, npm run test, npx vitest, vitest]
+    shell: [npm test, npm run test, npx vitest]
     blocked: []
     network: [registry.npmjs.org]
     branch: item
