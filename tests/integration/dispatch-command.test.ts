@@ -11,7 +11,14 @@ import { STATES, type ApprovalRecord, type GuardrailManifest } from '../../src/m
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, mergeBrief } from '../helpers/git-repo.js';
-import { HOOKED_SETTINGS, manifestOf, quietShell, SANDBOX_BIN } from '../helpers/guardrails.js';
+import {
+  HOOKED_SETTINGS,
+  manifestOf,
+  quietShell,
+  SANDBOX_BIN,
+  sessionStream,
+  type StreamChange,
+} from '../helpers/guardrails.js';
 import { homeDir, makeKeys, makeOtherKeys, tempDir, type TestKeys } from '../helpers/keys.js';
 import { promptFiles } from '../helpers/release.js';
 
@@ -116,7 +123,7 @@ function setup(options: Setup = {}) {
   const local = new FakeLauncher('local');
   /** A real local launcher against this release manifest; sessions are recorded, not run. */
   const sessions: { args: readonly string[]; cwd: string }[] = [];
-  const realLocal = (manifest: GuardrailManifest) =>
+  const realLocal = (manifest: GuardrailManifest, change: StreamChange = {}) =>
     new LocalLauncher({
       // The programs Claude Code's sandbox needs, as stand-ins on the session's PATH.
       ...{ home, env: { ...gitEnv, PATH: `${SANDBOX_BIN}:${gitEnv.PATH ?? ''}` } },
@@ -126,10 +133,9 @@ function setup(options: Setup = {}) {
         if (args[0] === '--version')
           return Promise.resolve({ status: 0, stdout: '2.1.309 (Claude Code)\n', stderr: '' });
         sessions.push({ args, cwd });
-        const id = args[args.indexOf('--session-id') + 1];
         return Promise.resolve({
           status: 0,
-          stdout: JSON.stringify({ session_id: id }),
+          stdout: sessionStream(args, change),
           stderr: '',
         });
       },
@@ -253,6 +259,34 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
     expect(t.sessions.filter((s) => s.args[0] === '-p').map((s) => s.cwd)).toEqual([worktree]);
     expect(t.checkout()).toEqual(before);
     expect(t.inbox()).toEqual([]);
+  });
+
+  it('a session whose init message does not match its launch fails, with one urgent alert', async () => {
+    const role = { '.claude/agents/spec.md': '---\nname: spec\nmodel: sonnet\n---\nSpec.\n' };
+    const t = setup({ settings: HOOKED_SETTINGS, mainFiles: role });
+    const manifest = manifestOf({ '.claude/settings.json': HOOKED_SETTINGS, ...role });
+    const local = t.realLocal(manifest, { init: { permissionMode: 'bypassPermissions' } });
+
+    const r = await t.cli(['dispatch'], { launchers: { local } });
+
+    expect(r.stdout).toMatch(/permission mode "bypassPermissions", not dontAsk/);
+    expect(t.inbox()).toHaveLength(1);
+    expect(t.inbox()[0]?.body).toMatch(/urgency=urgent kind=session-failed/);
+    expect(t.inbox()[0]?.body).toMatch(/a spec session for owner\/project#2 failed/);
+  });
+
+  it('a session on another Claude Code version raises one info alert saying to re-run A8', async () => {
+    const role = { '.claude/agents/spec.md': '---\nname: spec\nmodel: sonnet\n---\nSpec.\n' };
+    const t = setup({ settings: HOOKED_SETTINGS, mainFiles: role });
+    const manifest = manifestOf({ '.claude/settings.json': HOOKED_SETTINGS, ...role });
+    const local = t.realLocal(manifest, { init: { claude_code_version: '2.1.310' } });
+
+    const r = await t.cli(['dispatch'], { launchers: { local } });
+
+    expect(r.stdout).toContain('started spec (station 2) for #2');
+    expect(t.inbox()).toHaveLength(1);
+    expect(t.inbox()[0]?.body).toMatch(/urgency=info kind=claude-version/);
+    expect(t.inbox()[0]?.body).toMatch(/Claude Code 2\.1\.310 ran .*re-run T125's A8/);
   });
 
   it.each([

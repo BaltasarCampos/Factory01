@@ -78,8 +78,10 @@ import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
 import {
   LaunchRefused,
+  SessionFailed,
   type Availability,
   type LaunchRequest,
+  type LaunchResult,
   type SessionLauncher,
 } from './types.js';
 
@@ -90,29 +92,49 @@ export type Runner = (
   options: { cwd: string; env: NodeJS.ProcessEnv; timeout?: number },
 ) => Promise<{ status: number | null; stdout: string; stderr: string; timedOut?: boolean }>;
 
-/** A program with stdin from /dev/null, so nothing it runs can wait for input. */
+/** How long a program's output may drain once it has exited, in ms. */
+const DRAIN = 200;
+
+/**
+ * A program with stdin from /dev/null, so nothing it runs can wait for input. It has finished
+ * when it exits, whatever it leaves running: a child that keeps the output pipes open, such as one
+ * a startup file starts with `setsid`, cannot hold the launch. The output drains for a moment, then
+ * the pipes are destroyed; with a timeout, the program runs in a process group of its own, and what
+ * is left of the group is stopped then too. On timeout the group is stopped and the run settles.
+ */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
     const { timeout, ...spawned } = options;
     const child = spawn(program, args, {
       ...spawned,
       stdio: ['ignore', 'pipe', 'pipe'],
-      // A group of its own, so a timeout stops everything it started.
       detached: timeout !== undefined,
     });
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let drain: NodeJS.Timeout | undefined;
+    const stopGroup = () => {
+      try {
+        if (timeout !== undefined && child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
+      } catch {
+        // The group has already ended.
+      }
+    };
+    const settle = (status: number | null) => {
+      clearTimeout(timer);
+      clearTimeout(drain);
+      child.stdout.destroy();
+      child.stderr.destroy();
+      stopGroup();
+      resolve({ status, stdout, stderr, ...(timedOut ? { timedOut } : {}) });
+    };
     const timer =
       timeout === undefined
         ? undefined
         : setTimeout(() => {
             timedOut = true;
-            try {
-              if (child.pid !== undefined) process.kill(-child.pid, 'SIGKILL');
-            } catch {
-              // The group has already ended.
-            }
+            settle(null);
           }, timeout);
     child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
     child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
@@ -120,9 +142,13 @@ export const runProcess: Runner = (program, args, options) =>
       clearTimeout(timer);
       reject(error);
     });
+    child.on('exit', (status) => {
+      drain = setTimeout(() => {
+        settle(status);
+      }, DRAIN);
+    });
     child.on('close', (status) => {
-      clearTimeout(timer);
-      resolve({ status, stdout, stderr, ...(timedOut ? { timedOut } : {}) });
+      settle(status);
     });
   });
 
@@ -148,7 +174,8 @@ export const localInvocation = (
   files: SessionFiles,
   model: string,
 ): readonly string[] => [
-  ...['-p', '--agent', request.role, '--model', model, '--output-format', 'json'],
+  ...['-p', '--agent', request.role, '--model', model],
+  ...['--output-format', 'stream-json', '--verbose'],
   ...['--session-id', files.id, '--settings', files.settings, '--setting-sources', 'project'],
   ...['--strict-mcp-config', '--mcp-config', files.mcp, '--permission-mode', 'dontAsk'],
   request.prompt,
@@ -205,7 +232,7 @@ function sessionPath(path: string | undefined, outside: readonly string[]): stri
 /** `CLAUDE.md` and `CLAUDE.local.md` in any letter case, as a disk that ignores case reads them. */
 const MEMORY = /^claude(\.local)?\.md$/i;
 /** What Claude Code loads from a `.claude` folder above where it runs, in any letter case. */
-const RULES = /^(claude\.md|rules)$/i;
+const RULES = /^(claude(\.local)?\.md|rules)$/i;
 
 const errno = (error: unknown) => (error as NodeJS.ErrnoException).code;
 
@@ -233,7 +260,7 @@ function namesIn(dir: string, match: RegExp, exact: readonly string[]): string[]
 
 /**
  * The memory files Claude Code would load from every folder above `clone`, up to `/`: each one's
- * `CLAUDE.md` and `CLAUDE.local.md`, and its `.claude/CLAUDE.md` and `.claude/rules/` but home's,
+ * `CLAUDE.md` and `CLAUDE.local.md`, and those and `rules/` in its `.claude` but home's,
  * which the per-session settings' `claudeMdExcludes` keep out (T061).
  */
 function memoryAbove(clone: string, home: string): string[] {
@@ -242,7 +269,11 @@ function memoryAbove(clone: string, home: string): string[] {
     found.push(...namesIn(dir, MEMORY, ['CLAUDE.md', 'CLAUDE.local.md']).map((n) => join(dir, n)));
     const claude = join(dir, '.claude');
     if (dir !== home)
-      found.push(...namesIn(claude, RULES, ['CLAUDE.md', 'rules']).map((n) => join(claude, n)));
+      found.push(
+        ...namesIn(claude, RULES, ['CLAUDE.md', 'CLAUDE.local.md', 'rules']).map((n) =>
+          join(claude, n),
+        ),
+      );
     if (dir === '/') return found;
   }
 }
@@ -278,6 +309,107 @@ function executable(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+/** The factory MCP tools the installed role file names, as `mcp__factory__<tool>`. */
+function namedMcp(role: RoleName): string[] {
+  const named = /^tools: (.*)$/m.exec(factoryFile(`roles/${role}.md`))?.[1] ?? '';
+  return named.split(', ').filter((tool) => tool.startsWith('mcp__factory__'));
+}
+
+/** The tools a session of `role` has, which its init message must list exactly (T061). */
+export function sessionTools(role: RoleName): string[] {
+  const policy = factoryPolicy();
+  const tools = [...policy.roles[role].tools, ...Object.keys(policy.keepTools), ...namedMcp(role)];
+  return [...new Set(tools)];
+}
+
+type Message = Record<string, unknown>;
+
+/**
+ * The session's `stream-json`, one message a line: a line that is not a JSON object, or a stream
+ * with no init message or no result line, is a failed session, never an empty one (T061).
+ */
+function readStream(stdout: string): { init: Message; result: Message } {
+  const messages = stdout
+    .split('\n')
+    .filter((line) => line.trim() !== '')
+    .map((line) => {
+      let message: unknown;
+      try {
+        message = JSON.parse(line);
+      } catch {
+        message = undefined;
+      }
+      if (typeof message !== 'object' || message === null || Array.isArray(message))
+        throw new EnvironmentError(
+          `the session failed: its stream has a line that is not a JSON object: ${visible(line.slice(0, 200))}`,
+        );
+      return message as Message;
+    });
+  const init = messages.find((m) => m.type === 'system' && m.subtype === 'init');
+  const result = messages.find((m) => m.type === 'result');
+  if (result === undefined)
+    throw new EnvironmentError('the session failed: its stream has no result line');
+  if (init === undefined)
+    throw new EnvironmentError('the session failed: its stream has no init message');
+  return { init, result };
+}
+
+/** The strings of a list, or a field of each entry. */
+const strings = (value: unknown, field?: string) =>
+  (Array.isArray(value) ? (value as unknown[]) : [])
+    .map((entry) => (field === undefined ? entry : (entry as Message | null)?.[field]))
+    .filter((entry): entry is string => typeof entry === 'string');
+
+/**
+ * What the session reported, kept in its folder: the model id and version its init message names,
+ * how many calls were refused, and the models it used, an Opus one being the advisor's, which no
+ * tool list shows (T125's A3d, T097).
+ */
+function reported(init: Message, result: Message) {
+  const usage = result.modelUsage;
+  const models = typeof usage === 'object' && usage !== null ? Object.keys(usage) : [];
+  return {
+    model: typeof init.model === 'string' ? init.model : null,
+    claude_code_version:
+      typeof init.claude_code_version === 'string' ? init.claude_code_version : null,
+    permission_denials: Array.isArray(result.permission_denials)
+      ? result.permission_denials.length
+      : 0,
+    models,
+    advisor: models.some((name) => /opus/i.test(name)),
+  };
+}
+
+/**
+ * How the init message differs from the launch: the tools exactly the role's, no MCP server but
+ * the factory's, `permissionMode` `dontAsk` and a model of the role file's family, never Fable,
+ * since the hook input has no model field (T061, T078).
+ */
+function initProblems(init: Message, role: RoleName, model: string): string[] {
+  const problems: string[] = [];
+  const tools = strings(init.tools);
+  const expected = sessionTools(role);
+  const extra = tools.filter((tool) => !expected.includes(tool));
+  const missing = expected.filter((tool) => !tools.includes(tool));
+  if (extra.length + missing.length > 0) {
+    const also = extra.length > 0 ? [`also ${extra.join(', ')}`] : [];
+    const without = missing.length > 0 ? [`without ${missing.join(', ')}`] : [];
+    problems.push(
+      `its tools are not exactly the ${role} role's: ${[...also, ...without].join('; ')}`,
+    );
+  }
+  const servers = strings(init.mcp_servers, 'name').filter((name) => name !== 'factory');
+  if (servers.length > 0)
+    problems.push(`it has the MCP server ${servers.join(', ')}, which is not the factory's`);
+  if (init.permissionMode !== 'dontAsk')
+    problems.push(`its permission mode ${JSON.stringify(init.permissionMode)}, not dontAsk`);
+  const id = typeof init.model === 'string' ? init.model : '';
+  if (isFable(id)) problems.push(`its model ${id} is a Fable model`);
+  else if (!id.toLowerCase().includes(model.toLowerCase()))
+    problems.push(`its model ${id || 'none'} is not of the ${model} family`);
+  return problems.map((problem) => visible(problem));
 }
 
 type Unavailable = Extract<Availability, { ok: false }>;
@@ -584,7 +716,7 @@ export class LocalLauncher implements SessionLauncher {
     return dir;
   }
 
-  async launch(request: LaunchRequest): Promise<{ sessionId: string }> {
+  async launch(request: LaunchRequest): Promise<LaunchResult> {
     if (!launchable(request.branch))
       throw new LaunchRefused(
         `no local session started: ${request.branch} is not a session branch`,
@@ -668,10 +800,14 @@ export class LocalLauncher implements SessionLauncher {
             throw new LaunchRefused(
               `no local session started: ${program}, which Claude Code's sandbox needs, is not on the session's PATH (${env.PATH}); install it`,
             );
-        // An empty folder of the check's own: a tool manager a startup file activates, such as
-        // mise, asdf or nvm's auto-use, reads its configuration from where the shell starts.
-        const empty = join(tmp, 'shell-check');
-        mkdirSync(empty);
+        // An empty folder of the check's own, in the session's: a tool manager a startup file
+        // activates, such as mise, asdf or nvm's auto-use, reads its configuration from where the
+        // shell starts and the folders above it, every one the Owner's but /home and /.
+        const empty = step("making the shell check's folder", () => {
+          const folder = join(dirname(files.record), 'shell-check');
+          mkdirSync(folder, { mode: 0o700 });
+          return folder;
+        });
         await this.shellNames(empty, env);
         await this.claudeVersion(cwd, env);
         step("writing the session's settings and record", () => {
@@ -697,19 +833,27 @@ export class LocalLauncher implements SessionLauncher {
         });
         if (result.status !== 0)
           throw new EnvironmentError(
-            `claude exited ${String(result.status)}: ${result.stderr.trim()}`,
+            `claude exited ${String(result.status)}: ${visible(result.stderr.trim())}`,
           );
-        let reported: unknown;
-        try {
-          reported = (JSON.parse(result.stdout) as { session_id?: unknown }).session_id;
-        } catch {
-          reported = undefined;
-        }
-        if (reported !== files.id)
+        const { init, result: last } = readStream(result.stdout);
+        if (last.session_id !== files.id)
           throw new EnvironmentError(
-            `claude reported session ${JSON.stringify(reported)}, not ${files.id} as launched`,
+            `claude reported session ${visible(JSON.stringify(last.session_id ?? null))}, not ${files.id} as launched`,
           );
-        return { sessionId: files.id };
+        step('writing what the session reported', () => {
+          const file = join(dirname(files.record), 'result.json');
+          writeFileSync(file, `${JSON.stringify(reported(init, last), null, 2)}\n`, WRITE_ONCE);
+        });
+        // Found only after the session has run until 28-4c-3 reads the stream live.
+        const problems = initProblems(init, request.role, model);
+        if (problems.length > 0)
+          throw new SessionFailed(
+            `its init message does not match its launch: ${problems.join('; ')}`,
+          );
+        const version = init.claude_code_version;
+        if (version === CLAUDE_CODE_VERSION) return { sessionId: files.id };
+        const notice = `Claude Code ${visible(String(version))} ran a ${request.role} session; the release was checked against ${CLAUDE_CODE_VERSION}, so re-run T125's A8`;
+        return { sessionId: files.id, notices: [notice] };
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
@@ -898,8 +1042,7 @@ export class LocalLauncher implements SessionLauncher {
   ) {
     const policy = factoryPolicy();
     const factory = JSON.parse(factoryFile('settings/settings.json')) as Settings;
-    const named = /^tools: (.*)$/m.exec(factoryFile(`roles/${request.role}.md`))?.[1] ?? '';
-    const mcp = named.split(', ').filter((tool) => tool.startsWith('mcp__factory__'));
+    const mcp = namedMcp(request.role);
     // The roles whose shell runs npm read node's own folder, which may lie under home.
     const npm = policy.roles[request.role].shell.some((prefix) => /^(npm|npx)\b/.test(prefix));
     const node = dirname(dirname(realpathSync(process.execPath)));

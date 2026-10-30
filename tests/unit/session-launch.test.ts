@@ -25,7 +25,11 @@ import {
   runProcess,
   type Runner,
 } from '../../src/dispatcher/launcher/local.js';
-import { LaunchRefused, type LaunchRequest } from '../../src/dispatcher/launcher/types.js';
+import {
+  LaunchRefused,
+  SessionFailed,
+  type LaunchRequest,
+} from '../../src/dispatcher/launcher/types.js';
 import { roleVersion } from '../../src/events/schema.js';
 import { readSessionRecord } from '../../src/hooks/session.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
@@ -34,7 +38,14 @@ import type { SessionSettings } from '../../src/install/session-settings.js';
 import type { GuardrailManifest, ReleasePin } from '../../src/model/types.js';
 import { ReleaseTagError } from '../../src/release/tag.js';
 import { gitEnv, makeRepo, runGit } from '../helpers/git-repo.js';
-import { HOOKED_SETTINGS, manifestOf, quietShell, SANDBOX_BIN } from '../helpers/guardrails.js';
+import {
+  HOOKED_SETTINGS,
+  manifestOf,
+  quietShell,
+  SANDBOX_BIN,
+  sessionStream,
+  type StreamChange,
+} from '../helpers/guardrails.js';
 import { homeDir, tempDir } from '../helpers/keys.js';
 
 const BRANCH = 'claude/42-add-login';
@@ -50,7 +61,7 @@ const REQUEST = {
 const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: owner/project\ninbox_issue: 1\n`;
 /** The session id `claude` was launched with, which its JSON output reports back. */
 const launchedId = (args: readonly string[]) => args[args.indexOf('--session-id') + 1];
-const echo = (args: readonly string[]) => JSON.stringify({ session_id: launchedId(args) });
+const echo = (args: readonly string[]) => sessionStream(args);
 
 /** Programs Claude Code's sandbox needs, as stand-ins on the session's PATH. */
 const withStubs = (env: NodeJS.ProcessEnv) => ({
@@ -613,6 +624,7 @@ describe('LocalLauncher (research R8, R9)', () => {
   it.each([
     ['factory-work/.claude/CLAUDE.md', 'factory-work/.claude/CLAUDE.md'],
     ['factory-work/owner/.claude/rules/style.md', 'factory-work/owner/.claude/rules'],
+    ['factory-work/.claude/CLAUDE.local.md', 'factory-work/.claude/CLAUDE.local.md'],
   ])(
     "refuses, urgent, a launch with an ancestor's %s, which Claude Code would load",
     async (file, named) => {
@@ -696,15 +708,54 @@ describe('LocalLauncher (research R8, R9)', () => {
       return { t, shells };
     };
 
-    it('runs both shells in an empty folder of their own, never in the clone', async () => {
+    it("runs both shells in an empty folder of their own in the session's folder, never in the clone", async () => {
       const { t, shells } = real({ '.bashrc': 'alias ll="ls -l"\n' });
       await t.launch(REQUEST);
       expect(shells).toHaveLength(2);
+      // Every folder above it is the Owner's but /home and /: no shared /tmp for a tool manager.
+      const folder = join(t.home, '.factory', 'sessions', FIRST, 'shell-check');
       for (const { cwd, listed } of shells) {
-        expect(cwd.startsWith(work(t.home, '42-add-login'))).toBe(false);
+        expect(cwd).toBe(folder);
         expect(listed).toEqual([]);
       }
     });
+
+    // What a startup file leaves running must not hold the check: it ends when bash itself has
+    // exited with its end line, whatever children it leaves.
+    const program = (name: string) =>
+      execFileSync('sh', ['-c', `command -v ${name}`], { encoding: 'utf8' }).trim();
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+
+    it('goes ahead when a .bashrc leaves a child in its own session holding the output', async () => {
+      const sleep = `${program('setsid')} ${program('sleep')} 30`;
+      const { t } = real({ '.bashrc': `${sleep} & echo $! > "$HOME/left.pid"\n` }, 3000);
+      const started = Date.now();
+      try {
+        await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+        expect(Date.now() - started).toBeLessThan(3000);
+      } finally {
+        process.kill(Number(readFileSync(join(t.home, 'left.pid'), 'utf8')), 'SIGKILL');
+      }
+    }, 15_000);
+
+    it("goes ahead when a .bashrc leaves a child in the shell's group, and stops that child", async () => {
+      const sleep = `${program('sleep')} 30`;
+      const { t } = real({ '.bashrc': `(${sleep} & echo $! > "$HOME/left.pid")\n` }, 3000);
+      const started = Date.now();
+      await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+      expect(Date.now() - started).toBeLessThan(3000);
+      const left = Number(readFileSync(join(t.home, 'left.pid'), 'utf8'));
+      await vi.waitFor(() => {
+        expect(alive(left)).toBe(false);
+      });
+    }, 15_000);
 
     it.each([
       [
@@ -874,10 +925,107 @@ describe('LocalLauncher (research R8, R9)', () => {
 
   it('a failed session, or one reporting no session or another, is an error', async () => {
     await expect(setup({ run: fakeRunner(1).run }).launch(REQUEST)).rejects.toThrow(/boom/);
-    for (const stdout of ['{}', '{"session_id":"s-other"}'])
-      await expect(setup({ run: fakeRunner(0, stdout).run }).launch(REQUEST)).rejects.toThrow(
+    for (const session_id of [undefined, 's-other']) {
+      const stream = (args: readonly string[]) => sessionStream(args, { result: { session_id } });
+      await expect(setup({ run: fakeRunner(0, stream).run }).launch(REQUEST)).rejects.toThrow(
         new RegExp(`claude reported session .*, not ${FIRST} as launched`),
       );
+    }
+  });
+
+  describe("the session's stream-json, checked after the session (T061)", () => {
+    const streamed = (change: StreamChange | ((args: readonly string[]) => string)) =>
+      setup({
+        run: fakeRunner(0, (args) =>
+          typeof change === 'function' ? change(args) : sessionStream(args, change),
+        ).run,
+      });
+
+    it('records the model, the version, the permission denials and the models it used', async () => {
+      const t = streamed({
+        result: {
+          permission_denials: [{ tool_name: 'Bash' }, { tool_name: 'Edit' }],
+          modelUsage: { 'claude-sonnet-5-5': {}, 'claude-opus-5-5': {} },
+        },
+      });
+
+      await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+
+      const file = join(t.home, '.factory', 'sessions', FIRST, 'result.json');
+      expect(statSync(file).mode & 0o777).toBe(0o600);
+      // An Opus entry in modelUsage is the advisor's, which no tool list shows (T125's A3d).
+      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
+        ...{ model: 'claude-sonnet-5-5', claude_code_version: '2.1.309', permission_denials: 2 },
+        ...{ models: ['claude-sonnet-5-5', 'claude-opus-5-5'], advisor: true },
+      });
+    });
+
+    it.each([
+      [
+        'no result line',
+        (args: readonly string[]) => sessionStream(args).split('\n')[0] ?? '',
+        /no result line/,
+      ],
+      [
+        'a line that is not JSON',
+        (args: readonly string[]) => `oops\n${sessionStream(args)}`,
+        /not a JSON object: oops/,
+      ],
+      [
+        'no init message',
+        (args: readonly string[]) => sessionStream(args).split('\n').slice(1).join('\n'),
+        /no init message/,
+      ],
+    ])('a stream with %s is a failed session, never an empty one', async (_name, stream, why) => {
+      const refused = streamed(stream).launch(REQUEST);
+      await expect(refused).rejects.toThrow(EnvironmentError);
+      await expect(refused).rejects.toThrow(why);
+    });
+
+    it.each([
+      [
+        'another permission mode',
+        { init: { permissionMode: 'default' } },
+        /permission mode "default", not dontAsk/,
+      ],
+      [
+        'a tool the role lacks',
+        { init: { tools: ['Read', 'Grep', 'Glob', 'WebFetch'] } },
+        /tools are not exactly the spec role's: also WebFetch/,
+      ],
+      [
+        "an MCP server not the factory's",
+        { init: { mcp_servers: [{ name: 'factory' }, { name: 'other' }] } },
+        /MCP server other/,
+      ],
+      [
+        'a model of another family',
+        { init: { model: 'claude-opus-5-5' } },
+        /claude-opus-5-5 is not of the sonnet family/,
+      ],
+      [
+        'a Fable id',
+        { init: { model: 'claude-sonnet-fable-5-1' } },
+        /claude-sonnet-fable-5-1 is a Fable model/,
+      ],
+    ])(
+      'a session whose init message names %s is a failure, with an urgent alert',
+      async (_name, change, why) => {
+        const refused = streamed(change).launch(REQUEST);
+        await expect(refused).rejects.toThrow(SessionFailed);
+        await expect(refused).rejects.toMatchObject({ urgent: true });
+        await expect(refused).rejects.toThrow(why);
+      },
+    );
+
+    it('notices a Claude Code version other than the one the release was checked against', async () => {
+      await expect(streamed({}).launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+      const newer = streamed({ init: { claude_code_version: '2.1.310' } });
+      await expect(newer.launch(REQUEST)).resolves.toEqual({
+        sessionId: FIRST,
+        notices: [expect.stringMatching(/Claude Code 2\.1\.310 ran .*2\.1\.309.*A8/) as string],
+      });
+    });
   });
 });
 
