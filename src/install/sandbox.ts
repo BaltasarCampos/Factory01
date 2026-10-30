@@ -68,7 +68,7 @@ export const under = (path: string, folder: string) =>
 
 /**
  * Refuses an opened folder that would open home or a shared temporary folder, or re-open a path
- * the table denies. Only the session's temporary folder may lie inside a shared one. No opened
+ * the table denies, or hold one: opened and denied folders never overlap. Only the session's temporary folder may lie inside a shared one. No opened
  * folder may hold another: a temporary folder that is the clones' parent would open every other
  * session's clone. Paths are compared as text, so the launcher passes resolved ones (T061).
  */
@@ -85,8 +85,10 @@ function checkOpened(policy: Policy, paths: SessionPaths) {
     }
     for (const entry of policy.denyRead.map((path) => sandboxPath(path, paths.clone))) {
       const denied = entry.replace(/^~/, home);
-      if (!/[*?[]/.test(denied) && under(folder, denied))
-        throw new RefusedError(`${raw} is under the denied read ${entry}`);
+      if (/[*?[]/.test(denied)) continue;
+      if (under(folder, denied)) throw new RefusedError(`${raw} is under the denied read ${entry}`);
+      // Never the other way either: the nested deny alone, which no probe has shown to hold.
+      if (under(denied, folder)) throw new RefusedError(`${raw} holds the denied read ${entry}`);
     }
   };
   check(paths.clone, false);

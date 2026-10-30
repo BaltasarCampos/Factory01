@@ -118,6 +118,7 @@ export function renderSessionSettings(policy: Policy, input: SessionInput): Sess
       ...above(paths.clone),
       `${paths.home}/.claude/CLAUDE.md`,
       `${paths.home}/.claude/CLAUDE.local.md`,
+      `${paths.home}/.claude/rules/**`,
       `${paths.clone}/**/node_modules/**`,
     ],
   };
