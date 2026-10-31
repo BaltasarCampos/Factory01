@@ -11,6 +11,7 @@ import { assertPassphraseTerminal, ownerKeyPath } from '../approvals/sign.js';
 import type { CommandContext } from '../cli/commands.js';
 import { EnvironmentError, ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { selectLauncher } from '../dispatcher/launcher/select.js';
+import { SessionFailed } from '../dispatcher/launcher/types.js';
 import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
 import { signedCommit } from '../git/sign.js';
 import { Fields, gh } from '../github/gh.js';
@@ -18,6 +19,7 @@ import { cloneRepo, createRepo } from '../github/repo.js';
 import { createDefineBranch, DEFINE_BRANCH, installProject } from '../install/project.js';
 import { REPO, REPO_NAME } from '../model/config.js';
 import { formatReleasePin, slugify } from '../model/naming.js';
+import { alert, projectInbox } from '../notify/inbox.js';
 import type { AgentsMode, ProjectConfig, ReleasePin } from '../model/types.js';
 import { RELEASE_TAG, verifyReleaseTag } from '../release/tag.js';
 
@@ -157,6 +159,18 @@ export async function startDefine(
     ctx.io.stdout.write(`Define started on ${DEFINE_BRANCH} (${launcher.mode}, ${sessionId}).\n`);
     return ExitCode.Ok;
   } catch (err) {
+    // A session that ran, used the Owner's plan and failed: never "Define was not started".
+    if (err instanceof SessionFailed) {
+      const text = `a define session for ${config.repo} failed: ${err.message}; nothing of it is pushed`;
+      ctx.io.stderr.write(
+        `Define's session ran and failed: ${err.message}\n` +
+          `Nothing of it is pushed; run \`factory adopt ${config.repo}\` here to start Define again.\n`,
+      );
+      const inbox = await projectInbox(workdir, ctx.env);
+      if (inbox === undefined) throw new EnvironmentError(`${workdir} has no .factory/config`);
+      await alert(inbox, { urgency: 'urgent', kind: 'session-failed', text });
+      return ExitCode.Refused;
+    }
     const why = err instanceof Error ? err.message : String(err);
     ctx.io.stderr.write(
       `Define was not started: ${why}\n` +

@@ -1,7 +1,7 @@
 // `factory run [--once]` (contracts/cli.md, FR-005): dispatcher passes one after another on the
-// laptop, until a pass starts no session (an Owner gate, or no work), the line halts or a
-// launch is refused. Local sessions end before their launch returns, so each pass sees the
-// last session's work. Usage limits and caps stop it from slice 32a; the pass cap bounds it.
+// laptop, until a pass starts no session (an Owner gate, or no work), the line halts, a session
+// fails or a launch is refused. Local sessions end before their launch returns, so each pass sees
+// the last session's work. Usage limits and caps stop it from slice 32a; the pass cap bounds it.
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode } from '../cli/env.js';
 import { dispatchOnce, type PassResult } from '../dispatcher/dispatch.js';
@@ -19,6 +19,7 @@ export async function runLoop(
     options.report?.(result);
     const reason =
       result.halted ??
+      result.failed ??
       result.refused ??
       (result.launched === undefined
         ? 'nothing to start: waiting for the Owner or for work'

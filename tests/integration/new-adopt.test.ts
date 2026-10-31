@@ -35,6 +35,7 @@ import {
   serialiseManifest,
 } from '../../src/install/manifest.js';
 import { installLabels } from '../../src/install/labels.js';
+import { SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { createDefineBranch, installProject } from '../../src/install/project.js';
 import { parseConfig } from '../../src/model/config.js';
 import { ITEM_TYPES, STATES, STATIONS, type GuardrailManifest } from '../../src/model/types.js';
@@ -633,6 +634,26 @@ describe(
       expect(r.stderr).toContain('factory adopt owner/sample');
       expect(existsSync(join(cwd, 'sample', '.factory', 'config'))).toBe(true);
       expect(launchers.local.launches).toEqual([]);
+    });
+
+    it('a Define session that ran and failed is reported as such, with the urgent session-failed alert (T061)', async () => {
+      const { cli, cwd, launchers } = laptop();
+      const why =
+        'its init message does not match its launch: its permission mode "default", not dontAsk';
+      launchers.local.failure = new SessionFailed(why);
+      const r = await cli(['new', 'A pitch', '--name', 'sample']);
+      expect(r.code).toBe(1);
+      expect(r.stderr).toContain(`Define's session ran and failed: ${why}`);
+      expect(r.stderr).not.toMatch(/was not started/);
+      const config = parseConfig(readFileSync(join(cwd, 'sample', '.factory', 'config'), 'utf8'));
+      const inbox = readState().repos['owner/sample']?.issues.find(
+        (i) => i.number === config.inbox_issue,
+      );
+      expect(inbox?.comments).toHaveLength(1);
+      expect(inbox?.comments[0]?.body).toMatch(/urgency=urgent kind=session-failed/);
+      expect(inbox?.comments[0]?.body).toContain(
+        `a define session for owner/sample failed: ${why}`,
+      );
     });
 
     it('without launchers from the caller, the local launcher checks the new clone and waits for the guards', async () => {
