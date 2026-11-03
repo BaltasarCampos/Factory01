@@ -953,6 +953,12 @@ describe('LocalLauncher (research R8, R9)', () => {
         new RegExp(`claude reported session .*, not ${FIRST} as launched`),
       );
     }
+    // Checked as its result line is read, so an exit status first never makes it info.
+    const stream = (args: readonly string[]) =>
+      sessionStream(args, { result: { session_id: 's-other' } });
+    const exitedOther = setup({ run: fakeRunner(1, stream).run }).launch(REQUEST);
+    await expect(exitedOther).rejects.toMatchObject({ name: 'SessionFailed', urgent: true });
+    await expect(exitedOther).rejects.toThrow(/claude reported session "s-other"/);
   });
 
   describe("the session's stream-json (T061)", () => {
@@ -1372,9 +1378,10 @@ describe('LocalLauncher (research R8, R9)', () => {
           const refused = t.launch(REQUEST);
           await expect(refused).rejects.toMatchObject({ urgent: true, kind: 'session-running' });
           await expect(refused).rejects.toThrow(
-            new RegExp(`claude has ended, but processes ${left} of its process group`),
+            new RegExp(
+              `claude has ended, but processes ${left} of its process group .*ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}`,
+            ),
           );
-          await expect(refused).rejects.not.toThrow(/kill -TERM/);
         } finally {
           stop(pgid);
         }
@@ -1838,6 +1845,9 @@ await runProcess('bash', ['-c', process.argv[3]], {
     ['SIGTERM', 143, SLEEPS],
     // SIGTERM ignored, by the group's leader and by the sleep: SIGKILL after the grace.
     ['SIGINT', 130, `trap '' TERM; ${SLEEPS}`],
+    // The leader has exited, so the signal lands in the 2 s drain: the factory exits as the run
+    // settles, never later at the grace's end, when the next session could already be starting.
+    ['SIGINT', 130, '(sleep 30) & echo $! > left.pid; exit 0'],
   ] as const)(
     'stops the group on %s to the factory, which exits %i: %s',
     async (signal, status, script) => {
@@ -1855,7 +1865,8 @@ await runProcess('bash', ['-c', process.argv[3]], {
       const sent = Date.now();
       factory.kill(signal);
       await expect(exited).resolves.toBe(status);
-      if (script !== SLEEPS) expect(Date.now() - sent).toBeGreaterThanOrEqual(2900);
+      if (script.startsWith('trap')) expect(Date.now() - sent).toBeGreaterThanOrEqual(2900);
+      if (script.endsWith('exit 0')) expect(Date.now() - sent).toBeLessThan(2500);
       await gone(pid);
     },
     30_000,

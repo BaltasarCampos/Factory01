@@ -672,7 +672,15 @@ function liveCheck(id: string, role: RoleName, model: string, passed: () => bool
               true,
             );
           assistant = true;
-        } else if (m.type === 'result') check.result = m;
+        } else if (m.type === 'result') {
+          check.result = m;
+          // Urgent, and checked here, so it holds whatever claude's exit status.
+          if (m.session_id !== id)
+            throw new SessionFailed(
+              `claude reported session ${visible(JSON.stringify(m.session_id ?? null))}, not ${id} as launched`,
+              true,
+            );
+        }
         return undefined;
       } catch (err) {
         check.failure = asFailed(err);
@@ -1135,14 +1143,9 @@ export class LocalLauncher implements SessionLauncher {
             throw streamFailed(
               `claude ${result.signal ? `was ended by ${result.signal}` : `exited ${String(result.status)}`}: ${visible(result.stderr.trim())}`,
             );
-          const { init, result: last } = readStream(result.stdout, files.id);
+          const { init } = readStream(result.stdout, files.id);
           if (live.init === undefined)
             throw streamFailed('its init message was not read while it ran');
-          if (last.session_id !== files.id)
-            throw new SessionFailed(
-              `claude reported session ${visible(JSON.stringify(last.session_id ?? null))}, not ${files.id} as launched`,
-              true,
-            );
           // Checked live above, and again on the whole stream.
           const { problems, missing } = initCheck(init, request.role, model);
           if (problems.length > 0) throw mismatch(problems);
@@ -1320,7 +1323,7 @@ export class LocalLauncher implements SessionLauncher {
       const members = groupMembers(pgid);
       if (members.length > 0)
         throw new LaunchRefused(
-          `no local session started: session ${visible(id)}'s claude has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); stop them, then run the factory again`,
+          `no local session started: session ${visible(id)}'s claude has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); look at them with ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}, then run the factory again`,
           true,
           'session-running',
         );
