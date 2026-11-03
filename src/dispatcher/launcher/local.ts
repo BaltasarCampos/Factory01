@@ -60,7 +60,7 @@ import { EnvironmentError } from '../../cli/env.js';
 import { SERVED_HOOKS } from '../../commands/hook.js';
 import { WRAPPERS } from '../../guard/command-guard.js';
 import { isFable, roleVersion } from '../../events/schema.js';
-import { hasPassed } from '../../hooks/session.js';
+import { hasPassed, sessionEvents } from '../../hooks/session.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
@@ -102,6 +102,8 @@ export type Runner = (
     silence?: number;
     /** Each line of its output as it comes; a reason returned stops the run, group and all. */
     line?: (line: string) => string | undefined;
+    /** Called on each chunk of its output, as the watchdog hears it. */
+    chunk?: () => void;
     /** The program's pid once it has started: for a grouped run, its process group's id. */
     started?: (pid: number) => void;
   },
@@ -149,7 +151,7 @@ const HEARTBEAT = 60_000;
  */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
-    const { timeout, group, silence, line, ...spawned } = options;
+    const { timeout, group, silence, line, chunk: heard, ...spawned } = options;
     const grouped = timeout !== undefined || group === true;
     let stdout = '';
     let stderr = '';
@@ -247,6 +249,7 @@ export const runProcess: Runner = (program, args, options) =>
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk;
       listen();
+      heard?.();
       if (line === undefined) return;
       let from = 0;
       for (let at = chunk.indexOf('\n'); at !== -1 && !settled; at = chunk.indexOf('\n', from)) {
@@ -616,18 +619,24 @@ interface Read {
   peak: number;
   /** The longest line, in characters, from which MAX_LINE is set. */
   longest: number;
-  /** The main session's assistant messages so far, never a subagent's. */
+  /** The main session's assistant messages so far, by distinct message id, never a subagent's. */
   turns: number;
+  /** The main session's assistant lines, one per content block, which `turns` counts by id. */
+  lines: number;
+  ids: Set<string>;
+  /** The longest the watchdog heard nothing, from the spawn to the end, in ms. */
+  silence: number;
 }
 
 /**
  * What the session reported, kept in its folder for every session that spawned, failed or not:
  * the model id and version its init message names, how many calls were refused, the models it
  * used, an Opus one being the advisor's, which no tool list shows (T125's A3d, T097), its peak
- * context, from which each role's ceiling is set (design rev 998), its longest line, and its
- * turns, from which with the result's duration each role's caps are tuned after Gate A.
+ * context, from which each role's ceiling is set (design rev 998), its longest line, its turns,
+ * its assistant lines and the result's own count, from which with the durations, the result's and
+ * the factory's, each role's caps are tuned after Gate A, and the longest silence, the watchdog's.
  */
-function reported({ init = {}, result = {}, peak, longest, turns }: Read) {
+function reported({ init = {}, result = {}, ...read }: Read, elapsed: number) {
   const usage = result.modelUsage;
   const models = typeof usage === 'object' && usage !== null ? Object.keys(usage) : [];
   return {
@@ -639,10 +648,15 @@ function reported({ init = {}, result = {}, peak, longest, turns }: Read) {
       : 0,
     models,
     advisor: models.some((name) => /opus/i.test(name)),
-    peak_context: peak,
-    longest_line: longest,
-    turns,
+    peak_context: read.peak,
+    longest_line: read.longest,
+    turns: read.turns,
+    assistant_lines: read.lines,
+    num_turns: typeof result.num_turns === 'number' ? result.num_turns : null,
     duration_ms: typeof result.duration_ms === 'number' ? result.duration_ms : null,
+    // The factory's own, since a session stopped at a cap has no result and so no duration.
+    elapsed_ms: elapsed,
+    longest_silence_ms: read.silence,
   };
 }
 
@@ -684,12 +698,48 @@ const mismatch = (problems: readonly string[]) =>
   new SessionFailed(`its init message does not match its launch: ${problems.join('; ')}`, true);
 
 /**
+ * Why a session's start failed, from its own log (T061): the session-start hook's last refusal,
+ * through `visible()`, or that it logged none, and where the log is.
+ */
+function startRefusal(home: string, id: string): string {
+  const log = sessionEvents(home, id);
+  let text = '';
+  try {
+    text = readFileSync(log, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
+      return `its log ${log} cannot be read: ${visible(err instanceof Error ? err.message : String(err))}`;
+  }
+  const refusals = text.split('\n').flatMap((line) => {
+    try {
+      const e = JSON.parse(line) as Message;
+      const summary = e.input_summary;
+      return e.kind === 'blocked' && e.tool === 'SessionStart' && typeof summary === 'string'
+        ? [summary]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const refused = refusals.at(-1);
+  return refused === undefined
+    ? `the session-start hook logged no refusal in ${log}, so it failed before it could or never ran; find why before this item's next session`
+    : `the session-start hook refused it: ${visible(refused)}; fix that before this item's next session (its log is ${log})`;
+}
+
+/**
  * The checks made while the session runs, so one that did not start as launched is stopped at
  * once, not after it has run (T061): each line in order, the init check as soon as the init
  * message comes, and the passed record at the first assistant message, by when the SessionStart
  * hook has run, whatever order T125 shows, and before any tool call. `failure` is why it stopped.
  */
-function liveCheck(id: string, role: RoleName, model: string, passed: () => boolean) {
+function liveCheck(
+  id: string,
+  role: RoleName,
+  model: string,
+  passed: () => boolean,
+  refusal: () => string,
+) {
   let assistant = false;
   const check: Read & {
     failure?: SessionFailed;
@@ -698,6 +748,9 @@ function liveCheck(id: string, role: RoleName, model: string, passed: () => bool
     peak: 0,
     longest: 0,
     turns: 0,
+    lines: 0,
+    ids: new Set(),
+    silence: 0,
     line: (text) => {
       check.longest = Math.max(check.longest, text.length);
       if (text.trim() === '') return undefined;
@@ -710,10 +763,16 @@ function liveCheck(id: string, role: RoleName, model: string, passed: () => bool
           if (problems.length > 0) throw mismatch(problems);
         } else if (m.type === 'assistant') {
           check.peak = Math.max(check.peak, context(m));
-          if (typeof m.parent_tool_use_id !== 'string') check.turns += 1;
+          // stream-json sends a line per content block, each with its message's id.
+          if (typeof m.parent_tool_use_id !== 'string') {
+            check.lines += 1;
+            const id = (m.message as Message | null)?.id;
+            check.ids.add(typeof id === 'string' ? id : `line ${String(check.lines)}`);
+            check.turns = check.ids.size;
+          }
           if (!assistant && !passed())
             throw new SessionFailed(
-              'its start check did not pass: it has no passed record by its first assistant message',
+              `its start check did not pass: it has no passed record by its first assistant message; ${refusal()}`,
               true,
             );
           assistant = true;
@@ -954,6 +1013,14 @@ export class LocalLauncher implements SessionLauncher {
     const main = step('reading main', () => this.treeFiles(project, mainRef, 'main'));
     if ('ok' in main) return main;
     const guardrails = guardrailCheck(main.found, main.settings, manifest, 'main');
+    if (!guardrails.ok && guardrails.urgent !== true) {
+      // The installed factory and the pin disagree on the hooks: once per main head (T061).
+      const head = step('reading main', () =>
+        this.git(project, ['rev-parse', '--verify', `${mainRef}^{commit}`]),
+      );
+      const reason = `main at ${head.slice(0, 12)}: ${guardrails.reason}; install the pinned release, or re-pin main`;
+      return { ok: false, reason };
+    }
     if (!guardrails.ok) return guardrails;
     try {
       const result = await this.run('claude', ['--version'], {
@@ -1055,6 +1122,7 @@ export class LocalLauncher implements SessionLauncher {
       );
     if (this.running) throw new LaunchRefused('a local session is already running');
     this.running = true;
+    let at: string | undefined;
     try {
       step('looking for a session still running', () => {
         this.stillRunning();
@@ -1062,6 +1130,7 @@ export class LocalLauncher implements SessionLauncher {
       const heads = step('fetching main and the branch into the factory’s own clone', () =>
         this.heads(request.project, request.branch),
       );
+      at = heads.head;
       const manifest = this.history(request.project, request.branch, heads);
       const { repo, inbox_issue } = step("reading main's config", () =>
         this.config(request.project, heads.main),
@@ -1158,14 +1227,20 @@ export class LocalLauncher implements SessionLauncher {
           };
           writeFileSync(files.record, `${JSON.stringify(record, null, 2)}\n`, WRITE_ONCE);
         });
-        const live = liveCheck(files.id, request.role, model, () => {
-          try {
-            return hasPassed(this.options.home, files.id);
-          } catch (err) {
-            const why = err instanceof Error ? err.message : String(err);
-            throw new SessionFailed(`its passed record could not be read: ${visible(why)}`, true);
-          }
-        });
+        const live = liveCheck(
+          files.id,
+          request.role,
+          model,
+          () => {
+            try {
+              return hasPassed(this.options.home, files.id);
+            } catch (err) {
+              const why = err instanceof Error ? err.message : String(err);
+              throw new SessionFailed(`its passed record could not be read: ${visible(why)}`, true);
+            }
+          },
+          () => startRefusal(this.options.home, files.id),
+        );
         // In a process group of its own, so stopping it stops what it started; its leader is kept,
         // so a later launch sees one the factory could not stop, such as after a SIGKILL.
         const group = join(dirname(files.record), 'group.json');
@@ -1173,6 +1248,8 @@ export class LocalLauncher implements SessionLauncher {
         // The installed factory's caps, never the clone's (T061).
         const { caps } = factoryPolicy().roles[request.role];
         const silence = this.options.silence ?? SILENCE;
+        const began = Date.now();
+        let heard = began;
         // From the spawn to the return, every failure is a session that ran on the Owner's plan.
         const session = async (): Promise<LaunchResult> => {
           let result: Awaited<ReturnType<Runner>>;
@@ -1180,6 +1257,10 @@ export class LocalLauncher implements SessionLauncher {
             const invocation = localInvocation(request, files, model, caps.turns);
             result = await this.run('claude', invocation, {
               ...{ cwd, env, group: true, line: live.line },
+              chunk: () => {
+                live.silence = Math.max(live.silence, Date.now() - heard);
+                heard = Date.now();
+              },
               ...{ timeout: caps.minutes * (this.options.minute ?? 60_000), silence },
               started: (pgid) => {
                 ran.spawned = true;
@@ -1204,10 +1285,16 @@ export class LocalLauncher implements SessionLauncher {
             );
           if (live.result?.subtype === 'error_max_turns')
             throw new SessionCapped(`it reached its turn cap of ${String(caps.turns)} turns`);
-          if (result.status !== 0)
-            throw streamFailed(
-              `claude ${result.signal ? `was ended by ${result.signal}` : `exited ${String(result.status)}`}: ${visible(result.stderr.trim())}`,
-            );
+          if (result.status !== 0) {
+            const ended = result.signal
+              ? `was ended by ${result.signal}`
+              : `exited ${String(result.status)}`;
+            const after =
+              live.result === undefined
+                ? ''
+                : ` after its result ${visible(JSON.stringify(live.result.subtype ?? null))}`;
+            throw streamFailed(`claude ${ended}${after}: ${visible(result.stderr.trim())}`);
+          }
           const { init, result: last } = readStream(result.stdout, files.id);
           if (live.init === undefined)
             throw streamFailed('its init message was not read while it ran');
@@ -1235,7 +1322,6 @@ export class LocalLauncher implements SessionLauncher {
         };
         let outcome: LaunchResult | undefined;
         let failure: SessionFailed | undefined;
-        const began = Date.now();
         const beat = setInterval(() => {
           request.heartbeat?.({ elapsed: Date.now() - began, turns: live.turns });
         }, this.options.heartbeat ?? HEARTBEAT);
@@ -1249,7 +1335,9 @@ export class LocalLauncher implements SessionLauncher {
         }
         // What it reported, kept for every session that spawned, a failed one too.
         try {
-          const text = JSON.stringify(reported(live), null, 2);
+          const ended = Date.now();
+          live.silence = Math.max(live.silence, ended - heard);
+          const text = JSON.stringify(reported(live, ended - began), null, 2);
           writeFileSync(join(dirname(files.record), 'result.json'), `${text}\n`, WRITE_ONCE);
         } catch (err) {
           const why = `its result.json could not be written: ${visible(err instanceof Error ? err.message : String(err))}`;
@@ -1264,6 +1352,10 @@ export class LocalLauncher implements SessionLauncher {
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
+    } catch (err) {
+      // A refusal that repeats on every pass alerts once per branch head (T061).
+      if (err instanceof LaunchRefused && at !== undefined) err.head ??= at;
+      throw err;
     } finally {
       this.running = false;
     }

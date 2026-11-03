@@ -582,6 +582,8 @@ describe('LocalLauncher (research R8, R9)', () => {
 
     await expect(refused).rejects.toThrow(LaunchRefused);
     await expect(refused).rejects.toThrow(/\.claude\/agents\/spec\.md names no model/);
+    // Refused at the branch's head, so a refusal that repeats alerts once per head.
+    await expect(refused).rejects.toMatchObject({ head: t.repo.revParse(`origin/${BRANCH}`) });
     expect(t.sessions()).toEqual([]);
   });
 
@@ -953,7 +955,7 @@ describe('LocalLauncher (research R8, R9)', () => {
 
   it('a session that exits with an error, or reports no session or another, is a failed session', async () => {
     const exited = setup({ run: fakeRunner(1).run }).launch(REQUEST);
-    await expect(exited).rejects.toThrow(/claude exited 1: boom/);
+    await expect(exited).rejects.toThrow(/claude exited 1 after its result "success": boom/);
     await expect(exited).rejects.toMatchObject({ name: 'SessionFailed', urgent: false });
     for (const session_id of [undefined, 's-other']) {
       const stream = (args: readonly string[]) => sessionStream(args, { result: { session_id } });
@@ -970,6 +972,13 @@ describe('LocalLauncher (research R8, R9)', () => {
     const exitedOther = setup({ run: fakeRunner(1, stream).run }).launch(REQUEST);
     await expect(exitedOther).rejects.toMatchObject({ name: 'SessionFailed', urgent: true });
     await expect(exitedOther).rejects.toThrow(/claude reported session "s-other"/);
+    // A result that is no success, then exit 1: the message names its subtype.
+    const errored = (args: readonly string[]) =>
+      sessionStream(args, { result: { subtype: 'error_during_execution', is_error: true } });
+    const during = setup({ run: fakeRunner(1, errored).run }).launch(REQUEST);
+    await expect(during).rejects.toThrow(
+      /claude exited 1 after its result "error_during_execution": boom/,
+    );
   });
 
   describe("the session's stream-json (T061)", () => {
@@ -990,9 +999,10 @@ describe('LocalLauncher (research R8, R9)', () => {
       });
     };
 
-    const usage = (input: number, read: number, written: number) => ({
+    const usage = (input: number, read: number, written: number, id?: string) => ({
       type: 'assistant',
       message: {
+        ...(id === undefined ? {} : { id }),
         usage: {
           ...{ input_tokens: input, cache_read_input_tokens: read },
           ...{ cache_creation_input_tokens: written, output_tokens: 9999 },
@@ -1001,7 +1011,11 @@ describe('LocalLauncher (research R8, R9)', () => {
     });
     // A subagent's message, with its parent's tool call, is no turn of the session's.
     const subagent = { ...usage(1, 1, 1), parent_tool_use_id: 'toolu_1' };
-    const assistants = [usage(10, 1000, 200), usage(5, 3000, 0), subagent, usage(1, 100, 0)];
+    // Two lines of one message, its text and a tool call, are one turn.
+    const assistants = [
+      ...[usage(10, 1000, 200, 'msg_1'), usage(5, 3000, 0, 'msg_1'), subagent],
+      ...[usage(1, 100, 0, 'msg_2'), usage(1, 100, 0)],
+    ];
     const recorded = (home: string) =>
       JSON.parse(
         readFileSync(join(home, '.factory', 'sessions', FIRST, 'result.json'), 'utf8'),
@@ -1013,6 +1027,7 @@ describe('LocalLauncher (research R8, R9)', () => {
         const result = {
           permission_denials: [{ tool_name: 'Bash' }, { tool_name: 'Edit' }],
           modelUsage: { 'claude-sonnet-5-5': {}, 'claude-opus-5-5': {} },
+          num_turns: 3,
         };
         const text = sessionStream(args, { assistants, result });
         longest = Math.max(...text.split('\n').map((line) => line.length));
@@ -1024,13 +1039,17 @@ describe('LocalLauncher (research R8, R9)', () => {
       const file = join(t.home, '.factory', 'sessions', FIRST, 'result.json');
       expect(statSync(file).mode & 0o777).toBe(0o600);
       // An Opus entry in modelUsage is the advisor's, which no tool list shows (T125's A3d).
-      expect(recorded(t.home)).toEqual({
+      const { elapsed_ms, longest_silence_ms, ...rest } = recorded(t.home);
+      expect(elapsed_ms).toBeTypeOf('number');
+      expect(longest_silence_ms).toBeTypeOf('number');
+      expect(rest).toEqual({
         ...{ model: 'claude-sonnet-5-5', claude_code_version: '2.1.309', permission_denials: 2 },
         ...{ models: ['claude-sonnet-5-5', 'claude-opus-5-5'], advisor: true },
         // The largest input of any assistant message, cache reads and writes included.
         peak_context: 3005,
         longest_line: longest,
-        ...{ turns: 3, duration_ms: null },
+        // A line with no message id is a turn of its own.
+        ...{ turns: 3, assistant_lines: 4, num_turns: 3, duration_ms: null },
       });
     });
 
@@ -1052,6 +1071,35 @@ describe('LocalLauncher (research R8, R9)', () => {
       const stopped = setup({ run: unpassed });
       await expect(stopped.launch(REQUEST)).rejects.toThrow(/no passed record/);
       expect(recorded(stopped.home)).toMatchObject({ peak_context: 1210 });
+    });
+
+    it("names a failed start's refusal from the session's own log, or that it logged none", async () => {
+      const refusal = {
+        kind: 'blocked',
+        tool: 'SessionStart',
+        input_summary: 'cwd: not\u202ethere',
+      };
+      for (const logged of [[refusal], []]) {
+        const unpassed: Runner = (program, args, options) => {
+          if (args[0] !== '-p') return fakeRunner().run(program, args, options);
+          const dir = dirname(args[args.indexOf('--settings') + 1] ?? '');
+          const lines = logged.map((event) => `${JSON.stringify(event)}\n`).join('');
+          if (lines !== '')
+            writeFileSync(join(dir, 'events.jsonl'), `{"kind":"tool_call"}\n${lines}`);
+          const text = sessionStream(args, { assistants });
+          text.split('\n').some((line) => line !== '' && options.line?.(line) !== undefined);
+          return Promise.resolve({ status: null, stdout: text, stderr: '' });
+        };
+        const t = setup({ run: unpassed });
+        const failed = t.launch(REQUEST);
+        await expect(failed).rejects.toMatchObject({ name: 'SessionFailed', urgent: true });
+        const log = join(t.home, '.factory', 'sessions', FIRST, 'events.jsonl');
+        await expect(failed).rejects.toThrow(
+          logged.length > 0
+            ? `the session-start hook refused it: cwd: not\\u{202e}there; fix that before this item's next session (its log is ${log})`
+            : `the session-start hook logged no refusal in ${log}`,
+        );
+      }
     });
 
     it('is a failed session when its result.json cannot be written', async () => {
@@ -1341,16 +1389,17 @@ describe('LocalLauncher (research R8, R9)', () => {
       // A hook's system line, which may come before the init, every 50 ms: never silent.
       const TICKS = `sleep 30 & echo $! > left.pid; while :; do echo '${HOOK_LINE}'; sleep 0.05; done`;
       it.each([
-        ['wall-clock', TICKS, { minute: 10 }, /ran past its wall-clock cap of 45 minutes/],
+        ['wall-clock', TICKS, { minute: 40 }, /ran past its wall-clock cap of 45 minutes/, false],
         [
           'silence',
           'sleep 30 & echo $! > left.pid; wait',
-          { silence: 300 },
-          /silent for 0.005 min/,
+          { silence: 1500 },
+          /silent for 0.025 min/,
+          true,
         ],
       ])(
         'stops a session at its %s cap, group and all, a capped session',
-        async (_cap, script, limits, why) => {
+        async (_cap, script, limits, why, silent) => {
           const t = scripted(script, undefined, limits);
           const stopped = t.launch(REQUEST);
           await expect(stopped).rejects.toThrow(SessionCapped);
@@ -1361,13 +1410,18 @@ describe('LocalLauncher (research R8, R9)', () => {
           await vi.waitFor(() => {
             expect(() => process.kill(pid, 0)).toThrow();
           });
+          // The longest gap the watchdog heard, its own silence included.
+          const result = join(t.home, '.factory', 'sessions', FIRST, 'result.json');
+          const quiet = (JSON.parse(readFileSync(result, 'utf8')) as Record<string, number>)
+            .longest_silence_ms;
+          expect((quiet ?? 0) >= 1500).toBe(silent);
         },
         30_000,
       );
 
       it('tells its caller its elapsed time and turns about once a heartbeat while it runs', async () => {
         const beats: { elapsed: number; turns: number }[] = [];
-        const t = scripted(TICKS, undefined, { minute: 10, heartbeat: 100 });
+        const t = scripted(TICKS, undefined, { minute: 40, heartbeat: 100 });
         const request = {
           ...REQUEST,
           heartbeat: (beat: (typeof beats)[number]) => beats.push(beat),
@@ -1826,7 +1880,14 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     const bare = { ...GUARDED, '.claude/settings.json': '{}\n' };
     const noHooks = setup({ mainFiles: bare, release: () => manifestOf(bare) });
     const waiting = await noHooks.available();
-    expect(waiting).toMatchObject({ ok: false, reason: /installs no factory hooks/ });
+    // Once per main head, naming the way out: only the Owner can make the two agree.
+    const main = noHooks.repo.revParse('origin/main').slice(0, 12);
+    expect(waiting).toMatchObject({
+      ok: false,
+      reason: new RegExp(
+        `^main at ${main}: release v1\\.0\\.0 installs no factory hooks.*; install the pinned release, or re-pin main$`,
+      ),
+    });
     expect(waiting).not.toHaveProperty('urgent');
     const missing = () => {
       throw new ReleaseTagError('release tag v1.0.0 does not exist', 'missing');

@@ -50,11 +50,13 @@ export type Launchers = Partial<Record<AgentsMode, SessionLauncher>>;
 
 /**
  * A launch the launcher refused; `urgent` when the branch's guardrail files were tampered with,
- * or `kind` names another urgent alert, such as a session still running.
+ * or `kind` names another urgent alert, such as a session still running. `head` is the branch's
+ * head it was refused at, once fetched, so a refusal that repeats alerts once per head.
  */
 export class LaunchRefused extends RefusedError {
   readonly urgent: boolean;
   readonly kind?: string;
+  head?: string;
 
   constructor(message: string, urgent = false, kind?: string) {
     super(message);

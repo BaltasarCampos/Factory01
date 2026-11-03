@@ -33,6 +33,7 @@ import {
   type Tier,
 } from '../model/types.js';
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
+import { visible } from '../notify/summary.js';
 import { duplicateOf } from '../stations/checks/intake.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
@@ -528,11 +529,14 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;
+    // Once per branch head: a refusal that repeats on every pass alerts again only on a new one.
+    const at = err.head === undefined ? '' : `; ${branch} is at ${err.head.slice(0, 12)}`;
+    const refused = visible(`${err.message}${at}`);
     if (err.kind !== undefined) {
-      await alertOnce({ urgency: 'urgent', kind: err.kind, text: err.message });
-      return { ...result, refused: err.message };
+      await alertOnce({ urgency: 'urgent', kind: err.kind, text: refused });
+      return { ...result, refused };
     }
-    return refuse(err.message, err.urgent);
+    return refuse(refused, err.urgent);
   }
   for (const { kind, text } of notices) await alertOnce({ urgency: 'info', kind, text });
   const mode = launcher.mode;
