@@ -64,8 +64,9 @@ export class LaunchRefused extends RefusedError {
 /**
  * A session that ran, used the Owner's plan and failed, never "no session started": every failure
  * once claude has spawned. Nothing of it is pushed. `urgent` when it did not run as launched, such
- * as an init message naming another permission mode or no passed record; a stream that cannot be
- * read, or claude exiting with an error, is not (T061, T086).
+ * as an init message naming another permission mode or session, or no passed record or one that
+ * cannot be read; a stream that cannot be read, or claude exiting with an error, is not (T061,
+ * T086).
  */
 export class SessionFailed extends RefusedError {
   readonly urgent: boolean;
