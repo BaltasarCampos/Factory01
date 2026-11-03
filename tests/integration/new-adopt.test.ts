@@ -636,24 +636,51 @@ describe(
       expect(launchers.local.launches).toEqual([]);
     });
 
-    it('a Define session that ran and failed is reported as such, with the urgent session-failed alert (T061)', async () => {
-      const { cli, cwd, launchers } = laptop();
-      const why =
-        'its init message does not match its launch: its permission mode "default", not dontAsk';
-      launchers.local.failure = new SessionFailed(why);
+    // As the local launcher words them: an init mismatch is urgent, a stream or exit failure not.
+    it.each([
+      [
+        'its init message does not match its launch: its permission mode "default", not dontAsk',
+        true,
+      ],
+      ['its stream has a line that is not a JSON object: oops', false],
+      ['claude exited 1: boom', false],
+    ])(
+      'a Define session that ran and failed with "%s" is reported as such, with its alert (T061)',
+      async (why, urgent) => {
+        const { cli, cwd, launchers } = laptop();
+        launchers.local.failure = new SessionFailed(why, urgent);
+        const r = await cli(['new', 'A pitch', '--name', 'sample']);
+        expect(r.code).toBe(1);
+        expect(r.stderr).toContain(`Define's session ran and failed: ${why}`);
+        expect(r.stderr).not.toMatch(/was not started/);
+        const config = parseConfig(read(join(cwd, 'sample'), '.factory/config'));
+        const inbox = readState().repos['owner/sample']?.issues.find(
+          (i) => i.number === config.inbox_issue,
+        );
+        expect(inbox?.comments).toHaveLength(1);
+        const urgency = urgent ? 'urgent' : 'info';
+        expect(inbox?.comments[0]?.body).toMatch(`urgency=${urgency} kind=session-failed`);
+        expect(inbox?.comments[0]?.body).toContain(
+          `a define session for owner/sample failed: ${why}`,
+        );
+      },
+    );
+
+    it('the way out it prints after a failed Define session starts Define again', async () => {
+      const { cli, launchers } = laptop();
+      launchers.local.failure = new SessionFailed('claude exited 1: boom', false);
       const r = await cli(['new', 'A pitch', '--name', 'sample']);
-      expect(r.code).toBe(1);
-      expect(r.stderr).toContain(`Define's session ran and failed: ${why}`);
-      expect(r.stderr).not.toMatch(/was not started/);
-      const config = parseConfig(readFileSync(join(cwd, 'sample', '.factory', 'config'), 'utf8'));
-      const inbox = readState().repos['owner/sample']?.issues.find(
-        (i) => i.number === config.inbox_issue,
-      );
-      expect(inbox?.comments).toHaveLength(1);
-      expect(inbox?.comments[0]?.body).toMatch(/urgency=urgent kind=session-failed/);
-      expect(inbox?.comments[0]?.body).toContain(
-        `a define session for owner/sample failed: ${why}`,
-      );
+      const way = /run `(factory [^`]+)` here to start Define again/.exec(r.stderr)?.[1] ?? '';
+      expect(way).toBe('factory adopt owner/sample');
+      delete launchers.local.failure;
+      const again = await cli(way.split(' ').slice(1));
+      expect(again.stderr).toBe('');
+      expect(again.code).toBe(0);
+      expect(launchers.local.launches).toHaveLength(2);
+      expect(launchers.local.launches[1]).toMatchObject({
+        role: 'define',
+        branch: 'claude/define',
+      });
     });
 
     it('without launchers from the caller, the local launcher checks the new clone and waits for the guards', async () => {

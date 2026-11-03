@@ -16,6 +16,7 @@ import {
   manifestOf,
   quietShell,
   SANDBOX_BIN,
+  sessionRun,
   sessionStream,
   type StreamChange,
 } from '../helpers/guardrails.js';
@@ -123,21 +124,23 @@ function setup(options: Setup = {}) {
   const local = new FakeLauncher('local');
   /** A real local launcher against this release manifest; sessions are recorded, not run. */
   const sessions: { args: readonly string[]; cwd: string }[] = [];
-  const realLocal = (manifest: GuardrailManifest, change: StreamChange = {}) =>
+  /** `change` changes the session's stream, or gives its exit status and output outright. */
+  const realLocal = (
+    manifest: GuardrailManifest,
+    change: StreamChange | { status: number; stdout: string } = {},
+  ) =>
     new LocalLauncher({
       // The programs Claude Code's sandbox needs, as stand-ins on the session's PATH.
       ...{ home, env: { ...gitEnv, PATH: `${SANDBOX_BIN}:${gitEnv.PATH ?? ''}` } },
       release: () => manifest,
-      run: (program, args, { cwd }) => {
+      run: (program, args, options) => {
         if (program === 'bash') return Promise.resolve(quietShell(args));
         if (args[0] === '--version')
           return Promise.resolve({ status: 0, stdout: '2.1.309 (Claude Code)\n', stderr: '' });
-        sessions.push({ args, cwd });
-        return Promise.resolve({
-          status: 0,
-          stdout: sessionStream(args, change),
-          stderr: '',
-        });
+        sessions.push({ args, cwd: options.cwd });
+        if ('status' in change)
+          return Promise.resolve(sessionRun(args, change.stdout, options, change.status, 'boom'));
+        return Promise.resolve(sessionRun(args, sessionStream(args, change), options));
       },
       sessionId: () => SESSION_ID,
     });
@@ -276,6 +279,27 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
     expect(t.inbox()[0]?.body).toMatch(/urgency=urgent kind=session-failed/);
     expect(t.inbox()[0]?.body).toMatch(/a spec session for owner\/project#2 failed/);
   });
+
+  it.each([
+    ['a line that is not JSON', { status: 0, stdout: 'oops\n' }, /not a JSON object: oops/],
+    ['claude exiting 1', { status: 1, stdout: '' }, /claude exited 1: boom/],
+  ])(
+    'a session with %s is a failed session, with one info alert, never "no session started"',
+    async (_name, session, why) => {
+      const role = { '.claude/agents/spec.md': '---\nname: spec\nmodel: sonnet\n---\nSpec.\n' };
+      const t = setup({ settings: HOOKED_SETTINGS, mainFiles: role });
+      const manifest = manifestOf({ '.claude/settings.json': HOOKED_SETTINGS, ...role });
+
+      const r = await t.cli(['dispatch'], { launchers: { local: t.realLocal(manifest, session) } });
+
+      expect(r.code).toBe(0);
+      expect(r.stdout).toMatch(/a spec session for owner\/project#2 failed: /);
+      expect(r.stdout).toMatch(why);
+      expect(r.stdout).not.toMatch(/no session started/);
+      expect(t.inbox()).toHaveLength(1);
+      expect(t.inbox()[0]?.body).toMatch(/urgency=info kind=session-failed/);
+    },
+  );
 
   it('a session on another Claude Code version raises one info alert saying to re-run A8', async () => {
     const role = { '.claude/agents/spec.md': '---\nname: spec\nmodel: sonnet\n---\nSpec.\n' };

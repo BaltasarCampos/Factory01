@@ -94,11 +94,20 @@ export function readSessionRecord(home: string, given: unknown): SessionRecord {
   return r as unknown as SessionRecord;
 }
 
-/** Whether the session-start hook passed this session: its passed record names it. */
+/**
+ * Whether the session-start hook passed this session: its passed record names it. Only a missing
+ * record is "not passed"; any other read error is thrown, never read as either answer.
+ */
 export function hasPassed(home: string, session: string): boolean {
+  let text: string;
   try {
-    const path = passedPath(home, session);
-    return (JSON.parse(readFileSync(path, 'utf8')) as { session?: unknown }).session === session;
+    text = readFileSync(passedPath(home, session), 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+  try {
+    return (JSON.parse(text) as { session?: unknown } | null)?.session === session;
   } catch {
     return false;
   }

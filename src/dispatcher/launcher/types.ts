@@ -46,19 +46,32 @@ export interface SessionLauncher {
 
 export type Launchers = Partial<Record<AgentsMode, SessionLauncher>>;
 
-/** A launch the launcher refused; `urgent` when the branch's guardrail files were tampered with. */
+/**
+ * A launch the launcher refused; `urgent` when the branch's guardrail files were tampered with,
+ * or `kind` names another urgent alert, such as a session still running.
+ */
 export class LaunchRefused extends RefusedError {
   readonly urgent: boolean;
+  readonly kind?: string;
 
-  constructor(message: string, urgent = false) {
+  constructor(message: string, urgent = false, kind?: string) {
     super(message);
     this.urgent = urgent;
+    if (kind !== undefined) this.kind = kind;
   }
 }
 
 /**
- * A session that ran, used the Owner's plan and failed, never "no session started", such as one
- * whose init message names another permission mode: an urgent alert, and nothing of it is pushed
- * (T061, T086).
+ * A session that ran, used the Owner's plan and failed, never "no session started": every failure
+ * once claude has spawned. Nothing of it is pushed. `urgent` when it did not run as launched, such
+ * as an init message naming another permission mode or no passed record; a stream that cannot be
+ * read, or claude exiting with an error, is not (T061, T086).
  */
-export class SessionFailed extends RefusedError {}
+export class SessionFailed extends RefusedError {
+  readonly urgent: boolean;
+
+  constructor(message: string, urgent: boolean) {
+    super(message);
+    this.urgent = urgent;
+  }
+}
