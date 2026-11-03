@@ -233,11 +233,27 @@ describe('loadPolicy refuses a table it does not expect (T082)', () => {
       /intake: shell names grep -r, a shell function of Claude Code's own/,
     ],
     [
+      'a cap that is no whole number above 0',
+      swap('caps: { turns: 30, minutes: 15 }', 'caps: { turns: 0, minutes: 15 }'),
+      /intake: caps: turns is not a whole number above 0/,
+    ],
+    [
       'a blank entry',
       swap('shell: [gh issue]', "shell: ['gh issue', ' ']"),
       /intake: shell has a blank or padded entry/,
     ],
   ])('refuses %s', (_name, table, error) => {
     expect(() => loadPolicy(table)).toThrow(error);
+  });
+
+  it("gives each role the caps of the Owner's decision of 2026-10-30, turns and minutes (T061)", () => {
+    const caps = Object.fromEntries(
+      Object.entries(policy.roles).map(([role, row]) => [role, [row.caps.turns, row.caps.minutes]]),
+    );
+    expect(caps).toEqual({
+      ...{ define: [150, 90], intake: [30, 15], spec: [80, 45], planner: [80, 45] },
+      ...{ builder: [200, 120], test: [120, 60], reviewer: [80, 45], security: [80, 45] },
+      ...{ integrator: [60, 30], release: [40, 20], ops: [40, 20], coach: [40, 20] },
+    });
   });
 });

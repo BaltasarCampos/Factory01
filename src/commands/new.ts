@@ -11,7 +11,7 @@ import { assertPassphraseTerminal, ownerKeyPath } from '../approvals/sign.js';
 import type { CommandContext } from '../cli/commands.js';
 import { EnvironmentError, ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { selectLauncher } from '../dispatcher/launcher/select.js';
-import { SessionFailed } from '../dispatcher/launcher/types.js';
+import { SessionCapped, SessionFailed } from '../dispatcher/launcher/types.js';
 import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
 import { signedCommit } from '../git/sign.js';
 import { Fields, gh } from '../github/gh.js';
@@ -169,7 +169,8 @@ export async function startDefine(
       const inbox = await projectInbox(workdir, ctx.env);
       if (inbox === undefined) throw new EnvironmentError(`${workdir} has no .factory/config`);
       const urgency = err.urgent ? 'urgent' : 'info';
-      await alert(inbox, { urgency, kind: 'session-failed', text });
+      const kind = err instanceof SessionCapped ? 'session-capped' : 'session-failed';
+      await alert(inbox, { urgency, kind, text });
       return ExitCode.Refused;
     }
     const why = err instanceof Error ? err.message : String(err);

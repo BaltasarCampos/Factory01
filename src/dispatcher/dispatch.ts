@@ -46,7 +46,13 @@ import {
 } from './branch.js';
 import { itemOf, type HistoryAudit } from './history-audit.js';
 import { selectLauncher } from './launcher/select.js';
-import { LaunchRefused, SessionFailed, type Launchers, type Notice } from './launcher/types.js';
+import {
+  LaunchRefused,
+  SessionCapped,
+  SessionFailed,
+  type Launchers,
+  type Notice,
+} from './launcher/types.js';
 import { tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
@@ -114,6 +120,8 @@ export interface DispatchContext {
   logEvent: (issue: number, event: DispatchEvent) => Promise<void>;
   /** The clock for `.station.json`'s `issued_at`; default the system clock. */
   now?: () => Date;
+  /** Hears a line about once a minute while a local session runs: `factory run`'s heartbeat. */
+  heartbeat?: (line: string) => void;
   gh?: GhOptions;
 }
 
@@ -505,12 +513,18 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       branch,
       ...session,
       prompt,
+      heartbeat: ({ elapsed, turns }) => {
+        const minutes = `${String(Math.floor(elapsed / 60_000))} min`;
+        const where = `${repo}#${String(item.issue.number)}`;
+        ctx.heartbeat?.(`still running: ${role} on ${where}, ${minutes}, ${String(turns)} turns`);
+      },
     }));
   } catch (err) {
     if (err instanceof SessionFailed) {
       const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed`;
       const urgency = err.urgent ? 'urgent' : 'info';
-      await alertOnce({ urgency, kind: 'session-failed', text });
+      const kind = err instanceof SessionCapped ? 'session-capped' : 'session-failed';
+      await alertOnce({ urgency, kind, text });
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;

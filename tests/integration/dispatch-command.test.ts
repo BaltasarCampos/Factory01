@@ -202,6 +202,15 @@ describe('factory dispatch and factory run (contracts/cli.md)', { timeout: 60_00
     expect(t.local.launches).toHaveLength(1);
   });
 
+  it('factory run prints a heartbeat line while a session runs: role, item, elapsed time and turns', async () => {
+    const t = setup();
+    t.local.beats = [{ elapsed: 3 * 60_000 + 5_000, turns: 17 }];
+
+    const r = await t.cli(['run']);
+
+    expect(r.stdout).toContain('still running: spec on owner/project#2, 3 min, 17 turns\n');
+  });
+
   it('without launchers from the caller, an agents: cloud project starts no session and the Owner gets one info alert (T125)', async () => {
     const t = setup({ agents: 'cloud' });
 
@@ -300,6 +309,23 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
       expect(t.inbox()[0]?.body).toMatch(/urgency=info kind=session-failed/);
     },
   );
+
+  it('a session that reached its turn cap is a failure with one info session-capped alert', async () => {
+    const role = { '.claude/agents/spec.md': '---\nname: spec\nmodel: sonnet\n---\nSpec.\n' };
+    const t = setup({ settings: HOOKED_SETTINGS, mainFiles: role });
+    const manifest = manifestOf({ '.claude/settings.json': HOOKED_SETTINGS, ...role });
+    const result = { subtype: 'error_max_turns', is_error: true };
+
+    const r = await t.cli(['dispatch'], {
+      launchers: { local: t.realLocal(manifest, { result }) },
+    });
+
+    expect(r.stdout).toMatch(
+      /a spec session for owner\/project#2 failed: it reached its turn cap of 80 turns/,
+    );
+    expect(t.inbox()).toHaveLength(1);
+    expect(t.inbox()[0]?.body).toMatch(/urgency=info kind=session-capped/);
+  });
 
   it('a session on another Claude Code version raises one info alert saying to re-run A8', async () => {
     const role = { '.claude/agents/spec.md': '---\nname: spec\nmodel: sonnet\n---\nSpec.\n' };

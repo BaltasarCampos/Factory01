@@ -79,6 +79,7 @@ import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
 import {
   LaunchRefused,
+  SessionCapped,
   SessionFailed,
   type Availability,
   type LaunchRequest,
@@ -97,6 +98,8 @@ export type Runner = (
     timeout?: number;
     /** Runs the program in a process group of its own, as a timeout does. */
     group?: boolean;
+    /** In ms; stops the run, group and all, once its output has been silent that long. */
+    silence?: number;
     /** Each line of its output as it comes; a reason returned stops the run, group and all. */
     line?: (line: string) => string | undefined;
     /** The program's pid once it has started: for a grouped run, its process group's id. */
@@ -106,6 +109,8 @@ export type Runner = (
   status: number | null;
   /** The signal that ended the program, if one did. */
   signal?: NodeJS.Signals;
+  /** Stopped by `silence`. */
+  silent?: boolean;
   stdout: string;
   stderr: string;
   timedOut?: boolean;
@@ -122,6 +127,12 @@ export const MAX_LINE = 4 * 1024 * 1024;
 const SIGNALS = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 } as const;
 /** How long a group stopped by a signal has after SIGTERM before SIGKILL, in ms. */
 const GRACE = 3000;
+/** The longest a session's Bash command may run, in ms, which the launcher sets itself (T061). */
+export const BASH_MAX_TIMEOUT = 600_000;
+/** How long a session's stream may be silent, in ms: above the longest command a role runs. */
+export const SILENCE = 12 * 60_000;
+/** How often `factory run` hears from a running session, in ms. */
+const HEARTBEAT = 60_000;
 
 /**
  * A program with stdin from /dev/null, so nothing it runs can wait for input. It has finished
@@ -138,25 +149,21 @@ const GRACE = 3000;
  */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
-    const { timeout, group, line, ...spawned } = options;
+    const { timeout, group, silence, line, ...spawned } = options;
     const grouped = timeout !== undefined || group === true;
-    const child = spawn(program, args, {
-      ...spawned,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      detached: grouped,
-    });
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
     let stdout = '';
     let stderr = '';
     let timedOut = false;
+    let silent = false;
+    let quiet: NodeJS.Timeout | undefined;
     let settled = false;
     let drain: NodeJS.Timeout | undefined;
     let pending = '';
     let skipping = false;
+    let pid: number | undefined = undefined;
     const signalGroup = (signal: NodeJS.Signals) => {
       try {
-        if (grouped && child.pid !== undefined) process.kill(-child.pid, signal);
+        if (grouped && pid !== undefined) process.kill(-pid, signal);
       } catch {
         // The group has already ended.
       }
@@ -177,10 +184,27 @@ export const runProcess: Runner = (program, args, options) =>
       process.off('exit', stopGroup);
       for (const [signal, handler] of handlers) process.off(signal, handler);
     };
+    // Before the spawn: a signal that came before its handler would end the factory at once,
+    // leaving the group running; once handled, it waits for the event loop, by when `pid` is set.
     if (grouped) {
       process.on('exit', stopGroup);
       for (const [signal, handler] of handlers) process.on(signal, handler);
     }
+    const child = (() => {
+      try {
+        return spawn(program, args, {
+          ...spawned,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          detached: grouped,
+        });
+      } catch (error) {
+        unwatch();
+        throw error;
+      }
+    })();
+    pid = child.pid;
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
     const take = (text: string) => {
       if (line?.(text) !== undefined) settle(null);
     };
@@ -189,6 +213,7 @@ export const runProcess: Runner = (program, args, options) =>
       unwatch();
       clearTimeout(timer);
       clearTimeout(drain);
+      clearTimeout(quiet);
       child.stdout.destroy();
       child.stderr.destroy();
       stopGroup();
@@ -199,8 +224,18 @@ export const runProcess: Runner = (program, args, options) =>
       if (settled) return;
       close();
       const ended = signal ? { signal } : {};
-      resolve({ status, ...ended, stdout, stderr, ...(timedOut ? { timedOut } : {}) });
+      const why = { ...(timedOut ? { timedOut } : {}), ...(silent ? { silent } : {}) };
+      resolve({ status, ...ended, stdout, stderr, ...why });
     };
+    const listen = () => {
+      if (silence === undefined) return;
+      clearTimeout(quiet);
+      quiet = setTimeout(() => {
+        silent = true;
+        settle(null);
+      }, silence);
+    };
+    listen();
     const timer =
       timeout === undefined
         ? undefined
@@ -211,6 +246,7 @@ export const runProcess: Runner = (program, args, options) =>
     // Only the new chunk is searched for a line's end; what remains is flushed when it ends.
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk;
+      listen();
       if (line === undefined) return;
       let from = 0;
       for (let at = chunk.indexOf('\n'); at !== -1 && !settled; at = chunk.indexOf('\n', from)) {
@@ -246,7 +282,8 @@ export const runProcess: Runner = (program, args, options) =>
         process.exit(ending);
       }
       if (settled) return;
-      const wait = timeout === undefined ? DRAIN.untimed : DRAIN.timed;
+      // A session, grouped with a wall-clock cap, drains as long as an untimed run.
+      const wait = timeout === undefined || group === true ? DRAIN.untimed : DRAIN.timed;
       drain = setTimeout(() => {
         flush();
         settle(status, signal);
@@ -285,8 +322,9 @@ export const localInvocation = (
   request: LaunchRequest,
   files: SessionFiles,
   model: string,
+  turns: number,
 ): readonly string[] => [
-  ...['-p', '--agent', request.role, '--model', model],
+  ...['-p', '--agent', request.role, '--model', model, '--max-turns', String(turns)],
   ...['--output-format', 'stream-json', '--verbose'],
   ...['--session-id', files.id, '--settings', files.settings, '--setting-sources', 'project'],
   ...['--strict-mcp-config', '--mcp-config', files.mcp, '--permission-mode', 'dontAsk'],
@@ -578,15 +616,18 @@ interface Read {
   peak: number;
   /** The longest line, in characters, from which MAX_LINE is set. */
   longest: number;
+  /** The main session's assistant messages so far, never a subagent's. */
+  turns: number;
 }
 
 /**
  * What the session reported, kept in its folder for every session that spawned, failed or not:
  * the model id and version its init message names, how many calls were refused, the models it
  * used, an Opus one being the advisor's, which no tool list shows (T125's A3d, T097), its peak
- * context, from which each role's ceiling is set (design rev 998), and its longest line.
+ * context, from which each role's ceiling is set (design rev 998), its longest line, and its
+ * turns, from which with the result's duration each role's caps are tuned after Gate A.
  */
-function reported({ init = {}, result = {}, peak, longest }: Read) {
+function reported({ init = {}, result = {}, peak, longest, turns }: Read) {
   const usage = result.modelUsage;
   const models = typeof usage === 'object' && usage !== null ? Object.keys(usage) : [];
   return {
@@ -600,6 +641,8 @@ function reported({ init = {}, result = {}, peak, longest }: Read) {
     advisor: models.some((name) => /opus/i.test(name)),
     peak_context: peak,
     longest_line: longest,
+    turns,
+    duration_ms: typeof result.duration_ms === 'number' ? result.duration_ms : null,
   };
 }
 
@@ -654,6 +697,7 @@ function liveCheck(id: string, role: RoleName, model: string, passed: () => bool
   } = {
     peak: 0,
     longest: 0,
+    turns: 0,
     line: (text) => {
       check.longest = Math.max(check.longest, text.length);
       if (text.trim() === '') return undefined;
@@ -666,13 +710,22 @@ function liveCheck(id: string, role: RoleName, model: string, passed: () => bool
           if (problems.length > 0) throw mismatch(problems);
         } else if (m.type === 'assistant') {
           check.peak = Math.max(check.peak, context(m));
+          if (typeof m.parent_tool_use_id !== 'string') check.turns += 1;
           if (!assistant && !passed())
             throw new SessionFailed(
               'its start check did not pass: it has no passed record by its first assistant message',
               true,
             );
           assistant = true;
-        } else if (m.type === 'result') check.result = m;
+        } else if (m.type === 'result') {
+          check.result = m;
+          // Urgent, and checked here, so it holds whatever claude's exit status.
+          if (m.session_id !== id)
+            throw new SessionFailed(
+              `claude reported session ${visible(JSON.stringify(m.session_id ?? null))}, not ${id} as launched`,
+              true,
+            );
+        }
         return undefined;
       } catch (err) {
         check.failure = asFailed(err);
@@ -816,6 +869,10 @@ export interface LocalOptions {
   sessionId?: () => string;
   /** Where the session's temporary folder is made, kept short (T061); default `/tmp`. */
   tmpRoot?: string;
+  /** A cap's minute, the watchdog's silence and the heartbeat, in ms; tests shorten them. */
+  minute?: number;
+  silence?: number;
+  heartbeat?: number;
 }
 
 export class LocalLauncher implements SessionLauncher {
@@ -1113,12 +1170,17 @@ export class LocalLauncher implements SessionLauncher {
         // so a later launch sees one the factory could not stop, such as after a SIGKILL.
         const group = join(dirname(files.record), 'group.json');
         const ran = { spawned: false };
+        // The installed factory's caps, never the clone's (T061).
+        const { caps } = factoryPolicy().roles[request.role];
+        const silence = this.options.silence ?? SILENCE;
         // From the spawn to the return, every failure is a session that ran on the Owner's plan.
         const session = async (): Promise<LaunchResult> => {
           let result: Awaited<ReturnType<Runner>>;
           try {
-            result = await this.run('claude', localInvocation(request, files, model), {
+            const invocation = localInvocation(request, files, model, caps.turns);
+            result = await this.run('claude', invocation, {
               ...{ cwd, env, group: true, line: live.line },
+              ...{ timeout: caps.minutes * (this.options.minute ?? 60_000), silence },
               started: (pgid) => {
                 ran.spawned = true;
                 writeFileSync(group, `${JSON.stringify(groupRecord(pgid))}\n`, WRITE_ONCE);
@@ -1131,6 +1193,17 @@ export class LocalLauncher implements SessionLauncher {
           }
           ran.spawned = true;
           if (live.failure !== undefined) throw live.failure;
+          // A cap: the group is stopped, nothing is pushed, and one info alert names it.
+          if (result.timedOut === true)
+            throw new SessionCapped(
+              `it ran past its wall-clock cap of ${String(caps.minutes)} minutes`,
+            );
+          if (result.silent === true)
+            throw new SessionCapped(
+              `its stream was silent for ${String(silence / 60_000)} minutes`,
+            );
+          if (live.result?.subtype === 'error_max_turns')
+            throw new SessionCapped(`it reached its turn cap of ${String(caps.turns)} turns`);
           if (result.status !== 0)
             throw streamFailed(
               `claude ${result.signal ? `was ended by ${result.signal}` : `exited ${String(result.status)}`}: ${visible(result.stderr.trim())}`,
@@ -1138,10 +1211,9 @@ export class LocalLauncher implements SessionLauncher {
           const { init, result: last } = readStream(result.stdout, files.id);
           if (live.init === undefined)
             throw streamFailed('its init message was not read while it ran');
-          if (last.session_id !== files.id)
-            throw new SessionFailed(
-              `claude reported session ${visible(JSON.stringify(last.session_id ?? null))}, not ${files.id} as launched`,
-              true,
+          if (last.subtype !== 'success' || last.is_error !== false)
+            throw streamFailed(
+              `its result is ${visible(JSON.stringify(last.subtype ?? null))}${last.is_error === false ? '' : ', an error'}, not a success`,
             );
           // Checked live above, and again on the whole stream.
           const { problems, missing } = initCheck(init, request.role, model);
@@ -1163,11 +1235,17 @@ export class LocalLauncher implements SessionLauncher {
         };
         let outcome: LaunchResult | undefined;
         let failure: SessionFailed | undefined;
+        const began = Date.now();
+        const beat = setInterval(() => {
+          request.heartbeat?.({ elapsed: Date.now() - began, turns: live.turns });
+        }, this.options.heartbeat ?? HEARTBEAT);
         try {
           outcome = await session();
         } catch (err) {
           if (!ran.spawned) throw err;
           failure = asFailed(err);
+        } finally {
+          clearInterval(beat);
         }
         // What it reported, kept for every session that spawned, a failed one too.
         try {
@@ -1320,7 +1398,7 @@ export class LocalLauncher implements SessionLauncher {
       const members = groupMembers(pgid);
       if (members.length > 0)
         throw new LaunchRefused(
-          `no local session started: session ${visible(id)}'s claude has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); stop them, then run the factory again`,
+          `no local session started: session ${visible(id)}'s claude has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); look at them with ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}, then run the factory again`,
           true,
           'session-running',
         );
@@ -1351,6 +1429,8 @@ export class LocalLauncher implements SessionLauncher {
       ...{ PATH: sessionPath(env.PATH, outside), HOME: home },
       // Every Bash command starts in the clone, a second layer beside the guard's refusal of cd.
       CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR: '1',
+      // The factory's own, never the Owner's: the watchdog's silence is set above it.
+      BASH_MAX_TIMEOUT_MS: String(BASH_MAX_TIMEOUT),
       ...(env.LANG === undefined ? {} : { LANG: env.LANG }),
       ...(env.TERM === undefined ? {} : { TERM: env.TERM }),
       // Define works for the project, not an item: it gets a station and no item.

@@ -10,6 +10,7 @@ export interface LaunchRequest {
   feature: string;
   files: readonly string[];
   prompt: string;
+  heartbeat?: (progress: { elapsed: number; turns: number }) => void;
 }
 
 export interface LaunchRecord extends LaunchRequest {
@@ -23,6 +24,8 @@ export class FakeLauncher {
   private isAvailable = true;
   /** What every launch throws once the session has run, such as a `SessionFailed`. */
   failure?: Error;
+  /** The heartbeats every launch gives while its session runs. */
+  beats: { elapsed: number; turns: number }[] = [];
 
   constructor(mode: 'cloud' | 'local' = 'cloud') {
     this.mode = mode;
@@ -47,6 +50,7 @@ export class FakeLauncher {
     if (!this.isAvailable) return Promise.reject(new Error(`${this.mode} launcher unavailable`));
     const sessionId = `fake-${this.mode}-${String(this.launches.length + 1)}`;
     this.launches.push({ ...request, mode: this.mode, sessionId });
+    for (const beat of this.beats) request.heartbeat?.(beat);
     return this.failure === undefined
       ? Promise.resolve({ sessionId })
       : Promise.reject(this.failure);
