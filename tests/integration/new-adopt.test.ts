@@ -691,7 +691,7 @@ describe(
       const r = await cli(['new', 'A pitch', '--name', 'sample']);
       expect(r.code).toBe(1);
       expect(r.stderr).toMatch(
-        /Define was not started: the local launcher is not available: release v1\.0\.0 installs no factory hooks/,
+        /Define was not started: the local launcher is not available: main at [0-9a-f]{12}: release v1\.0\.0 installs no factory hooks.*; install the pinned release, or re-pin main/,
       );
     });
   },

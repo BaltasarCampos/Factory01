@@ -60,7 +60,7 @@ import { EnvironmentError } from '../../cli/env.js';
 import { SERVED_HOOKS } from '../../commands/hook.js';
 import { WRAPPERS } from '../../guard/command-guard.js';
 import { isFable, roleVersion } from '../../events/schema.js';
-import { hasPassed } from '../../hooks/session.js';
+import { hasPassed, sessionEvents } from '../../hooks/session.js';
 import { mergeBase, safeDiff, safeGit } from '../../git/diff.js';
 import { loadPolicy } from '../../guard/policy.js';
 import { buildManifest, coversHashed } from '../../install/manifest.js';
@@ -698,12 +698,48 @@ const mismatch = (problems: readonly string[]) =>
   new SessionFailed(`its init message does not match its launch: ${problems.join('; ')}`, true);
 
 /**
+ * Why a session's start failed, from its own log (T061): the session-start hook's last refusal,
+ * through `visible()`, or that it logged none, and where the log is.
+ */
+function startRefusal(home: string, id: string): string {
+  const log = sessionEvents(home, id);
+  let text = '';
+  try {
+    text = readFileSync(log, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
+      return `its log ${log} cannot be read: ${visible(err instanceof Error ? err.message : String(err))}`;
+  }
+  const refusals = text.split('\n').flatMap((line) => {
+    try {
+      const e = JSON.parse(line) as Message;
+      const summary = e.input_summary;
+      return e.kind === 'blocked' && e.tool === 'SessionStart' && typeof summary === 'string'
+        ? [summary]
+        : [];
+    } catch {
+      return [];
+    }
+  });
+  const refused = refusals.at(-1);
+  return refused === undefined
+    ? `the session-start hook logged no refusal in ${log}, so it failed before it could or never ran; find why before this item's next session`
+    : `the session-start hook refused it: ${visible(refused)}; fix that before this item's next session (its log is ${log})`;
+}
+
+/**
  * The checks made while the session runs, so one that did not start as launched is stopped at
  * once, not after it has run (T061): each line in order, the init check as soon as the init
  * message comes, and the passed record at the first assistant message, by when the SessionStart
  * hook has run, whatever order T125 shows, and before any tool call. `failure` is why it stopped.
  */
-function liveCheck(id: string, role: RoleName, model: string, passed: () => boolean) {
+function liveCheck(
+  id: string,
+  role: RoleName,
+  model: string,
+  passed: () => boolean,
+  refusal: () => string,
+) {
   let assistant = false;
   const check: Read & {
     failure?: SessionFailed;
@@ -736,7 +772,7 @@ function liveCheck(id: string, role: RoleName, model: string, passed: () => bool
           }
           if (!assistant && !passed())
             throw new SessionFailed(
-              'its start check did not pass: it has no passed record by its first assistant message',
+              `its start check did not pass: it has no passed record by its first assistant message; ${refusal()}`,
               true,
             );
           assistant = true;
@@ -977,6 +1013,14 @@ export class LocalLauncher implements SessionLauncher {
     const main = step('reading main', () => this.treeFiles(project, mainRef, 'main'));
     if ('ok' in main) return main;
     const guardrails = guardrailCheck(main.found, main.settings, manifest, 'main');
+    if (!guardrails.ok && guardrails.urgent !== true) {
+      // The installed factory and the pin disagree on the hooks: once per main head (T061).
+      const head = step('reading main', () =>
+        this.git(project, ['rev-parse', '--verify', `${mainRef}^{commit}`]),
+      );
+      const reason = `main at ${head.slice(0, 12)}: ${guardrails.reason}; install the pinned release, or re-pin main`;
+      return { ok: false, reason };
+    }
     if (!guardrails.ok) return guardrails;
     try {
       const result = await this.run('claude', ['--version'], {
@@ -1078,6 +1122,7 @@ export class LocalLauncher implements SessionLauncher {
       );
     if (this.running) throw new LaunchRefused('a local session is already running');
     this.running = true;
+    let at: string | undefined;
     try {
       step('looking for a session still running', () => {
         this.stillRunning();
@@ -1085,6 +1130,7 @@ export class LocalLauncher implements SessionLauncher {
       const heads = step('fetching main and the branch into the factory’s own clone', () =>
         this.heads(request.project, request.branch),
       );
+      at = heads.head;
       const manifest = this.history(request.project, request.branch, heads);
       const { repo, inbox_issue } = step("reading main's config", () =>
         this.config(request.project, heads.main),
@@ -1181,14 +1227,20 @@ export class LocalLauncher implements SessionLauncher {
           };
           writeFileSync(files.record, `${JSON.stringify(record, null, 2)}\n`, WRITE_ONCE);
         });
-        const live = liveCheck(files.id, request.role, model, () => {
-          try {
-            return hasPassed(this.options.home, files.id);
-          } catch (err) {
-            const why = err instanceof Error ? err.message : String(err);
-            throw new SessionFailed(`its passed record could not be read: ${visible(why)}`, true);
-          }
-        });
+        const live = liveCheck(
+          files.id,
+          request.role,
+          model,
+          () => {
+            try {
+              return hasPassed(this.options.home, files.id);
+            } catch (err) {
+              const why = err instanceof Error ? err.message : String(err);
+              throw new SessionFailed(`its passed record could not be read: ${visible(why)}`, true);
+            }
+          },
+          () => startRefusal(this.options.home, files.id),
+        );
         // In a process group of its own, so stopping it stops what it started; its leader is kept,
         // so a later launch sees one the factory could not stop, such as after a SIGKILL.
         const group = join(dirname(files.record), 'group.json');
@@ -1300,6 +1352,10 @@ export class LocalLauncher implements SessionLauncher {
       } finally {
         rmSync(tmp, { recursive: true, force: true });
       }
+    } catch (err) {
+      // A refusal that repeats on every pass alerts once per branch head (T061).
+      if (err instanceof LaunchRefused && at !== undefined) err.head ??= at;
+      throw err;
     } finally {
       this.running = false;
     }

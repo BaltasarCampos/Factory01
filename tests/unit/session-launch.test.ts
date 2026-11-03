@@ -582,6 +582,8 @@ describe('LocalLauncher (research R8, R9)', () => {
 
     await expect(refused).rejects.toThrow(LaunchRefused);
     await expect(refused).rejects.toThrow(/\.claude\/agents\/spec\.md names no model/);
+    // Refused at the branch's head, so a refusal that repeats alerts once per head.
+    await expect(refused).rejects.toMatchObject({ head: t.repo.revParse(`origin/${BRANCH}`) });
     expect(t.sessions()).toEqual([]);
   });
 
@@ -1069,6 +1071,35 @@ describe('LocalLauncher (research R8, R9)', () => {
       const stopped = setup({ run: unpassed });
       await expect(stopped.launch(REQUEST)).rejects.toThrow(/no passed record/);
       expect(recorded(stopped.home)).toMatchObject({ peak_context: 1210 });
+    });
+
+    it("names a failed start's refusal from the session's own log, or that it logged none", async () => {
+      const refusal = {
+        kind: 'blocked',
+        tool: 'SessionStart',
+        input_summary: 'cwd: not\u202ethere',
+      };
+      for (const logged of [[refusal], []]) {
+        const unpassed: Runner = (program, args, options) => {
+          if (args[0] !== '-p') return fakeRunner().run(program, args, options);
+          const dir = dirname(args[args.indexOf('--settings') + 1] ?? '');
+          const lines = logged.map((event) => `${JSON.stringify(event)}\n`).join('');
+          if (lines !== '')
+            writeFileSync(join(dir, 'events.jsonl'), `{"kind":"tool_call"}\n${lines}`);
+          const text = sessionStream(args, { assistants });
+          text.split('\n').some((line) => line !== '' && options.line?.(line) !== undefined);
+          return Promise.resolve({ status: null, stdout: text, stderr: '' });
+        };
+        const t = setup({ run: unpassed });
+        const failed = t.launch(REQUEST);
+        await expect(failed).rejects.toMatchObject({ name: 'SessionFailed', urgent: true });
+        const log = join(t.home, '.factory', 'sessions', FIRST, 'events.jsonl');
+        await expect(failed).rejects.toThrow(
+          logged.length > 0
+            ? `the session-start hook refused it: cwd: not\\u{202e}there; fix that before this item's next session (its log is ${log})`
+            : `the session-start hook logged no refusal in ${log}`,
+        );
+      }
     });
 
     it('is a failed session when its result.json cannot be written', async () => {
@@ -1849,7 +1880,14 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     const bare = { ...GUARDED, '.claude/settings.json': '{}\n' };
     const noHooks = setup({ mainFiles: bare, release: () => manifestOf(bare) });
     const waiting = await noHooks.available();
-    expect(waiting).toMatchObject({ ok: false, reason: /installs no factory hooks/ });
+    // Once per main head, naming the way out: only the Owner can make the two agree.
+    const main = noHooks.repo.revParse('origin/main').slice(0, 12);
+    expect(waiting).toMatchObject({
+      ok: false,
+      reason: new RegExp(
+        `^main at ${main}: release v1\\.0\\.0 installs no factory hooks.*; install the pinned release, or re-pin main$`,
+      ),
+    });
     expect(waiting).not.toHaveProperty('urgent');
     const missing = () => {
       throw new ReleaseTagError('release tag v1.0.0 does not exist', 'missing');

@@ -177,7 +177,7 @@ function setup(options: Setup = {}) {
     factory.git([...signing, 'tag', key ? '-s' : '-a', '-m', message, 'v1.0.0', pin]);
   };
 
-  return { cli, local, realLocal, sessions, inbox, checkout, home, tagRelease };
+  return { cli, local, realLocal, sessions, inbox, checkout, home, tagRelease, project };
 }
 
 describe('factory dispatch and factory run (contracts/cli.md)', { timeout: 60_000 }, () => {
@@ -399,6 +399,19 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
     expect(t.sessions.filter((s) => s.args[0] === '-p')).toEqual([]);
     expect(t.inbox()).toHaveLength(1);
     expect(t.inbox()[0]?.body).toMatch(/urgency=urgent kind=tampering/);
+    // Once per branch head: a new head with the same refusal alerts again, naming it.
+    // On the dispatcher's own commits, its manifest's.
+    t.project.git(['fetch', '-q', 'origin']);
+    t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+    t.project.commit({ 'notes.md': 'more\n' }, 'another head');
+    t.project.push(BRANCH);
+    t.project.checkout('main');
+    // One pass: this test's fixed clock makes every later manifest commit an empty one.
+    await t.cli(['dispatch'], { launchers: { local } });
+    expect(t.inbox()).toHaveLength(2);
+    // The head it was refused at: the dispatcher's manifest on the new commit.
+    const head = t.project.revParse(`origin/${BRANCH}`).slice(0, 12);
+    expect(t.inbox()[1]?.body).toContain(`${BRANCH} is at ${head}`);
   });
 
   it('hook files that differ from the pinned release start no session and raise an urgent alert', async () => {
