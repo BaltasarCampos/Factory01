@@ -624,8 +624,41 @@ interface Read {
   /** The main session's assistant lines, one per content block, which `turns` counts by id. */
   lines: number;
   ids: Set<string>;
+  /** Each assistant message's usage, subagents' included, by message id, so each counts once. */
+  usage: Map<string, Message>;
   /** The longest the watchdog heard nothing, from the spawn to the end, in ms. */
   silence: number;
+}
+
+/** The token fields of a usage, the result's per-model totals by their own names. */
+const TOKENS = {
+  input: ['input_tokens', 'inputTokens'],
+  output: ['output_tokens', 'outputTokens'],
+  cache_read: ['cache_read_input_tokens', 'cacheReadInputTokens'],
+  cache_creation: ['cache_creation_input_tokens', 'cacheCreationInputTokens'],
+} as const;
+
+/**
+ * The session's token totals (T097's per-item budget): the result line's per-model totals, or,
+ * with no result line, as after a cap stopped it, the factory's own sum over every assistant
+ * message, each id once; `source` says which.
+ */
+function tokens(result: Message, usage: Map<string, Message>) {
+  const models = result.modelUsage;
+  const fromResult = typeof models === 'object' && models !== null;
+  const counted = fromResult ? Object.values(models as Message) : [...usage.values()];
+  const sum = (names: readonly string[]) =>
+    counted.reduce<number>((total, entry) => {
+      const value = names.map((name) => (entry as Message | null)?.[name]).find(Number.isFinite);
+      return total + (typeof value === 'number' ? value : 0);
+    }, 0);
+  return {
+    input: sum(TOKENS.input),
+    output: sum(TOKENS.output),
+    cache_read: sum(TOKENS.cache_read),
+    cache_creation: sum(TOKENS.cache_creation),
+    source: fromResult ? 'result' : 'stream',
+  };
 }
 
 /**
@@ -657,6 +690,7 @@ function reported({ init = {}, result = {}, ...read }: Read, elapsed: number) {
     // The factory's own, since a session stopped at a cap has no result and so no duration.
     elapsed_ms: elapsed,
     longest_silence_ms: read.silence,
+    tokens: tokens(result, read.usage),
   };
 }
 
@@ -710,7 +744,9 @@ function startRefusal(home: string, id: string): string {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
       return `its log ${log} cannot be read: ${visible(err instanceof Error ? err.message : String(err))}`;
   }
-  const refusals = text.split('\n').flatMap((line) => {
+  const unread: number[] = [];
+  const refusals = text.split('\n').flatMap((line, at) => {
+    if (line.trim() === '') return [];
     try {
       const e = JSON.parse(line) as Message;
       const summary = e.input_summary;
@@ -718,13 +754,19 @@ function startRefusal(home: string, id: string): string {
         ? [summary]
         : [];
     } catch {
+      unread.push(at + 1);
       return [];
     }
   });
+  // A hook killed mid-write leaves a line that does not parse, which may be its refusal.
+  const cut =
+    unread.length === 0
+      ? ''
+      : `; line ${unread.join(', ')} of it ${unread.length === 1 ? 'does' : 'do'} not parse, which may be a refusal cut off mid-write`;
   const refused = refusals.at(-1);
   return refused === undefined
-    ? `the session-start hook logged no refusal in ${log}, so it failed before it could or never ran; find why before this item's next session`
-    : `the session-start hook refused it: ${visible(refused)}; fix that before this item's next session (its log is ${log})`;
+    ? `the session-start hook logged no refusal that can be read in ${log}${cut}, so it failed before it could or never ran; find why before this item's next session`
+    : `the session-start hook refused it: ${visible(refused)}; fix that before this item's next session (its log is ${log}${cut})`;
 }
 
 /**
@@ -750,6 +792,7 @@ function liveCheck(
     turns: 0,
     lines: 0,
     ids: new Set(),
+    usage: new Map(),
     silence: 0,
     line: (text) => {
       check.longest = Math.max(check.longest, text.length);
@@ -763,6 +806,10 @@ function liveCheck(
           if (problems.length > 0) throw mismatch(problems);
         } else if (m.type === 'assistant') {
           check.peak = Math.max(check.peak, context(m));
+          const body = (m.message ?? {}) as Message;
+          const key = typeof body.id === 'string' ? body.id : `line ${String(check.usage.size)}`;
+          if (typeof body.usage === 'object' && body.usage !== null)
+            check.usage.set(key, body.usage as Message);
           // stream-json sends a line per content block, each with its message's id.
           if (typeof m.parent_tool_use_id !== 'string') {
             check.lines += 1;
@@ -831,7 +878,13 @@ const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex
 
 /** The events whose hooks are guards: one that cannot run must block the action (T082). */
 const GUARD_EVENTS = new Set(['SessionStart', 'PreToolUse', 'PreCompact']);
-const NO_HOOKS = 'installs no factory hooks; local sessions wait for the guards (slice 28)';
+const NO_HOOKS =
+  'installs no factory hooks; local sessions wait for the guards (slice 28); re-pin main to a release that installs the factory hooks';
+/** The way out when the release's own settings break the rule: installing it cannot help. */
+const REPIN =
+  "; re-pin main to a release whose settings register each hook as the installed factory's do";
+/** The way out when the pin and the installed factory disagree on what is served. */
+const AGREE = '; install the pinned release, or re-pin main to the installed factory’s release';
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
 
 /**
@@ -870,16 +923,16 @@ function hookProblem(settings: Buffer | undefined): string | undefined {
         const hook = (one ?? {}) as { type?: unknown; command?: unknown; args?: unknown };
         const args = list(hook.args);
         if (hook.type !== 'command' || hook.command !== 'factory' || args.length !== 2)
-          return `registers a ${event} hook that is not factory hook <name> in exec form`;
+          return `registers a ${event} hook that is not factory hook <name> in exec form${REPIN}`;
         if (args[0] !== 'hook' || typeof args[1] !== 'string')
-          return `registers a ${event} hook that is not factory hook <name> in exec form`;
+          return `registers a ${event} hook that is not factory hook <name> in exec form${REPIN}`;
         if (!SERVED_HOOKS.includes(args[1]))
-          return `registers the ${event} hook factory hook ${visible(args[1])}, which the installed factory does not serve`;
+          return `registers the ${event} hook factory hook ${visible(args[1])}, which the installed factory does not serve${AGREE}`;
         const served = events.get(args[1]) ?? new Set<string>();
         if (!served.has(event))
-          return `registers factory hook ${args[1]} under ${visible(event)}; the installed factory serves it under ${[...served].join(', ') || 'no event'}`;
+          return `registers factory hook ${args[1]} under ${visible(event)}; the installed factory serves it under ${[...served].join(', ') || 'no event'}${AGREE}`;
         if (GUARD_EVENTS.has(event) && (one as { onFailure?: unknown }).onFailure !== 'block')
-          return `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"`;
+          return `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"${REPIN}`;
       }
   return undefined;
 }
@@ -967,10 +1020,9 @@ export class LocalLauncher implements SessionLauncher {
   }
 
   /** The verified manifest of the release pinned on main, or why there is none. */
-  private manifest(project: string): GuardrailManifest | Unavailable {
-    const { mainRef = 'origin/main' } = this.options;
+  private manifest(project: string, main: string): GuardrailManifest | Unavailable {
     try {
-      return this.options.release(this.config(project, mainRef).factory_release);
+      return this.options.release(this.config(project, main).factory_release);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       // A tag that exists but is not the Owner's is tampering; one not fetched, or key lists
@@ -1007,20 +1059,23 @@ export class LocalLauncher implements SessionLauncher {
   }
 
   async available(project: string): Promise<Availability> {
-    const manifest = this.manifest(project);
-    if ('ok' in manifest) return manifest;
     const { mainRef = 'origin/main' } = this.options;
-    const main = step('reading main', () => this.treeFiles(project, mainRef, 'main'));
+    // Once, first: a fetch while it is checked cannot make it name a commit it did not check.
+    let head: string;
+    try {
+      head = this.git(project, ['rev-parse', '--verify', `${mainRef}^{commit}`]);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      return { ok: false, reason: `${mainRef} cannot be resolved: ${visible(why)}` };
+    }
+    const manifest = this.manifest(project, head);
+    if ('ok' in manifest) return manifest;
+    const main = step('reading main', () => this.treeFiles(project, head, 'main'));
     if ('ok' in main) return main;
     const guardrails = guardrailCheck(main.found, main.settings, manifest, 'main');
-    if (!guardrails.ok && guardrails.urgent !== true) {
-      // The installed factory and the pin disagree on the hooks: once per main head (T061).
-      const head = step('reading main', () =>
-        this.git(project, ['rev-parse', '--verify', `${mainRef}^{commit}`]),
-      );
-      const reason = `main at ${head.slice(0, 12)}: ${guardrails.reason}; install the pinned release, or re-pin main`;
-      return { ok: false, reason };
-    }
+    // The pin's hooks fail the check: once per main head, with the reason's own way out (T061).
+    if (!guardrails.ok && guardrails.urgent !== true)
+      return { ok: false, reason: `main at ${head.slice(0, 12)}: ${guardrails.reason}` };
     if (!guardrails.ok) return guardrails;
     try {
       const result = await this.run('claude', ['--version'], {
