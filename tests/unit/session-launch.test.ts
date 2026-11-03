@@ -22,6 +22,7 @@ import { CloudLauncher, cloudInvocation } from '../../src/dispatcher/launcher/cl
 import {
   guardrailCheck,
   LocalLauncher,
+  groupRecord,
   localInvocation,
   MAX_LINE,
   runProcess,
@@ -132,7 +133,6 @@ const sessionIds = () => {
   return () => `0b6c7f3e-2a4d-4c1e-9f00-${String((n += 1)).padStart(12, '0')}`;
 };
 const FIRST = '0b6c7f3e-2a4d-4c1e-9f00-000000000001';
-const SECOND = '0b6c7f3e-2a4d-4c1e-9f00-000000000002';
 
 const roleFile = (role: string) =>
   `---\nname: ${role}\nmodel: sonnet\ntools: Read\nversion: 1\n---\n`;
@@ -599,6 +599,14 @@ describe('LocalLauncher (research R8, R9)', () => {
   it('fails the launch with an error, never a refusal or a pass, when claude cannot start', async () => {
     const missing: Runner = () => Promise.reject(new Error('spawn claude ENOENT'));
     await expect(setup({ run: missing }).launch(REQUEST)).rejects.toThrow(EnvironmentError);
+    // Nothing ran and nothing used the Owner's plan: never a failed session.
+    const unspawned: Runner = (program, args, options) =>
+      args[0] === '-p'
+        ? Promise.reject(new Error('spawn claude EAGAIN'))
+        : fakeRunner().run(program, args, options);
+    const refused = setup({ run: unspawned }).launch(REQUEST);
+    await expect(refused).rejects.toThrow(EnvironmentError);
+    await expect(refused).rejects.toThrow(/no local session started: claude: spawn claude EAGAIN/);
   });
 
   it("refuses a launch when a program Claude Code's sandbox needs is not on the session's PATH", async () => {
@@ -940,6 +948,7 @@ describe('LocalLauncher (research R8, R9)', () => {
       const stream = (args: readonly string[]) => sessionStream(args, { result: { session_id } });
       const other = setup({ run: fakeRunner(0, stream).run }).launch(REQUEST);
       await expect(other).rejects.toThrow(SessionFailed);
+      await expect(other).rejects.toMatchObject({ urgent: true });
       await expect(other).rejects.toThrow(
         new RegExp(`claude reported session .*, not ${FIRST} as launched`),
       );
@@ -964,22 +973,31 @@ describe('LocalLauncher (research R8, R9)', () => {
       });
     };
 
-    it('records the model, the version, the permission denials, the models it used and its peak context', async () => {
-      const usage = (input: number, read: number, written: number) => ({
-        type: 'assistant',
-        message: {
-          usage: {
-            ...{ input_tokens: input, cache_read_input_tokens: read },
-            ...{ cache_creation_input_tokens: written, output_tokens: 9999 },
-          },
+    const usage = (input: number, read: number, written: number) => ({
+      type: 'assistant',
+      message: {
+        usage: {
+          ...{ input_tokens: input, cache_read_input_tokens: read },
+          ...{ cache_creation_input_tokens: written, output_tokens: 9999 },
         },
-      });
-      const t = streamed({
-        assistants: [usage(10, 1000, 200), usage(5, 3000, 0), usage(1, 100, 0)],
-        result: {
+      },
+    });
+    const assistants = [usage(10, 1000, 200), usage(5, 3000, 0), usage(1, 100, 0)];
+    const recorded = (home: string) =>
+      JSON.parse(
+        readFileSync(join(home, '.factory', 'sessions', FIRST, 'result.json'), 'utf8'),
+      ) as Record<string, unknown>;
+
+    it('records the model, the version, the permission denials, the models it used, its peak context and its longest line', async () => {
+      let longest = 0;
+      const t = streamed((args) => {
+        const result = {
           permission_denials: [{ tool_name: 'Bash' }, { tool_name: 'Edit' }],
           modelUsage: { 'claude-sonnet-5-5': {}, 'claude-opus-5-5': {} },
-        },
+        };
+        const text = sessionStream(args, { assistants, result });
+        longest = Math.max(...text.split('\n').map((line) => line.length));
+        return text;
       });
 
       await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
@@ -987,12 +1005,45 @@ describe('LocalLauncher (research R8, R9)', () => {
       const file = join(t.home, '.factory', 'sessions', FIRST, 'result.json');
       expect(statSync(file).mode & 0o777).toBe(0o600);
       // An Opus entry in modelUsage is the advisor's, which no tool list shows (T125's A3d).
-      expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
+      expect(recorded(t.home)).toEqual({
         ...{ model: 'claude-sonnet-5-5', claude_code_version: '2.1.309', permission_denials: 2 },
         ...{ models: ['claude-sonnet-5-5', 'claude-opus-5-5'], advisor: true },
         // The largest input of any assistant message, cache reads and writes included.
         peak_context: 3005,
+        longest_line: longest,
       });
+    });
+
+    it('records the peak context of a session that failed, and of one stopped live', async () => {
+      const stream = (args: readonly string[]) => sessionStream(args, { assistants });
+      const failed = setup({ run: fakeRunner(1, stream).run });
+      await expect(failed.launch(REQUEST)).rejects.toThrow(/claude exited 1/);
+      expect(recorded(failed.home)).toMatchObject({
+        model: 'claude-sonnet-5-5',
+        peak_context: 3005,
+      });
+      // No passed record: stopped at its first assistant message, whose input is its peak.
+      const unpassed: Runner = (program, args, options) => {
+        if (args[0] !== '-p') return fakeRunner().run(program, args, options);
+        const text = stream(args);
+        text.split('\n').some((line) => line !== '' && options.line?.(line) !== undefined);
+        return Promise.resolve({ status: null, stdout: text, stderr: '' });
+      };
+      const stopped = setup({ run: unpassed });
+      await expect(stopped.launch(REQUEST)).rejects.toThrow(/no passed record/);
+      expect(recorded(stopped.home)).toMatchObject({ peak_context: 1210 });
+    });
+
+    it('is a failed session when its result.json cannot be written', async () => {
+      const unwritable: Runner = (program, args, options) => {
+        if (args[0] !== '-p') return fakeRunner().run(program, args, options);
+        mkdirSync(join(dirname(args[args.indexOf('--settings') + 1] ?? ''), 'result.json'));
+        return Promise.resolve(sessionRun(args, echo(args), options));
+      };
+      const refused = setup({ run: unwritable }).launch(REQUEST);
+      await expect(refused).rejects.toThrow(SessionFailed);
+      await expect(refused).rejects.toMatchObject({ urgent: false });
+      await expect(refused).rejects.toThrow(/its result.json could not be written: .*EEXIST/);
     });
 
     it.each([
@@ -1018,9 +1069,9 @@ describe('LocalLauncher (research R8, R9)', () => {
         /a line of type assistant before its init message/,
       ],
       [
-        'an init with another session id',
-        (args: readonly string[]) => sessionStream(args, { init: { session_id: 's-other' } }),
-        new RegExp(`init message reports session "s-other", not ${FIRST} as launched`),
+        'a line the check itself fails on',
+        (args: readonly string[]) => `{"type":{"toString":1}}\n${sessionStream(args)}`,
+        /the launcher failed while it ran: Cannot convert object to primitive value/,
       ],
       [
         'a result line followed by another message',
@@ -1056,6 +1107,7 @@ describe('LocalLauncher (research R8, R9)', () => {
       };
       const refused = setup({ run: unreadable }).launch(REQUEST);
       await expect(refused).rejects.toThrow(SessionFailed);
+      await expect(refused).rejects.toMatchObject({ urgent: true });
       await expect(refused).rejects.toThrow(/its passed record could not be read: .*EISDIR/);
     });
 
@@ -1084,6 +1136,11 @@ describe('LocalLauncher (research R8, R9)', () => {
         'a model of another family',
         { init: { model: 'claude-opus-5-5' } },
         /claude-opus-5-5 is not of the sonnet family/,
+      ],
+      [
+        'another session id',
+        { init: { session_id: 's-other' } },
+        new RegExp(`init message reports session "s-other", not ${FIRST} as launched`),
       ],
       [
         'a Fable id',
@@ -1217,53 +1274,139 @@ describe('LocalLauncher (research R8, R9)', () => {
         const t = running({}, { passed: true, ends: true });
         await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
         const group = join(t.home, '.factory', 'sessions', FIRST, 'group.json');
-        const { pgid } = JSON.parse(readFileSync(group, 'utf8')) as { pgid: unknown };
-        expect(Number.isSafeInteger(pgid)).toBe(true);
+        const record = JSON.parse(readFileSync(group, 'utf8')) as Record<string, unknown>;
+        expect(Object.keys(record)).toEqual(['pgid', 'start', 'boot']);
+        expect(Number.isSafeInteger(record.pgid)).toBe(true);
+      }, 30_000);
+
+      /** A launch whose session is `script`, run as the real runner runs claude. */
+      const scripted = (script: string, started?: (pid: number, dir: string) => void) => {
+        let home = '';
+        const base = fakeRunner();
+        const run: Runner = (program, args, options) => {
+          if (args[0] !== '-p') return base.run(program, args, options);
+          const dir = join(home, '.factory', 'sessions', FIRST);
+          return runProcess('bash', ['-c', script], {
+            ...{ ...options, cwd: dir, env: gitEnv },
+            started: (pid) => {
+              started?.(pid, dir);
+              options.started?.(pid);
+            },
+          });
+        };
+        const t = setup({ run });
+        home = t.home;
+        return t;
+      };
+
+      it('is a failed session, its group stopped, when its process group cannot be recorded', async () => {
+        let pgid = 0;
+        const t = scripted('sleep 30', (pid, dir) => {
+          pgid = pid;
+          mkdirSync(join(dir, 'group.json'));
+        });
+        const refused = t.launch(REQUEST);
+        await expect(refused).rejects.toThrow(SessionFailed);
+        await expect(refused).rejects.toThrow(/the launcher failed while it ran: .*EEXIST/);
+        expect(pgid).toBeGreaterThan(0);
+        await vi.waitFor(() => {
+          expect(() => process.kill(-pgid, 0)).toThrow();
+        });
+      }, 30_000);
+
+      it("names the signal that ended claude, such as the out-of-memory killer's", async () => {
+        const refused = scripted('kill -KILL $$').launch(REQUEST);
+        await expect(refused).rejects.toThrow(SessionFailed);
+        await expect(refused).rejects.toThrow(/claude was ended by SIGKILL/);
       }, 30_000);
     });
 
     describe('a session an earlier factory could not stop (T061)', () => {
       const OLD = '0b6c7f3e-2a4d-4c1e-9f00-0000000000aa';
-      /** A recorded group for session OLD, its leader a stand-in claude started with `args`. */
-      const recorded = (home: string, args: readonly string[]) => {
-        const bin = tempDir('orphan-');
-        writeFileSync(join(bin, 'claude'), '#!/bin/sh\nsleep 30\n', { mode: 0o755 });
-        const child = spawn(join(bin, 'claude'), args, { detached: true, stdio: 'ignore' });
+      /** A recorded group for session OLD, its leader `script` in a group of its own. */
+      const recorded = (home: string, script: string, change: Record<string, unknown> = {}) => {
         const dir = join(home, '.factory', 'sessions', OLD);
         mkdirSync(dir, { recursive: true });
-        writeFileSync(join(dir, 'group.json'), JSON.stringify({ pgid: child.pid }));
-        return child;
+        const options = { cwd: dir, env: gitEnv, detached: true, stdio: 'ignore' } as const;
+        const child = spawn('bash', ['-c', script], options);
+        const pgid = child.pid ?? 0;
+        writeFileSync(join(dir, 'group.json'), JSON.stringify({ ...groupRecord(pgid), ...change }));
+        return { dir, pgid };
+      };
+      const stop = (pgid: number) => {
+        try {
+          process.kill(-pgid, 'SIGKILL');
+        } catch {
+          // Already gone.
+        }
       };
 
       it('refuses a launch, urgent, naming it and how to stop it, and never stops it', async () => {
         const t = setup();
-        const child = recorded(t.home, ['-p', '--session-id', OLD]);
+        const { pgid } = recorded(t.home, 'sleep 30');
         try {
           const refused = t.launch(REQUEST);
           await expect(refused).rejects.toThrow(LaunchRefused);
           await expect(refused).rejects.toMatchObject({ urgent: true, kind: 'session-running' });
           await expect(refused).rejects.toThrow(
-            new RegExp(`session ${OLD} is still running .*kill -TERM -${String(child.pid)}`),
+            new RegExp(
+              `session ${OLD} is still running \\(this or another factory\\) .*kill -TERM -${String(pgid)}`,
+            ),
           );
           expect(t.sessions()).toEqual([]);
-          expect(() => process.kill(child.pid ?? 0, 0)).not.toThrow();
+          expect(() => process.kill(pgid, 0)).not.toThrow();
         } finally {
-          process.kill(-(child.pid ?? 0), 'SIGKILL');
+          stop(pgid);
         }
       });
 
-      it('goes ahead when the recorded group has ended, or its pid is no longer that session', async () => {
+      it('refuses a launch while a process of the group runs on after its leader has ended', async () => {
         const t = setup();
-        const other = recorded(t.home, ['-p', '--session-id', 'another-session']);
+        const { dir, pgid } = recorded(t.home, 'sleep 30 & echo $! > left.pid');
         try {
-          await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+          await vi.waitFor(() => {
+            expect(Number(readFileSync(join(dir, 'left.pid'), 'utf8'))).toBeGreaterThan(0);
+            expect(() => process.kill(pgid, 0)).toThrow();
+          });
+          const left = readFileSync(join(dir, 'left.pid'), 'utf8').trim();
+          const refused = t.launch(REQUEST);
+          await expect(refused).rejects.toMatchObject({ urgent: true, kind: 'session-running' });
+          await expect(refused).rejects.toThrow(
+            new RegExp(`claude has ended, but processes ${left} of its process group`),
+          );
+          await expect(refused).rejects.not.toThrow(/kill -TERM/);
         } finally {
-          process.kill(-(other.pid ?? 0), 'SIGKILL');
+          stop(pgid);
         }
+      });
+
+      it('goes ahead when the recorded group has ended, or its leader has another start time or boot', async () => {
+        const t = setup();
+        for (const change of [{ start: '1' }, { boot: 'another-boot' }]) {
+          const { pgid } = recorded(t.home, 'sleep 30', change);
+          try {
+            await expect(t.launch(REQUEST)).resolves.toHaveProperty('sessionId');
+          } finally {
+            stop(pgid);
+          }
+        }
+        const { pgid } = recorded(t.home, 'exit 0');
         await vi.waitFor(() => {
-          expect(() => process.kill(other.pid ?? 0, 0)).toThrow();
+          expect(() => process.kill(pgid, 0)).toThrow();
         });
-        await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: SECOND });
+        await expect(t.launch(REQUEST)).resolves.toHaveProperty('sessionId');
+      });
+
+      it('names a group.json it cannot read, and the way out', async () => {
+        const t = setup();
+        const dir = join(t.home, '.factory', 'sessions', OLD);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'group.json'), '');
+        const refused = t.launch(REQUEST);
+        await expect(refused).rejects.toThrow(EnvironmentError);
+        await expect(refused).rejects.toThrow(
+          new RegExp(`${OLD}/group.json cannot be read: .*; remove it once ps .* session ${OLD}`),
+        );
       });
     });
   });
@@ -1653,7 +1796,7 @@ describe('runProcess', () => {
     await gone(left(dir));
   }, 15_000);
 
-  it('gives line each line as it comes, a last one with no newline too, and a long one as it stands', async () => {
+  it('gives line each line as it comes, a last one with no newline too, and a long one once, cut', async () => {
     const seen: string[] = [];
     const line = (text: string) => {
       seen.push(text);
@@ -1664,9 +1807,12 @@ describe('runProcess', () => {
     await runProcess('bash', ['-c', split], { cwd, env: gitEnv, line });
     expect(seen).toEqual(['one', 'two', 'three']);
     seen.length = 0;
-    const long = `head -c ${String(MAX_LINE + 10)} /dev/zero | tr '\\0' x`;
+    const long = `head -c ${String(MAX_LINE * 2)} /dev/zero | tr '\\0' x; echo; echo after`;
     await runProcess('bash', ['-c', long], { cwd, env: gitEnv, line });
+    expect(seen).toHaveLength(2);
     expect(seen[0]?.length).toBeGreaterThan(MAX_LINE);
+    expect(seen[0]?.length).toBeLessThan(MAX_LINE * 2);
+    expect(seen[1]).toBe('after');
   });
 
   // A factory ended by a signal stops its grouped run first, so nothing runs on, unread (T061).
@@ -1681,31 +1827,35 @@ registerHooks({
   },
 });
 const { runProcess } = await import(process.argv[2]);
-await runProcess('bash', ['-c', 'sleep 30 & echo $! > left.pid; wait'], {
+await runProcess('bash', ['-c', process.argv[3]], {
   cwd: process.cwd(), env: process.env, group: true,
 });
 `;
   const LOCAL = fileURLToPath(new URL('../../src/dispatcher/launcher/local.ts', import.meta.url));
+  const SLEEPS = 'sleep 30 & echo $! > left.pid; wait';
   it.each([
-    ['SIGINT', 130],
-    ['SIGTERM', 143],
+    ['SIGINT', 130, SLEEPS],
+    ['SIGTERM', 143, SLEEPS],
+    // SIGTERM ignored, by the group's leader and by the sleep: SIGKILL after the grace.
+    ['SIGINT', 130, `trap '' TERM; ${SLEEPS}`],
   ] as const)(
-    'stops the group on %s to the factory, which exits %i',
-    async (signal, status) => {
+    'stops the group on %s to the factory, which exits %i: %s',
+    async (signal, status, script) => {
       const dir = tempDir('run-');
       writeFileSync(join(dir, 'runs.mjs'), RUNS);
       const flags = ['--experimental-transform-types', '--no-warnings'];
-      const factory = spawn(process.execPath, [...flags, 'runs.mjs', LOCAL], { cwd: dir });
+      const factory = spawn(process.execPath, [...flags, 'runs.mjs', LOCAL, script], { cwd: dir });
       await vi.waitFor(() => {
-        expect(existsSync(join(dir, 'left.pid'))).toBe(true);
+        expect(left(dir)).toBeGreaterThan(0);
       }, 10_000);
       const pid = left(dir);
-      expect(pid).toBeGreaterThan(0);
       const exited = new Promise((done) => {
         factory.on('exit', done);
       });
+      const sent = Date.now();
       factory.kill(signal);
       await expect(exited).resolves.toBe(status);
+      if (script !== SLEEPS) expect(Date.now() - sent).toBeGreaterThanOrEqual(2900);
       await gone(pid);
     },
     30_000,

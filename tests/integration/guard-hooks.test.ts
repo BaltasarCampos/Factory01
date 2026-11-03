@@ -206,6 +206,23 @@ describe('the guard hooks (T086)', () => {
     ]);
   });
 
+  it.each([
+    ['path-guard', 'Write', { file_path: 'src/login.ts' }],
+    ['read-guard', 'Read', { file_path: 'src/login.ts' }],
+    ['command-guard', 'Bash', { command: 'npm test' }],
+    ['gate', 'Bash', { command: 'npm test' }],
+  ])('%s blocks a passed record it cannot read as an internal error', async (kind, tool, input) => {
+    const at = setUp({}, { passed: false });
+    mkdirSync(passedRecord(at.home), { recursive: true });
+    const blocked = await hook(kind, at, tool, input);
+    expect(blocked.code).toBe(2);
+    expect(blocked.stderr).toMatch(new RegExp(`refused: ${kind} failed: .*EISDIR`));
+    const logged = events(sessionLog(at.home));
+    expect(logged.map((e) => [e.kind, String(e.input_summary).split(':')[0]])).toEqual([
+      ['blocked', 'internal-error'],
+    ]);
+  });
+
   it('still block when the event cannot be written, saying why', async () => {
     const at = setUp();
     mkdirSync(sessionLog(at.home), { recursive: true });
