@@ -18,6 +18,9 @@
 #          `claude/factory-log`, `claude/define` or `none`. No session pushes: the Stop hook
 #          records the head, committing the output of roles that commit nothing, and the launcher
 #          pushes it there after the session ends (T086).
+# caps:    the session's turn cap (`--max-turns`) and wall-clock cap in minutes, read from the
+#          installed factory, never the clone; a session past either ends as a failure (T061).
+#          Tuned after Gate A from the logged turns and durations.
 roles:
   define:
     tools: [Read, Write, Edit, Bash, Grep, Glob]
@@ -43,6 +46,7 @@ roles:
     blocked: [git rebase, git reset, git commit --amend]
     network: [registry.npmjs.org, api.github.com]
     branch: claude/define
+    caps: { turns: 150, minutes: 90 }
   intake:
     tools: [Read, Grep, Glob, Bash]
     write: []
@@ -50,6 +54,7 @@ roles:
     blocked: []
     network: [api.github.com]
     branch: none
+    caps: { turns: 30, minutes: 15 }
   spec:
     tools: [Read, Grep, Glob, Write]
     write: ['{feature}/spec.md', '{feature}/checklists/requirements.md']
@@ -57,6 +62,7 @@ roles:
     blocked: []
     network: []
     branch: item
+    caps: { turns: 80, minutes: 45 }
   planner:
     tools: [Read, Grep, Glob, Write]
     write:
@@ -70,6 +76,7 @@ roles:
     blocked: []
     network: []
     branch: item
+    caps: { turns: 80, minutes: 45 }
   builder:
     # Task is Claude Code 2.1.309's name for Agent, the subagent tool (T125's A3c).
     tools: [Read, Write, Edit, Bash, Grep, Glob, Agent, Task]
@@ -99,6 +106,7 @@ roles:
     blocked: [git rebase, git reset, git commit --amend]
     network: [registry.npmjs.org]
     branch: item
+    caps: { turns: 200, minutes: 120 }
   test:
     tools: [Read, Grep, Glob, Write, Edit, Bash]
     write: ['{tests}']
@@ -106,6 +114,7 @@ roles:
     blocked: []
     network: [registry.npmjs.org]
     branch: item
+    caps: { turns: 120, minutes: 60 }
   reviewer:
     tools: [Read, Grep, Glob, Bash, Write]
     write: ['{feature}/reports/verify.md']
@@ -113,6 +122,7 @@ roles:
     blocked: [gh pr review]
     network: [api.github.com]
     branch: item
+    caps: { turns: 80, minutes: 45 }
   security:
     tools: [Read, Grep, Glob, Bash, Write]
     write: ['{feature}/reports/security.md']
@@ -120,6 +130,7 @@ roles:
     blocked: []
     network: [registry.npmjs.org]
     branch: item
+    caps: { turns: 80, minutes: 45 }
   integrator:
     tools: [Read, Bash, Write]
     write: ['{feature}/reports/integrate.md']
@@ -134,6 +145,7 @@ roles:
     blocked: [gh pr review, git commit, git rebase, git reset, git commit --amend]
     network: [api.github.com]
     branch: item
+    caps: { turns: 60, minutes: 30 }
   release:
     tools: [Read, Write, Bash]
     write: ['.factory/releases/**']
@@ -141,6 +153,7 @@ roles:
     blocked: [gh release, git tag]
     network: []
     branch: claude/factory-log
+    caps: { turns: 40, minutes: 20 }
   ops:
     tools: [Read, Grep, Glob, Bash, Write]
     write: ['.factory/ops/**']
@@ -148,6 +161,7 @@ roles:
     blocked: []
     network: [api.github.com]
     branch: claude/factory-log
+    caps: { turns: 40, minutes: 20 }
   coach:
     tools: [Read, Grep, Glob, Write, Bash]
     write: ['.factory/lessons/**']
@@ -155,6 +169,7 @@ roles:
     blocked: []
     network: [api.github.com]
     branch: claude/factory-log
+    caps: { turns: 40, minutes: 20 }
 
 # Paths no role may Write or Edit (FR-6.4, T173): the guardrail files, the station manifest and
 # the event log, which only the factory writes. `except` names the roles a path is open to.

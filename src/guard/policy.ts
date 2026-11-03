@@ -22,6 +22,8 @@ export interface RolePolicy {
   /** The hosts the role's sandboxed shell may reach (T183). */
   network: string[];
   branch: (typeof BRANCHES)[number];
+  /** The session's turn cap and wall-clock cap in minutes (T061). */
+  caps: { turns: number; minutes: number };
 }
 
 export interface Policy {
@@ -36,7 +38,7 @@ export interface Policy {
   assignments: Record<string, string>;
 }
 
-const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'network', 'branch'];
+const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'network', 'branch', 'caps'];
 /** Names Claude Code defines as shell functions of its own in some sessions (T081). */
 const CLAUDE_FUNCTIONS = ['find', 'grep', 'rg', 'pkill'];
 const HOST = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/;
@@ -87,11 +89,16 @@ function rolePolicy(role: RoleName, value: unknown): RolePolicy {
   const branch = row.branch;
   if (typeof branch !== 'string' || !(BRANCHES as readonly string[]).includes(branch))
     throw refuse(`${role}: branch ${String(branch)} is not one of ${BRANCHES.join(', ')}`);
+  const caps = keysOf(row.caps, ['turns', 'minutes'], `${role}: caps`);
+  for (const cap of ['turns', 'minutes'])
+    if (!Number.isSafeInteger(caps[cap]) || (caps[cap] as number) < 1)
+      throw refuse(`${role}: caps: ${cap} is not a whole number above 0`);
   return {
     ...{ tools: tools as RolePolicy['tools'], write, shell },
     blocked: strings(row.blocked, `${role}: blocked`),
     network,
     branch: branch as RolePolicy['branch'],
+    caps: { turns: caps.turns as number, minutes: caps.minutes as number },
   };
 }
 

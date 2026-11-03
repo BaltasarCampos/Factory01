@@ -35,7 +35,7 @@ import {
   serialiseManifest,
 } from '../../src/install/manifest.js';
 import { installLabels } from '../../src/install/labels.js';
-import { SessionFailed } from '../../src/dispatcher/launcher/types.js';
+import { SessionCapped, SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { createDefineBranch, installProject } from '../../src/install/project.js';
 import { parseConfig } from '../../src/model/config.js';
 import { ITEM_TYPES, STATES, STATIONS, type GuardrailManifest } from '../../src/model/types.js';
@@ -644,11 +644,14 @@ describe(
       ],
       ['its stream has a line that is not a JSON object: oops', false],
       ['claude exited 1: boom', false],
+      // Stopped at a cap: the same report, its alert of its own kind.
+      ['it reached its turn cap of 150 turns', false, 'session-capped'],
     ])(
       'a Define session that ran and failed with "%s" is reported as such, with its alert (T061)',
-      async (why, urgent) => {
+      async (why, urgent, kind = 'session-failed') => {
         const { cli, cwd, launchers } = laptop();
-        launchers.local.failure = new SessionFailed(why, urgent);
+        launchers.local.failure =
+          kind === 'session-capped' ? new SessionCapped(why) : new SessionFailed(why, urgent);
         const r = await cli(['new', 'A pitch', '--name', 'sample']);
         expect(r.code).toBe(1);
         expect(r.stderr).toContain(`Define's session ran and failed: ${why}`);
@@ -659,7 +662,7 @@ describe(
         );
         expect(inbox?.comments).toHaveLength(1);
         const urgency = urgent ? 'urgent' : 'info';
-        expect(inbox?.comments[0]?.body).toMatch(`urgency=${urgency} kind=session-failed`);
+        expect(inbox?.comments[0]?.body).toMatch(`urgency=${urgency} kind=${kind}`);
         expect(inbox?.comments[0]?.body).toContain(
           `a define session for owner/sample failed: ${why}`,
         );

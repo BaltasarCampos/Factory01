@@ -17,6 +17,8 @@ export interface LaunchRequest {
   /** The task's files from the station manifest, or a conflict session's; empty for none. */
   files: readonly string[];
   prompt: string;
+  /** Called about once a minute while a local session runs, for `factory run`'s heartbeat. */
+  heartbeat?: (progress: { elapsed: number; turns: number }) => void;
 }
 
 /** Whether a session can start now; if not, why, and whether it is tampering (urgent). */
@@ -74,5 +76,12 @@ export class SessionFailed extends RefusedError {
   constructor(message: string, urgent: boolean) {
     super(message);
     this.urgent = urgent;
+  }
+}
+
+/** A session stopped at one of its caps, turns, wall clock or silence: a failed one, not urgent. */
+export class SessionCapped extends SessionFailed {
+  constructor(message: string) {
+    super(message, false);
   }
 }

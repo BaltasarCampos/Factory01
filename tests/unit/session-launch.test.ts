@@ -25,12 +25,14 @@ import {
   groupRecord,
   localInvocation,
   MAX_LINE,
+  SILENCE,
   runProcess,
   sessionTools,
   type Runner,
 } from '../../src/dispatcher/launcher/local.js';
 import {
   LaunchRefused,
+  SessionCapped,
   SessionFailed,
   type LaunchRequest,
 } from '../../src/dispatcher/launcher/types.js';
@@ -170,6 +172,8 @@ function setup(
     checkTimeout?: number;
     /** Whether the PATH starts with stand-ins for bwrap and socat; default yes. */
     stubs?: boolean;
+    /** A cap's minute, the watchdog's silence and the heartbeat, in ms. */
+    limits?: { minute?: number; silence?: number; heartbeat?: number };
   } = {},
 ) {
   const repo = makeRepo({ files: { '.factory/config': CONFIG, ...GUARDED } });
@@ -205,6 +209,7 @@ function setup(
     run: options.run ?? runner.run,
     sessionId: sessionIds(),
     ...(options.checkTimeout === undefined ? {} : { checkTimeout: options.checkTimeout }),
+    ...options.limits,
   });
   const owner = () => [
     repo.git(['rev-parse', '--abbrev-ref', 'HEAD']),
@@ -241,7 +246,9 @@ describe('LocalLauncher (research R8, R9)', () => {
     const clone = work(t.home, '42-add-login');
     expect(launch?.cwd).toBe(clone);
     const request = { ...REQUEST, project: t.repo.path };
-    expect(launch?.args).toEqual(localInvocation(request, sessionFiles(t.home), 'sonnet'));
+    // The spec role's turn cap, from the installed factory's roles.yaml.
+    expect(launch?.args).toEqual(localInvocation(request, sessionFiles(t.home), 'sonnet', 80));
+    expect(launch?.args.slice(5, 7)).toEqual(['--max-turns', '80']);
     expect(launch?.env).toMatchObject({ FACTORY_ITEM: '42', FACTORY_STATION: '2' });
     // The release's commands take the feature folder from the prompt (T171, T172).
     expect(launch?.env).not.toHaveProperty('SPECIFY_FEATURE');
@@ -488,9 +495,13 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(Object.keys(env).sort()).toEqual(
       ['CLAUDE_CODE_TMPDIR', 'FACTORY_ITEM', 'FACTORY_ROLE', 'FACTORY_SESSION', 'FACTORY_STATION']
         .concat(['HOME', 'LANG', 'PATH', 'TERM', 'TMPDIR', 'npm_config_cache'])
-        .concat(['CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR'])
+        .concat(['CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR', 'BASH_MAX_TIMEOUT_MS'])
         .sort(),
     );
+    // The watchdog's 12 minutes sit 2 above the longest command: raising one alone fails here.
+    expect(env.BASH_MAX_TIMEOUT_MS).toBe('600000');
+    expect(SILENCE).toBe(12 * 60_000);
+    expect(SILENCE - Number(env.BASH_MAX_TIMEOUT_MS)).toBe(2 * 60_000);
     // Absolute folders only, none in a temporary folder: the hooks run `factory` by name.
     expect(env).toMatchObject({ PATH: `${SANDBOX_BIN}:${tools}`, HOME: realpathSync(t.home) });
     expect(env.LANG).toBe('C.UTF-8');
@@ -988,7 +999,9 @@ describe('LocalLauncher (research R8, R9)', () => {
         },
       },
     });
-    const assistants = [usage(10, 1000, 200), usage(5, 3000, 0), usage(1, 100, 0)];
+    // A subagent's message, with its parent's tool call, is no turn of the session's.
+    const subagent = { ...usage(1, 1, 1), parent_tool_use_id: 'toolu_1' };
+    const assistants = [usage(10, 1000, 200), usage(5, 3000, 0), subagent, usage(1, 100, 0)];
     const recorded = (home: string) =>
       JSON.parse(
         readFileSync(join(home, '.factory', 'sessions', FIRST, 'result.json'), 'utf8'),
@@ -1017,6 +1030,7 @@ describe('LocalLauncher (research R8, R9)', () => {
         // The largest input of any assistant message, cache reads and writes included.
         peak_context: 3005,
         longest_line: longest,
+        ...{ turns: 3, duration_ms: null },
       });
     });
 
@@ -1075,6 +1089,12 @@ describe('LocalLauncher (research R8, R9)', () => {
         /a line of type assistant before its init message/,
       ],
       [
+        'a result that is no success',
+        (args: readonly string[]) =>
+          sessionStream(args, { result: { subtype: 'error_during_execution', is_error: true } }),
+        /its result is "error_during_execution", an error, not a success/,
+      ],
+      [
         'a line the check itself fails on',
         (args: readonly string[]) => `{"type":{"toString":1}}\n${sessionStream(args)}`,
         /the launcher failed while it ran: Cannot convert object to primitive value/,
@@ -1089,6 +1109,15 @@ describe('LocalLauncher (research R8, R9)', () => {
       await expect(refused).rejects.toThrow(SessionFailed);
       await expect(refused).rejects.toMatchObject({ urgent: false });
       await expect(refused).rejects.toThrow(why);
+    });
+
+    it('is a capped session, not urgent, when its result says it reached its turn cap', async () => {
+      const result = { subtype: 'error_max_turns', is_error: true };
+      const capped = setup({ run: fakeRunner(1, (args) => sessionStream(args, { result })).run });
+      const refused = capped.launch(REQUEST);
+      await expect(refused).rejects.toThrow(SessionCapped);
+      await expect(refused).rejects.toMatchObject({ urgent: false });
+      await expect(refused).rejects.toThrow(/it reached its turn cap of 80 turns/);
     });
 
     it('is a failed session when its init message was not read while it ran', async () => {
@@ -1286,7 +1315,11 @@ describe('LocalLauncher (research R8, R9)', () => {
       }, 30_000);
 
       /** A launch whose session is `script`, run as the real runner runs claude. */
-      const scripted = (script: string, started?: (pid: number, dir: string) => void) => {
+      const scripted = (
+        script: string,
+        started?: (pid: number, dir: string) => void,
+        limits: { minute?: number; silence?: number; heartbeat?: number } = {},
+      ) => {
         let home = '';
         const base = fakeRunner();
         const run: Runner = (program, args, options) => {
@@ -1300,10 +1333,50 @@ describe('LocalLauncher (research R8, R9)', () => {
             },
           });
         };
-        const t = setup({ run });
+        const t = setup({ run, limits });
         home = t.home;
         return t;
       };
+
+      // A hook's system line, which may come before the init, every 50 ms: never silent.
+      const TICKS = `sleep 30 & echo $! > left.pid; while :; do echo '${HOOK_LINE}'; sleep 0.05; done`;
+      it.each([
+        ['wall-clock', TICKS, { minute: 10 }, /ran past its wall-clock cap of 45 minutes/],
+        [
+          'silence',
+          'sleep 30 & echo $! > left.pid; wait',
+          { silence: 300 },
+          /silent for 0.005 min/,
+        ],
+      ])(
+        'stops a session at its %s cap, group and all, a capped session',
+        async (_cap, script, limits, why) => {
+          const t = scripted(script, undefined, limits);
+          const stopped = t.launch(REQUEST);
+          await expect(stopped).rejects.toThrow(SessionCapped);
+          await expect(stopped).rejects.toThrow(why);
+          const pid = Number(
+            readFileSync(join(t.home, '.factory', 'sessions', FIRST, 'left.pid'), 'utf8'),
+          );
+          await vi.waitFor(() => {
+            expect(() => process.kill(pid, 0)).toThrow();
+          });
+        },
+        30_000,
+      );
+
+      it('tells its caller its elapsed time and turns about once a heartbeat while it runs', async () => {
+        const beats: { elapsed: number; turns: number }[] = [];
+        const t = scripted(TICKS, undefined, { minute: 10, heartbeat: 100 });
+        const request = {
+          ...REQUEST,
+          heartbeat: (beat: (typeof beats)[number]) => beats.push(beat),
+        };
+        await expect(t.launch(request)).rejects.toThrow(SessionCapped);
+        expect(beats.length).toBeGreaterThanOrEqual(2);
+        expect(beats[0]).toMatchObject({ turns: 0 });
+        expect(beats[0]?.elapsed).toBeGreaterThanOrEqual(90);
+      }, 30_000);
 
       it('is a failed session, its group stopped, when its process group cannot be recorded', async () => {
         let pgid = 0;
