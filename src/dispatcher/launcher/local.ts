@@ -102,6 +102,8 @@ export type Runner = (
     silence?: number;
     /** Each line of its output as it comes; a reason returned stops the run, group and all. */
     line?: (line: string) => string | undefined;
+    /** Called on each chunk of its output, as the watchdog hears it. */
+    chunk?: () => void;
     /** The program's pid once it has started: for a grouped run, its process group's id. */
     started?: (pid: number) => void;
   },
@@ -149,7 +151,7 @@ const HEARTBEAT = 60_000;
  */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
-    const { timeout, group, silence, line, ...spawned } = options;
+    const { timeout, group, silence, line, chunk: heard, ...spawned } = options;
     const grouped = timeout !== undefined || group === true;
     let stdout = '';
     let stderr = '';
@@ -247,6 +249,7 @@ export const runProcess: Runner = (program, args, options) =>
     child.stdout.on('data', (chunk: string) => {
       stdout += chunk;
       listen();
+      heard?.();
       if (line === undefined) return;
       let from = 0;
       for (let at = chunk.indexOf('\n'); at !== -1 && !settled; at = chunk.indexOf('\n', from)) {
@@ -616,18 +619,24 @@ interface Read {
   peak: number;
   /** The longest line, in characters, from which MAX_LINE is set. */
   longest: number;
-  /** The main session's assistant messages so far, never a subagent's. */
+  /** The main session's assistant messages so far, by distinct message id, never a subagent's. */
   turns: number;
+  /** The main session's assistant lines, one per content block, which `turns` counts by id. */
+  lines: number;
+  ids: Set<string>;
+  /** The longest the watchdog heard nothing, from the spawn to the end, in ms. */
+  silence: number;
 }
 
 /**
  * What the session reported, kept in its folder for every session that spawned, failed or not:
  * the model id and version its init message names, how many calls were refused, the models it
  * used, an Opus one being the advisor's, which no tool list shows (T125's A3d, T097), its peak
- * context, from which each role's ceiling is set (design rev 998), its longest line, and its
- * turns, from which with the result's duration each role's caps are tuned after Gate A.
+ * context, from which each role's ceiling is set (design rev 998), its longest line, its turns,
+ * its assistant lines and the result's own count, from which with the durations, the result's and
+ * the factory's, each role's caps are tuned after Gate A, and the longest silence, the watchdog's.
  */
-function reported({ init = {}, result = {}, peak, longest, turns }: Read) {
+function reported({ init = {}, result = {}, ...read }: Read, elapsed: number) {
   const usage = result.modelUsage;
   const models = typeof usage === 'object' && usage !== null ? Object.keys(usage) : [];
   return {
@@ -639,10 +648,15 @@ function reported({ init = {}, result = {}, peak, longest, turns }: Read) {
       : 0,
     models,
     advisor: models.some((name) => /opus/i.test(name)),
-    peak_context: peak,
-    longest_line: longest,
-    turns,
+    peak_context: read.peak,
+    longest_line: read.longest,
+    turns: read.turns,
+    assistant_lines: read.lines,
+    num_turns: typeof result.num_turns === 'number' ? result.num_turns : null,
     duration_ms: typeof result.duration_ms === 'number' ? result.duration_ms : null,
+    // The factory's own, since a session stopped at a cap has no result and so no duration.
+    elapsed_ms: elapsed,
+    longest_silence_ms: read.silence,
   };
 }
 
@@ -698,6 +712,9 @@ function liveCheck(id: string, role: RoleName, model: string, passed: () => bool
     peak: 0,
     longest: 0,
     turns: 0,
+    lines: 0,
+    ids: new Set(),
+    silence: 0,
     line: (text) => {
       check.longest = Math.max(check.longest, text.length);
       if (text.trim() === '') return undefined;
@@ -710,7 +727,13 @@ function liveCheck(id: string, role: RoleName, model: string, passed: () => bool
           if (problems.length > 0) throw mismatch(problems);
         } else if (m.type === 'assistant') {
           check.peak = Math.max(check.peak, context(m));
-          if (typeof m.parent_tool_use_id !== 'string') check.turns += 1;
+          // stream-json sends a line per content block, each with its message's id.
+          if (typeof m.parent_tool_use_id !== 'string') {
+            check.lines += 1;
+            const id = (m.message as Message | null)?.id;
+            check.ids.add(typeof id === 'string' ? id : `line ${String(check.lines)}`);
+            check.turns = check.ids.size;
+          }
           if (!assistant && !passed())
             throw new SessionFailed(
               'its start check did not pass: it has no passed record by its first assistant message',
@@ -1173,6 +1196,8 @@ export class LocalLauncher implements SessionLauncher {
         // The installed factory's caps, never the clone's (T061).
         const { caps } = factoryPolicy().roles[request.role];
         const silence = this.options.silence ?? SILENCE;
+        const began = Date.now();
+        let heard = began;
         // From the spawn to the return, every failure is a session that ran on the Owner's plan.
         const session = async (): Promise<LaunchResult> => {
           let result: Awaited<ReturnType<Runner>>;
@@ -1180,6 +1205,10 @@ export class LocalLauncher implements SessionLauncher {
             const invocation = localInvocation(request, files, model, caps.turns);
             result = await this.run('claude', invocation, {
               ...{ cwd, env, group: true, line: live.line },
+              chunk: () => {
+                live.silence = Math.max(live.silence, Date.now() - heard);
+                heard = Date.now();
+              },
               ...{ timeout: caps.minutes * (this.options.minute ?? 60_000), silence },
               started: (pgid) => {
                 ran.spawned = true;
@@ -1204,10 +1233,16 @@ export class LocalLauncher implements SessionLauncher {
             );
           if (live.result?.subtype === 'error_max_turns')
             throw new SessionCapped(`it reached its turn cap of ${String(caps.turns)} turns`);
-          if (result.status !== 0)
-            throw streamFailed(
-              `claude ${result.signal ? `was ended by ${result.signal}` : `exited ${String(result.status)}`}: ${visible(result.stderr.trim())}`,
-            );
+          if (result.status !== 0) {
+            const ended = result.signal
+              ? `was ended by ${result.signal}`
+              : `exited ${String(result.status)}`;
+            const after =
+              live.result === undefined
+                ? ''
+                : ` after its result ${visible(JSON.stringify(live.result.subtype ?? null))}`;
+            throw streamFailed(`claude ${ended}${after}: ${visible(result.stderr.trim())}`);
+          }
           const { init, result: last } = readStream(result.stdout, files.id);
           if (live.init === undefined)
             throw streamFailed('its init message was not read while it ran');
@@ -1235,7 +1270,6 @@ export class LocalLauncher implements SessionLauncher {
         };
         let outcome: LaunchResult | undefined;
         let failure: SessionFailed | undefined;
-        const began = Date.now();
         const beat = setInterval(() => {
           request.heartbeat?.({ elapsed: Date.now() - began, turns: live.turns });
         }, this.options.heartbeat ?? HEARTBEAT);
@@ -1249,7 +1283,9 @@ export class LocalLauncher implements SessionLauncher {
         }
         // What it reported, kept for every session that spawned, a failed one too.
         try {
-          const text = JSON.stringify(reported(live), null, 2);
+          const ended = Date.now();
+          live.silence = Math.max(live.silence, ended - heard);
+          const text = JSON.stringify(reported(live, ended - began), null, 2);
           writeFileSync(join(dirname(files.record), 'result.json'), `${text}\n`, WRITE_ONCE);
         } catch (err) {
           const why = `its result.json could not be written: ${visible(err instanceof Error ? err.message : String(err))}`;
