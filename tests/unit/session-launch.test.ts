@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -12,6 +12,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentError } from '../../src/cli/env.js';
 import { runLoop } from '../../src/commands/run.js';
@@ -22,6 +23,7 @@ import {
   guardrailCheck,
   LocalLauncher,
   localInvocation,
+  MAX_LINE,
   runProcess,
   sessionTools,
   type Runner,
@@ -44,6 +46,7 @@ import {
   manifestOf,
   quietShell,
   SANDBOX_BIN,
+  sessionRun,
   sessionStream,
   type StreamChange,
 } from '../helpers/guardrails.js';
@@ -118,7 +121,7 @@ function fakeRunner(
       return Promise.resolve({ ...end, stdout: `${shells[args[0] ?? ''] ?? ''}${end.stdout}` });
     }
     const out = typeof stdout === 'string' ? stdout : stdout(args);
-    return Promise.resolve({ status, stdout: out, stderr: status === 0 ? '' : 'boom' });
+    return Promise.resolve(sessionRun(args, out, options, status, status === 0 ? '' : 'boom'));
   };
   return { calls, run };
 }
@@ -129,6 +132,7 @@ const sessionIds = () => {
   return () => `0b6c7f3e-2a4d-4c1e-9f00-${String((n += 1)).padStart(12, '0')}`;
 };
 const FIRST = '0b6c7f3e-2a4d-4c1e-9f00-000000000001';
+const SECOND = '0b6c7f3e-2a4d-4c1e-9f00-000000000002';
 
 const roleFile = (role: string) =>
   `---\nname: ${role}\nmodel: sonnet\ntools: Read\nversion: 1\n---\n`;
@@ -255,7 +259,7 @@ describe('LocalLauncher (research R8, R9)', () => {
   it("writes the session's settings and the factory's MCP config into its own fresh folder under ~/.factory/", async () => {
     let home = '';
     let tmp = '';
-    const run: Runner = (program, args) => {
+    const run: Runner = (program, args, options) => {
       if (program === 'bash') return Promise.resolve(quietShell(args));
       if (args[0] === '--version') return Promise.resolve(VERSION);
       if (args[0] === '-p') {
@@ -264,7 +268,7 @@ describe('LocalLauncher (research R8, R9)', () => {
         tmp = settings.sandbox.filesystem.allowWrite[0] ?? '';
         expect(existsSync(tmp)).toBe(true);
       }
-      return Promise.resolve({ status: 0, stdout: echo(args), stderr: '' });
+      return Promise.resolve(sessionRun(args, echo(args), options));
     };
     const at = setup({ run });
     home = at.home;
@@ -907,12 +911,12 @@ describe('LocalLauncher (research R8, R9)', () => {
 
   it('runs one session at a time', async () => {
     let finish: (() => void) | undefined;
-    const run: Runner = (program, args) =>
+    const run: Runner = (program, args, options) =>
       args[0] !== '-p'
         ? Promise.resolve(program === 'bash' ? quietShell(args) : VERSION)
         : new Promise((done) => {
             finish = () => {
-              done({ status: 0, stdout: echo(args), stderr: '' });
+              done(sessionRun(args, echo(args), options));
             };
           });
     const t = setup({ run });
@@ -928,11 +932,15 @@ describe('LocalLauncher (research R8, R9)', () => {
     await expect(first).resolves.toEqual({ sessionId: FIRST });
   });
 
-  it('a failed session, or one reporting no session or another, is an error', async () => {
-    await expect(setup({ run: fakeRunner(1).run }).launch(REQUEST)).rejects.toThrow(/boom/);
+  it('a session that exits with an error, or reports no session or another, is a failed session', async () => {
+    const exited = setup({ run: fakeRunner(1).run }).launch(REQUEST);
+    await expect(exited).rejects.toThrow(/claude exited 1: boom/);
+    await expect(exited).rejects.toMatchObject({ name: 'SessionFailed', urgent: false });
     for (const session_id of [undefined, 's-other']) {
       const stream = (args: readonly string[]) => sessionStream(args, { result: { session_id } });
-      await expect(setup({ run: fakeRunner(0, stream).run }).launch(REQUEST)).rejects.toThrow(
+      const other = setup({ run: fakeRunner(0, stream).run }).launch(REQUEST);
+      await expect(other).rejects.toThrow(SessionFailed);
+      await expect(other).rejects.toThrow(
         new RegExp(`claude reported session .*, not ${FIRST} as launched`),
       );
     }
@@ -956,8 +964,18 @@ describe('LocalLauncher (research R8, R9)', () => {
       });
     };
 
-    it('records the model, the version, the permission denials and the models it used', async () => {
+    it('records the model, the version, the permission denials, the models it used and its peak context', async () => {
+      const usage = (input: number, read: number, written: number) => ({
+        type: 'assistant',
+        message: {
+          usage: {
+            ...{ input_tokens: input, cache_read_input_tokens: read },
+            ...{ cache_creation_input_tokens: written, output_tokens: 9999 },
+          },
+        },
+      });
       const t = streamed({
+        assistants: [usage(10, 1000, 200), usage(5, 3000, 0), usage(1, 100, 0)],
         result: {
           permission_denials: [{ tool_name: 'Bash' }, { tool_name: 'Edit' }],
           modelUsage: { 'claude-sonnet-5-5': {}, 'claude-opus-5-5': {} },
@@ -972,6 +990,8 @@ describe('LocalLauncher (research R8, R9)', () => {
       expect(JSON.parse(readFileSync(file, 'utf8'))).toEqual({
         ...{ model: 'claude-sonnet-5-5', claude_code_version: '2.1.309', permission_denials: 2 },
         ...{ models: ['claude-sonnet-5-5', 'claude-opus-5-5'], advisor: true },
+        // The largest input of any assistant message, cache reads and writes included.
+        peak_context: 3005,
       });
     });
 
@@ -987,6 +1007,11 @@ describe('LocalLauncher (research R8, R9)', () => {
         /not a JSON object: oops/,
       ],
       ['no init message', () => `${HOOK_LINE}\n`, /no init message/],
+      [
+        'a line longer than the cap',
+        (args: readonly string[]) => `${'x'.repeat(MAX_LINE + 1)}\n${sessionStream(args)}`,
+        /a line longer than 4194304 characters/,
+      ],
       [
         'an assistant line before the init',
         (args: readonly string[]) => `{"type":"assistant","message":{}}\n${sessionStream(args)}`,
@@ -1004,8 +1029,34 @@ describe('LocalLauncher (research R8, R9)', () => {
       ],
     ])('a stream with %s is a failed session, never an empty one', async (_name, stream, why) => {
       const refused = streamed(stream).launch(REQUEST);
-      await expect(refused).rejects.toThrow(EnvironmentError);
+      await expect(refused).rejects.toThrow(SessionFailed);
+      await expect(refused).rejects.toMatchObject({ urgent: false });
       await expect(refused).rejects.toThrow(why);
+    });
+
+    it('is a failed session when its init message was not read while it ran', async () => {
+      const unread: Runner = (program, args, options) =>
+        args[0] === '-p'
+          ? Promise.resolve({ status: 0, stdout: echo(args), stderr: '' })
+          : fakeRunner().run(program, args, options);
+      const refused = setup({ run: unread }).launch(REQUEST);
+      await expect(refused).rejects.toThrow(SessionFailed);
+      await expect(refused).rejects.toThrow(/its init message was not read while it ran/);
+    });
+
+    it('is a failed session, naming the error, when its passed record cannot be read', async () => {
+      const unreadable: Runner = (program, args, options) => {
+        if (args[0] !== '-p') return fakeRunner().run(program, args, options);
+        const folder = dirname(args[args.indexOf('--settings') + 1] ?? '');
+        mkdirSync(join(folder, 'passed.json'));
+        const stop = echo(args)
+          .split('\n')
+          .some((text) => text !== '' && options.line?.(text) !== undefined);
+        return Promise.resolve({ status: stop ? null : 0, stdout: echo(args), stderr: '' });
+      };
+      const refused = setup({ run: unreadable }).launch(REQUEST);
+      await expect(refused).rejects.toThrow(SessionFailed);
+      await expect(refused).rejects.toThrow(/its passed record could not be read: .*EISDIR/);
     });
 
     it('reads the init message after a hook system line that comes before it', async () => {
@@ -1040,6 +1091,11 @@ describe('LocalLauncher (research R8, R9)', () => {
         /claude-sonnet-fable-5-1 is a Fable model/,
       ],
       [
+        'an extended-context variant',
+        { init: { model: 'claude-sonnet-5-5[1m]' } },
+        /claude-sonnet-5-5\[1m\] is not a plain model id/,
+      ],
+      [
         'a full id other than the role file names',
         { init: { model: 'claude-sonnet-5-6' } },
         /claude-sonnet-5-6 is not claude-sonnet-5-5/,
@@ -1053,6 +1109,7 @@ describe('LocalLauncher (research R8, R9)', () => {
           REQUEST,
         );
         await expect(refused).rejects.toThrow(SessionFailed);
+        await expect(refused).rejects.toMatchObject({ urgent: true });
         await expect(refused).rejects.toThrow(why);
       },
     );
@@ -1113,8 +1170,9 @@ describe('LocalLauncher (research R8, R9)', () => {
           if (at.passed) writeFileSync(join(dir, 'passed.json'), passed);
           const text = typeof stream === 'string' ? stream : sessionStream(args, stream);
           writeFileSync(join(dir, 'stream.jsonl'), text);
-          const wait = at.ends === true ? '' : '; sleep 30 & echo $! > left.pid; wait';
-          const script = `cat stream.jsonl${wait}`;
+          // The child is started first, so its pid is on record before any line is read.
+          const left = 'sleep 30 & echo $! > left.pid; ';
+          const script = at.ends === true ? 'cat stream.jsonl' : `${left}cat stream.jsonl; wait`;
           // The stand-in's own PATH: the session's holds no cat or sleep.
           return runProcess('bash', ['-c', script], { ...options, cwd: dir, env: gitEnv });
         };
@@ -1132,8 +1190,10 @@ describe('LocalLauncher (research R8, R9)', () => {
         await expect(stopped).rejects.toThrow(SessionFailed);
         await expect(stopped).rejects.toThrow(/permission mode "bypassPermissions", not dontAsk/);
         expect(Date.now() - started).toBeLessThan(10_000);
+        const pid = left(t.home);
+        expect(pid).toBeGreaterThan(0);
         await vi.waitFor(() => {
-          expect(() => process.kill(left(t.home), 0)).toThrow();
+          expect(() => process.kill(pid, 0)).toThrow();
         });
       }, 30_000);
 
@@ -1149,14 +1209,62 @@ describe('LocalLauncher (research R8, R9)', () => {
       it('stops a session whose stream is out of order, a failed session', async () => {
         const t = running(`{"type":"assistant","message":{}}\n`, { passed: true });
         const stopped = t.launch(REQUEST);
-        await expect(stopped).rejects.toThrow(EnvironmentError);
+        await expect(stopped).rejects.toThrow(SessionFailed);
         await expect(stopped).rejects.toThrow(/a line of type assistant before its init message/);
       }, 30_000);
 
-      it('lets a session that started as launched run to its end', async () => {
+      it('lets a session that started as launched run to its end, its process group on record', async () => {
         const t = running({}, { passed: true, ends: true });
         await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+        const group = join(t.home, '.factory', 'sessions', FIRST, 'group.json');
+        const { pgid } = JSON.parse(readFileSync(group, 'utf8')) as { pgid: unknown };
+        expect(Number.isSafeInteger(pgid)).toBe(true);
       }, 30_000);
+    });
+
+    describe('a session an earlier factory could not stop (T061)', () => {
+      const OLD = '0b6c7f3e-2a4d-4c1e-9f00-0000000000aa';
+      /** A recorded group for session OLD, its leader a stand-in claude started with `args`. */
+      const recorded = (home: string, args: readonly string[]) => {
+        const bin = tempDir('orphan-');
+        writeFileSync(join(bin, 'claude'), '#!/bin/sh\nsleep 30\n', { mode: 0o755 });
+        const child = spawn(join(bin, 'claude'), args, { detached: true, stdio: 'ignore' });
+        const dir = join(home, '.factory', 'sessions', OLD);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'group.json'), JSON.stringify({ pgid: child.pid }));
+        return child;
+      };
+
+      it('refuses a launch, urgent, naming it and how to stop it, and never stops it', async () => {
+        const t = setup();
+        const child = recorded(t.home, ['-p', '--session-id', OLD]);
+        try {
+          const refused = t.launch(REQUEST);
+          await expect(refused).rejects.toThrow(LaunchRefused);
+          await expect(refused).rejects.toMatchObject({ urgent: true, kind: 'session-running' });
+          await expect(refused).rejects.toThrow(
+            new RegExp(`session ${OLD} is still running .*kill -TERM -${String(child.pid)}`),
+          );
+          expect(t.sessions()).toEqual([]);
+          expect(() => process.kill(child.pid ?? 0, 0)).not.toThrow();
+        } finally {
+          process.kill(-(child.pid ?? 0), 'SIGKILL');
+        }
+      });
+
+      it('goes ahead when the recorded group has ended, or its pid is no longer that session', async () => {
+        const t = setup();
+        const other = recorded(t.home, ['-p', '--session-id', 'another-session']);
+        try {
+          await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+        } finally {
+          process.kill(-(other.pid ?? 0), 'SIGKILL');
+        }
+        await vi.waitFor(() => {
+          expect(() => process.kill(other.pid ?? 0, 0)).toThrow();
+        });
+        await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: SECOND });
+      });
     });
   });
 });
@@ -1544,6 +1652,64 @@ describe('runProcess', () => {
     expect(result.stdout).not.toContain('never');
     await gone(left(dir));
   }, 15_000);
+
+  it('gives line each line as it comes, a last one with no newline too, and a long one as it stands', async () => {
+    const seen: string[] = [];
+    const line = (text: string) => {
+      seen.push(text);
+      return undefined;
+    };
+    const cwd = tempDir('run-');
+    const split = "printf 'one\\ntw'; sleep 0.2; printf 'o\\nthree'";
+    await runProcess('bash', ['-c', split], { cwd, env: gitEnv, line });
+    expect(seen).toEqual(['one', 'two', 'three']);
+    seen.length = 0;
+    const long = `head -c ${String(MAX_LINE + 10)} /dev/zero | tr '\\0' x`;
+    await runProcess('bash', ['-c', long], { cwd, env: gitEnv, line });
+    expect(seen[0]?.length).toBeGreaterThan(MAX_LINE);
+  });
+
+  // A factory ended by a signal stops its grouped run first, so nothing runs on, unread (T061).
+  const RUNS = `
+import { registerHooks } from 'node:module';
+registerHooks({
+  resolve(specifier, context, next) {
+    try { return next(specifier, context); } catch (error) {
+      if (!specifier.endsWith('.js')) throw error;
+      return next(specifier.slice(0, -3) + '.ts', context);
+    }
+  },
+});
+const { runProcess } = await import(process.argv[2]);
+await runProcess('bash', ['-c', 'sleep 30 & echo $! > left.pid; wait'], {
+  cwd: process.cwd(), env: process.env, group: true,
+});
+`;
+  const LOCAL = fileURLToPath(new URL('../../src/dispatcher/launcher/local.ts', import.meta.url));
+  it.each([
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+  ] as const)(
+    'stops the group on %s to the factory, which exits %i',
+    async (signal, status) => {
+      const dir = tempDir('run-');
+      writeFileSync(join(dir, 'runs.mjs'), RUNS);
+      const flags = ['--experimental-transform-types', '--no-warnings'];
+      const factory = spawn(process.execPath, [...flags, 'runs.mjs', LOCAL], { cwd: dir });
+      await vi.waitFor(() => {
+        expect(existsSync(join(dir, 'left.pid'))).toBe(true);
+      }, 10_000);
+      const pid = left(dir);
+      expect(pid).toBeGreaterThan(0);
+      const exited = new Promise((done) => {
+        factory.on('exit', done);
+      });
+      factory.kill(signal);
+      await expect(exited).resolves.toBe(status);
+      await gone(pid);
+    },
+    30_000,
+  );
 
   it("stops what is left of a grouped run's process group once the program exits", async () => {
     const dir = tempDir('run-');

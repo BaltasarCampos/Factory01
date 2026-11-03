@@ -1,8 +1,9 @@
 // Guardrail fixtures: hook settings a factory release would install, and a release manifest.
 import { createHash } from 'node:crypto';
-import { readFileSync, realpathSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { sessionTools } from '../../src/dispatcher/launcher/local.js';
+import { sessionTools, type Runner } from '../../src/dispatcher/launcher/local.js';
 import type { GuardrailManifest, RoleName } from '../../src/model/types.js';
 
 /** `.claude/settings.json` registering every factory hook: the installed factory's own. */
@@ -28,6 +29,8 @@ export const quietShell = (args: readonly string[]) => ({
 export interface StreamChange {
   init?: Record<string, unknown>;
   result?: Record<string, unknown>;
+  /** The assistant messages between them; one with no usage by default. */
+  assistants?: Record<string, unknown>[];
 }
 
 /**
@@ -49,8 +52,28 @@ export function sessionStream(args: readonly string[], change: StreamChange = {}
     ...{ num_turns: 3, permission_denials: [], modelUsage: { [model]: {} } },
     ...change.result,
   };
-  const assistant = { type: 'assistant', message: { content: [] } };
-  return [init, assistant, result].map((message) => `${JSON.stringify(message)}\n`).join('');
+  const assistants = change.assistants ?? [{ type: 'assistant', message: { content: [] } }];
+  return [init, ...assistants, result].map((message) => `${JSON.stringify(message)}\n`).join('');
+}
+
+/**
+ * A stand-in session's result for the launch `args`: the passed record written, as the
+ * session-start hook writes it, and each line fed to the launcher's live check as the real runner
+ * feeds them, a line the check stops ending the run there (T061).
+ */
+export function sessionRun(
+  args: readonly string[],
+  stdout: string,
+  options: Parameters<Runner>[2],
+  status = 0,
+  stderr = '',
+) {
+  const at = (flag: string) => args[args.indexOf(flag) + 1] ?? '';
+  const passed = JSON.stringify({ session: at('--session-id') });
+  writeFileSync(join(dirname(at('--settings')), 'passed.json'), passed);
+  for (const text of stdout.split('\n'))
+    if (text !== '' && options.line?.(text) !== undefined) return { status: null, stdout, stderr };
+  return { status, stdout, stderr };
 }
 
 /** A release manifest listing these files with their hashes. */

@@ -168,7 +168,8 @@ export async function startDefine(
       );
       const inbox = await projectInbox(workdir, ctx.env);
       if (inbox === undefined) throw new EnvironmentError(`${workdir} has no .factory/config`);
-      await alert(inbox, { urgency: 'urgent', kind: 'session-failed', text });
+      const urgency = err.urgent ? 'urgent' : 'info';
+      await alert(inbox, { urgency, kind: 'session-failed', text });
       return ExitCode.Refused;
     }
     const why = err instanceof Error ? err.message : String(err);

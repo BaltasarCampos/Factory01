@@ -509,10 +509,15 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   } catch (err) {
     if (err instanceof SessionFailed) {
       const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed`;
-      await alertOnce({ urgency: 'urgent', kind: 'session-failed', text });
+      const urgency = err.urgent ? 'urgent' : 'info';
+      await alertOnce({ urgency, kind: 'session-failed', text });
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;
+    if (err.kind !== undefined) {
+      await alertOnce({ urgency: 'urgent', kind: err.kind, text: err.message });
+      return { ...result, refused: err.message };
+    }
     return refuse(err.message, err.urgent);
   }
   for (const { kind, text } of notices) await alertOnce({ urgency: 'info', kind, text });
