@@ -980,7 +980,8 @@ describe('LocalLauncher (research R8, R9)', () => {
     await expect(during).rejects.toThrow(
       /claude exited 1 after its result "error_during_execution": boom/,
     );
-  });
+    // Four launches: 3.4 s alone, past the 5 s default beside the parallel integration files.
+  }, 15_000);
 
   describe("the session's stream-json (T061)", () => {
     const streamed = (change: StreamChange | ((args: readonly string[]) => string)) =>
