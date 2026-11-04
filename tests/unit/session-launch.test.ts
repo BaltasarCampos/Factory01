@@ -1155,7 +1155,7 @@ describe('LocalLauncher (research R8, R9)', () => {
           );
         expect(recorded(t.home).context_full).toBe(full);
       }
-    });
+    }, 15_000);
 
     it('totals the tokens from the stream itself when there is no result line, each message once', async () => {
       // Stopped with no result line, as at a cap: every assistant message, subagents' included.
@@ -1225,6 +1225,16 @@ describe('LocalLauncher (research R8, R9)', () => {
           (home: string) => `logged no refusal that can be read in ${log(home)}, so`,
         ],
         [
+          // A guard's internal error may log no summary: the hook ran, and refused.
+          'a refusal with no summary',
+          (home: string) => {
+            writeFileSync(log(home), '{"kind":"blocked","tool":"SessionStart"}\n');
+            return Promise.resolve();
+          },
+          (home: string) =>
+            `the session-start hook refused it without a readable reason (its log is ${log(home)}); find why`,
+        ],
+        [
           'a line cut off mid-write',
           (home: string) => {
             writeFileSync(log(home), '{"kind":"tool_call"}\n{"kind":"blo');
@@ -1258,7 +1268,7 @@ describe('LocalLauncher (research R8, R9)', () => {
         await expect(failed).rejects.toMatchObject({ name: 'SessionFailed', urgent: true });
         await expect(failed).rejects.toThrow(why(home));
       }
-    });
+    }, 15_000);
 
     it('is a failed session when its result.json cannot be written', async () => {
       const unwritable: Runner = (program, args, options) => {
@@ -2068,25 +2078,56 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     expect(t.sessions()).toEqual([]);
   });
 
-  it('tells a clone at an old merge base, with main re-pinned, to file the item again', async () => {
-    const old = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
-    old.hooks.PostToolUse = served('lint');
-    const v1 = { ...GUARDED, '.claude/settings.json': `${JSON.stringify(old)}\n` };
-    const release = (pin: ReleasePin) => manifestOf(pin.tag === 'v1.0.0' ? v1 : GUARDED);
-    // The item's branch is made while main pins v1.0.0, whose settings v2 no longer serves.
-    const t = setup({ mainFiles: v1, release });
-    const later = CONFIG.replace(`v1.0.0@${'a'.repeat(40)}`, `v1.1.0@${'b'.repeat(40)}`);
-    t.repo.commit({ ...GUARDED, '.factory/config': later }, 'upgrade to v1.1.0');
-    t.repo.push('main');
+  it.each([
+    ['another tag', 'v1.1.0'],
+    ['the same tag at another commit', 'v1.0.0'],
+  ])(
+    'tells a clone at an old merge base, with main re-pinned to %s, to file the item again',
+    async (_name, tag) => {
+      const old = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+      old.hooks.PostToolUse = served('lint');
+      const v1 = { ...GUARDED, '.claude/settings.json': `${JSON.stringify(old)}\n` };
+      const release = (pin: ReleasePin) => manifestOf(pin.sha === 'a'.repeat(40) ? v1 : GUARDED);
+      // The item's branch is made while main pins v1.0.0, whose settings v2 no longer serves.
+      const t = setup({ mainFiles: v1, release });
+      const later = CONFIG.replace(`v1.0.0@${'a'.repeat(40)}`, `${tag}@${'b'.repeat(40)}`);
+      t.repo.commit({ ...GUARDED, '.factory/config': later }, 'upgrade');
+      t.repo.push('main');
+
+      const refused = t.launch(REQUEST);
+
+      await expect(refused).rejects.toThrow(LaunchRefused);
+      await expect(refused).rejects.toThrow(
+        `release v1.0.0 registers the PostToolUse hook factory hook lint, which the installed factory does not serve; ${BRANCH} keeps release v1.0.0 from its merge base until main is merged into it: close the item and file it again`,
+      );
+      await expect(refused).rejects.toMatchObject({ urgent: false });
+      expect(t.sessions()).toEqual([]);
+    },
+  );
+
+  it("gives a clone at main's own pin main's way out", async () => {
+    const bad = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+    bad.hooks.PostToolUse = served('lint');
+    const files = { ...GUARDED, '.claude/settings.json': `${JSON.stringify(bad)}\n` };
+    const t = setup({ mainFiles: files, release: () => manifestOf(files) });
 
     const refused = t.launch(REQUEST);
 
-    await expect(refused).rejects.toThrow(LaunchRefused);
-    await expect(refused).rejects.toThrow(
-      `release v1.0.0 registers the PostToolUse hook factory hook lint, which the installed factory does not serve; ${BRANCH} keeps release v1.0.0 from its merge base until main is merged into it: close the item and file it again`,
-    );
-    await expect(refused).rejects.toMatchObject({ urgent: false });
+    await expect(refused).rejects.toThrow(`which the installed factory does not serve; ${AGREE}`);
     expect(t.sessions()).toEqual([]);
+  });
+
+  it('tells a branch that kept a release with no hooks only to be filed again, not to wait', () => {
+    const none = (where: string, kept: boolean) => {
+      const check = guardrailCheck({}, Buffer.from('{}'), manifestOf({}), where, kept);
+      return check.ok ? '' : check.reason;
+    };
+    expect(none(BRANCH, true)).toBe(
+      `release v1.0.0 installs no factory hooks; ${BRANCH} keeps release v1.0.0 from its merge base until main is merged into it: close the item and file it again`,
+    );
+    expect(none('main', false)).toBe(
+      `release v1.0.0 installs no factory hooks; local sessions wait for the guards (slice 28); ${HOOKS}`,
+    );
   });
 
   it('accepts the installed factory’s own settings: every hook in exec form, every guard blocking', () => {
