@@ -118,11 +118,13 @@ export function testEnded(ctx: BranchContext, tip: string, mainRef = 'origin/mai
   return false;
 }
 
+/** `issued` hears the manifest commit before it is pushed: local mode's failure record (T061). */
 export function writeStationManifest(
   ctx: BranchContext,
   item: ItemRef,
   session: { station: Station; role: RoleName },
   mainRef = 'origin/main',
+  issued?: (sha: string) => void,
 ): StationManifest {
   const feature = featureOf(item);
   const tip = fetchBranch(ctx, item.branch);
@@ -149,7 +151,8 @@ export function writeStationManifest(
   const path = `specs/${feature}/.station.json`;
   const subject = `station ${String(session.station)} (${session.role}) manifest`;
   const files = { [path]: `${JSON.stringify(manifest, null, 2)}\n` };
-  const sha = commitAndPush(ctx, tip, files, dispatcherMessage(subject, feature), item.branch);
+  const message = dispatcherMessage(subject, feature);
+  const sha = commitAndPush(ctx, tip, files, message, item.branch, issued);
   if (session.station === 4) git(ctx, ['update-ref', issuedRef(item.branch), sha]);
   fetchBranch(ctx, item.branch);
   return manifest;

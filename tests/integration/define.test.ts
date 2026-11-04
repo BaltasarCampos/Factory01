@@ -14,7 +14,7 @@ import {
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { seedState, type FakeIssue } from '../helpers/fake-gh.js';
 import { makeRepo, mergeIntoMain, type Files, type TestRepo } from '../helpers/git-repo.js';
-import { makeKeys, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
+import { makeKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
 import { recordSession, SESSION_ID } from '../helpers/session.js';
 
@@ -400,6 +400,7 @@ describe('dispatcher waits for the Define merge (AC-006, AC-064)', { timeout: 60
       launchers: { local, cloud: new FakeLauncher('cloud') },
       stationPrompt: testPrompts,
       logEvent: () => Promise.resolve(),
+      failures: { home: tempDir(), factory: () => 'f'.repeat(64) },
     };
     return { ctx, local };
   }

@@ -54,6 +54,7 @@ import {
   type Launchers,
   type Notice,
 } from './launcher/types.js';
+import { recordIssued, type FailureRecords } from './failures.js';
 import { tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
@@ -123,6 +124,8 @@ export interface DispatchContext {
   now?: () => Date;
   /** Hears a line about once a minute while a local session runs: `factory run`'s heartbeat. */
   heartbeat?: (line: string) => void;
+  /** Local sessions' failure records, under the Owner's home (T061); a local launch needs them. */
+  failures?: FailureRecords;
   gh?: GhOptions;
 }
 
@@ -479,7 +482,16 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     const ref: ItemRef = { issue: item.issue.number, branch };
     createItemBranch(git, ref, comments, mainRef);
     await ensureDraftPr(repo, { ...ref, title: item.issue.title }, options);
-    const manifest = writeStationManifest(git, ref, { station, role }, mainRef);
+    // In local mode the dispatcher's own manifest commit is known from the failure record alone,
+    // written before the push, so a record that cannot be written pushes nothing (T061).
+    const at = { repo, item: ref.issue, station };
+    const issued =
+      launcher.mode === 'local'
+        ? (sha: string) => {
+            recordIssued(ctx.failures, at, sha);
+          }
+        : undefined;
+    const manifest = writeStationManifest(git, ref, { station, role }, mainRef, issued);
     session = { feature: `specs/${featureOf(ref)}`, files: manifest.files ?? [] };
   }
   const answersFor = (file: QuestionFile | undefined) => {

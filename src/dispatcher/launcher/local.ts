@@ -803,9 +803,12 @@ function startRefusal(home: string, id: string): string {
   const cut =
     unread.length === 0 ? '' : `; ${unparsed(unread)}, which may be a refusal cut off mid-write`;
   const refused = refusals.filter((summary) => summary !== undefined).at(-1);
-  return refused === undefined
-    ? `the session-start hook logged no refusal that can be read in ${log}${cut}, so it failed before it could or never ran; find why before this item's next session`
-    : `the session-start hook refused it: ${visible(refused)}; fix that before this item's next session (its log is ${log}${cut})`;
+  if (refused !== undefined)
+    return `the session-start hook refused it: ${visible(refused)}; fix that before this item's next session (its log is ${log}${cut})`;
+  // A refusal with no summary, such as a guard's internal error: it ran, and refused.
+  return refusals.length > 0
+    ? `the session-start hook refused it without a readable reason (its log is ${log}${cut}); find why before this item's next session`
+    : `the session-start hook logged no refusal that can be read in ${log}${cut}, so it failed before it could or never ran; find why before this item's next session`;
 }
 
 /**
@@ -917,7 +920,9 @@ const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex
 
 /** The events whose hooks are guards: one that cannot run must block the action (T082). */
 const GUARD_EVENTS = new Set(['SessionStart', 'PreToolUse', 'PreCompact']);
-const NO_HOOKS = 'installs no factory hooks; local sessions wait for the guards (slice 28)';
+const NO_HOOKS = 'installs no factory hooks';
+/** Only main's pin can wait for the guards: a branch that kept another release is filed again. */
+const WAIT = '; local sessions wait for the guards (slice 28)';
 /** Main's way out for each reason; a branch's is its own (`guardrailCheck`). */
 const WAYS = {
   // An old pin: only a release that installs them helps.
@@ -927,7 +932,7 @@ const WAYS = {
   // The pin and the installed factory disagree on what is served.
   agree: "install the pinned release, or re-pin main to the installed factory's release",
 } as const;
-type Problem = { why: string; way: keyof typeof WAYS };
+type Problem = { why: string; way: keyof typeof WAYS; wait?: true };
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
 
 /**
@@ -950,7 +955,7 @@ function hookEvents(): Map<string, Set<string>> {
  * Code 2.1.295 or later; undefined when they do.
  */
 function hookProblem(settings: Buffer | undefined): Problem | undefined {
-  const none: Problem = { why: NO_HOOKS, way: 'hooks' };
+  const none: Problem = { why: NO_HOOKS, way: 'hooks', wait: true };
   const repin = (why: string): Problem => ({ why, way: 'repin' });
   const agree = (why: string): Problem => ({ why, way: 'agree' });
   let hooks: unknown;
@@ -1020,7 +1025,8 @@ export function guardrailCheck(
   const way = kept
     ? `${where} keeps release ${manifest.release} from its merge base until main is merged into it: close the item and file it again`
     : WAYS[problem.way];
-  return { ok: false, reason: `release ${manifest.release} ${problem.why}; ${way}` };
+  const why = `${problem.why}${problem.wait === true && !kept ? WAIT : ''}`;
+  return { ok: false, reason: `release ${manifest.release} ${why}; ${way}` };
 }
 
 export interface LocalOptions {

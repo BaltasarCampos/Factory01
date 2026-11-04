@@ -1,10 +1,11 @@
 import { execFileSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
+import { EnvironmentError } from '../../src/cli/env.js';
 import { createItemBranch, dispatcherMessage } from '../../src/dispatcher/branch.js';
 import {
   changedFiles,
@@ -13,6 +14,7 @@ import {
   type DispatchContext,
 } from '../../src/dispatcher/dispatch.js';
 import { gatherEvidence } from '../../src/dispatcher/evidence.js';
+import { failureFile, readFailureRecord } from '../../src/dispatcher/failures.js';
 import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
 import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
@@ -44,6 +46,8 @@ const LABELS = [
   ...['type:feature', 'priority:p2', 'tier:1', 'tier:2', 'tier:3'],
 ].map((name) => ({ name, color: 'ededed', description: '' }));
 const INTAKE_LABELS = ['type:feature', 'priority:p2', 'tier:2'];
+/** The installed factory's hash, as the failure record holds it. */
+const HASH = 'f'.repeat(64);
 
 let owner: TestKeys;
 beforeAll(() => {
@@ -88,12 +92,16 @@ interface Setup {
   pin?: string;
   /** More lines for main's config. */
   config?: string;
+  /** Main's `agents:` setting; default local. */
+  agents?: 'local' | 'cloud';
 }
 
 function setup(options: Setup = {}) {
   const config = `factory_release: ${options.pin ?? PIN}\nrepo: ${REPO}\ninbox_issue: ${String(INBOX)}\n`;
   const project = makeRepo({
-    files: { '.factory/config': `${config}agents: local\n${options.config ?? ''}` },
+    files: {
+      '.factory/config': `${config}agents: ${options.agents ?? 'local'}\n${options.config ?? ''}`,
+    },
     signWith: owner,
   });
   mergeBrief(project, { signWith: owner });
@@ -130,22 +138,27 @@ function setup(options: Setup = {}) {
   const keys = writeKeyFiles([owner], []);
   const local = new FakeLauncher('local');
   const clock = new FakeClock('2026-10-01T10:00:00Z');
+  const home = tempDir();
+  const cloud = new FakeLauncher('cloud');
   const ctx: DispatchContext = {
     projectDir: project.path,
     keysFor: () => keys,
     secondCopy: owner.publicKey,
     auditHistory: () => Promise.resolve({ recreated: [] }),
     gatherEvidence: gatherEvidence({ projectDir: project.path }),
-    launchers: { local, cloud: new FakeLauncher('cloud') },
+    launchers: { local, cloud },
     stationPrompt: testPrompts,
     logEvent: () => Promise.resolve(),
     now: () => clock.now(),
+    failures: { home, factory: () => HASH },
   };
   const repoState = () => readState().repos[REPO] ?? { issues: [], prs: [] };
   return {
     ctx,
     project,
     local,
+    cloud,
+    home,
     labels: () => repoState().issues.find((i) => i.number === ISSUE)?.labels ?? [],
     inbox: () => repoState().issues.find((i) => i.number === INBOX)?.comments ?? [],
     prs: () => repoState().prs,
@@ -1436,6 +1449,47 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
         { station: 2, role: 'spec' },
       ),
     ).toThrow(/does not exist/);
+  });
+
+  const tip = (t: ReturnType<typeof setup>) => {
+    t.project.git(['fetch', '-q', 'origin']);
+    return t.project.git(['rev-parse', `origin/${BRANCH}`]);
+  };
+
+  it('in local mode records its manifest commit before pushing it, and in cloud mode records nothing (T061)', async () => {
+    const t = setup();
+    await dispatchOnce(t.ctx); // creates the branch and the Specify (station 2) manifest
+
+    expect(t.local.launches).toHaveLength(1);
+    const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
+    expect(record).toEqual({ head: tip(t), factory: HASH, count: 0 });
+    expect(t.show(`${FEATURE}/.station.json`)).toMatch(/"station": 2/);
+
+    const cloud = setup({ agents: 'cloud' });
+    await dispatchOnce(cloud.ctx);
+    expect(cloud.cloud.launches).toHaveLength(1);
+    expect(readdirSync(cloud.home)).toEqual([]);
+  });
+
+  it('pushes no manifest when its record cannot be written or the factory cannot be hashed (T061)', async () => {
+    const unhashable = () => {
+      throw new EnvironmentError('the installed factory cannot be hashed: x: EACCES');
+    };
+    const cases = [
+      [true, () => HASH, /^the failure record .*2-2\.json cannot be written: /],
+      [false, unhashable, /^the installed factory cannot be hashed: /],
+    ] as const;
+    for (const [blocked, factory, why] of cases) {
+      const t = setup({ branch: CREATED, states: ['state:triaged'] });
+      if (blocked) writeFileSync(join(t.home, '.factory'), '');
+      t.ctx.failures = { home: t.home, factory };
+      const before = tip(t);
+
+      await expect(dispatchOnce(t.ctx)).rejects.toThrow(why);
+
+      expect(tip(t)).toBe(before);
+      expect(t.local.launches).toEqual([]);
+    }
   });
 });
 
