@@ -14,11 +14,13 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   factoryHash,
+  hashOnce,
   failureFile,
   readFailureRecord,
   recordIssued,
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
+import { installedHash } from '../../src/dispatcher/launcher/local.js';
 import { tempDir } from '../helpers/keys.js';
 
 const HEAD = 'c'.repeat(40);
@@ -78,10 +80,35 @@ describe('the failure record of local sessions (T061)', () => {
     const on = failureFile(blocked, 'owner/project', 42, 4);
     expect(() => {
       writeFailureRecord(on, { head: HEAD, factory: FACTORY, count: 0 });
-    }).toThrow(new RegExp(`^the failure record ${on} cannot be written: `));
+    }).toThrow(
+      new RegExp(`^the failure record ${on} cannot be written: .*; check that .* free space`),
+    );
+    // One the reader would refuse is never written.
+    expect(() => {
+      writeFailureRecord(file, { head: 'main', factory: FACTORY, count: 0 });
+    }).toThrow(`the failure record ${file} is not written: {"head":"main",`);
+    rmSync(file, { recursive: true });
+    expect(() => {
+      writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: -1 });
+    }).toThrow(/is malformed$/);
+    expect(readFailureRecord(file)).toBeUndefined();
     expect(() => {
       recordIssued(undefined, { repo: 'owner/project', item: 42, station: 4 }, HEAD);
     }).toThrow(/no failure records are set up/);
+  });
+
+  it.each(['owner/..', 'owner/.', '../project', 'owner/project/x', 'owner', 'own er/project'])(
+    'has no file for %j, which is not a GitHub owner/name',
+    (repo) => {
+      expect(() => failureFile(tempDir(), repo, 42, 4)).toThrow(/is not a GitHub owner\/name/);
+    },
+  );
+
+  it('keeps one record for a repo whatever its case, as GitHub does', () => {
+    const home = tempDir();
+    expect(failureFile(home, 'Owner/Project.Name', 42, 4)).toBe(
+      failureFile(home, 'owner/project.name', 42, 4),
+    );
   });
 
   it('replaces a record whole, so a reader sees the old one or the new one', () => {
@@ -136,7 +163,8 @@ describe("the installed factory's hash (T061)", () => {
     writeFileSync(join(t.root, 'README.md'), 'x\n');
     expect(t.hash()).toBe(before);
     // The real one: the folder this code runs from and factory/.
-    expect(factoryHash()).toMatch(/^[0-9a-f]{64}$/);
+    expect(installedHash()).toMatch(/^[0-9a-f]{64}$/);
+    expect(installedHash()).not.toBe(factoryHash(join(import.meta.dirname, '../..'), ['factory']));
   });
 
   it('hashes a symlink as its link, never following it', () => {
@@ -158,7 +186,7 @@ describe("the installed factory's hash (T061)", () => {
     const fifo = join(t.root, 'factory', 'pipe');
     execFileSync('mkfifo', [fifo]);
     expect(t.hash).toThrow(
-      `the installed factory cannot be hashed: ${fifo}: it is not a regular file, a folder or a symlink`,
+      `the installed factory cannot be hashed: ${fifo}: it is not a regular file, a folder or a symlink; reinstall the pinned release, or remove that file if it is not the factory's`,
     );
     rmSync(fifo);
     const secret = join(t.root, 'dist', 'cli', 'main.js');
@@ -170,5 +198,15 @@ describe("the installed factory's hash (T061)", () => {
       );
     chmodSync(secret, 0o644);
     expect(() => factoryHash(t.root, ['dist', 'missing'])).toThrow(/missing: .*ENOENT/);
+  });
+
+  it('takes the hash once, so a release installed later does not change it', () => {
+    const t = installed();
+    const hash = hashOnce(t.root, ['dist', 'factory']);
+    writeFileSync(join(t.root, 'factory', 'policy', 'roles.yaml'), 'roles: { new: {} }\n');
+    expect(hash()).not.toBe(t.hash());
+    // One that cannot be taken is an error only once the hash is needed.
+    const broken = hashOnce(t.root, ['dist', 'missing']);
+    expect(broken).toThrow(/cannot be hashed: .*missing: .*ENOENT/);
   });
 });

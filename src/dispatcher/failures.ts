@@ -16,7 +16,6 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { EnvironmentError } from '../cli/env.js';
 import type { Station } from '../model/types.js';
 import { visible } from '../notify/summary.js';
@@ -26,7 +25,7 @@ export interface FailureRecord {
   head: string;
   /** The installed factory's hash when the manifest was issued (`factoryHash`). */
   factory: string;
-  /** The failed attempts at `head`. */
+  /** The attempts at `head`, each counted when it starts. */
   count: number;
   /** The last attempt's failure. */
   last?: string;
@@ -41,8 +40,37 @@ export interface FailureRecords {
 const why = (err: unknown) => visible(err instanceof Error ? err.message : String(err));
 const OUT = 'delete it, by its path, to start its count again';
 
-export const failureFile = (home: string, repo: string, item: number, station: Station) =>
-  join(home, '.factory', 'failures', ...repo.split('/'), `${String(item)}-${String(station)}.json`);
+/**
+ * The record's file for `repo`, exactly `owner/name` in GitHub's name characters, neither part
+ * `.` or `..`, both lower-cased, since GitHub names ignore case.
+ */
+export function failureFile(home: string, repo: string, item: number, station: Station) {
+  const parts = repo.toLowerCase().split('/');
+  const [owner = '', name = ''] = parts;
+  if (parts.length !== 2 || !/^[a-z0-9-]+$/.test(owner) || !/^(?!\.\.?$)[a-z0-9._-]+$/.test(name))
+    throw new EnvironmentError(
+      `${visible(repo)} is not a GitHub owner/name: it has no failure record`,
+    );
+  return join(home, '.factory', 'failures', owner, name, `${String(item)}-${String(station)}.json`);
+}
+
+/** Whether `value` is a record: what is read, and what may be written. */
+function isRecord(value: unknown): value is FailureRecord {
+  const record = (value ?? {}) as Record<string, unknown>;
+  const fields = ['head', 'factory', 'count', 'last'];
+  return (
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(record).every((key) => fields.includes(key)) &&
+    typeof record.head === 'string' &&
+    /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(record.head) &&
+    typeof record.factory === 'string' &&
+    /^[0-9a-f]{64}$/.test(record.factory) &&
+    Number.isSafeInteger(record.count) &&
+    (record.count as number) >= 0 &&
+    (record.last === undefined || typeof record.last === 'string')
+  );
+}
 
 /** The record at `file`; undefined when there is none. */
 export function readFailureRecord(file: string): FailureRecord | undefined {
@@ -59,25 +87,20 @@ export function readFailureRecord(file: string): FailureRecord | undefined {
   } catch (err) {
     throw new EnvironmentError(`the failure record ${file} is not JSON: ${why(err)}; ${OUT}`);
   }
-  const record = (value ?? {}) as Record<string, unknown>;
-  const fields = ['head', 'factory', 'count', 'last'];
-  const ok =
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    Object.keys(record).every((key) => fields.includes(key)) &&
-    typeof record.head === 'string' &&
-    /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(record.head) &&
-    typeof record.factory === 'string' &&
-    /^[0-9a-f]{64}$/.test(record.factory) &&
-    Number.isSafeInteger(record.count) &&
-    (record.count as number) >= 0 &&
-    (record.last === undefined || typeof record.last === 'string');
-  if (!ok) throw new EnvironmentError(`the failure record ${file} is malformed; ${OUT}`);
-  return record as unknown as FailureRecord;
+  if (!isRecord(value))
+    throw new EnvironmentError(`the failure record ${file} is malformed; ${OUT}`);
+  return value;
 }
 
-/** Writes the record by rename; one that cannot be written throws, naming the file. */
+/**
+ * Writes the record by rename; one the reader would refuse, or one that cannot be written, throws,
+ * naming the file, so a bad record never stops every later pass.
+ */
 export function writeFailureRecord(file: string, record: FailureRecord): void {
+  if (!isRecord(record))
+    throw new EnvironmentError(
+      `the failure record ${file} is not written: ${visible(JSON.stringify(record))} is malformed`,
+    );
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
@@ -89,7 +112,9 @@ export function writeFailureRecord(file: string, record: FailureRecord): void {
     } catch {
       // Its folder cannot be reached either: there is no temporary file to remove.
     }
-    throw new EnvironmentError(`the failure record ${file} cannot be written: ${why(err)}`);
+    throw new EnvironmentError(
+      `the failure record ${file} cannot be written: ${why(err)}; check that ${dirname(file)} can be written and its disk has free space, then run the factory again`,
+    );
   }
 }
 
@@ -108,26 +133,20 @@ export function recordIssued(
   writeFailureRecord(file, { head, factory: records.factory(), count: 0 });
 }
 
-/** The installed factory: the folder its code runs from, `dist/` or `src/`, and `factory/`. */
-const ROOT = fileURLToPath(new URL('../..', import.meta.url));
-const CODE = fileURLToPath(new URL('..', import.meta.url))
-  .slice(ROOT.length)
-  .replace(/\/$/, '');
-
 /**
  * A SHA-256 over every file of `folders` under `root`, each by its path from `root` and its
  * contents, in a fixed sorted order, so a renamed or moved file changes it too; a symlink is
  * hashed as its link, never followed. Anything else, or anything that cannot be read, throws,
  * naming it: never an empty or partial hash.
  */
-export function factoryHash(root = ROOT, folders: readonly string[] = [CODE, 'factory']): string {
+export function factoryHash(root: string, folders: readonly string[]): string {
   const hash = createHash('sha256');
   const named = <T>(path: string, read: () => T): T => {
     try {
       return read();
     } catch (err) {
       throw new EnvironmentError(
-        `the installed factory cannot be hashed: ${join(root, path)}: ${why(err)}`,
+        `the installed factory cannot be hashed: ${join(root, path)}: ${why(err)}; reinstall the pinned release, or remove that file if it is not the factory's`,
       );
     }
   };
@@ -151,4 +170,19 @@ export function factoryHash(root = ROOT, folders: readonly string[] = [CODE, 'fa
   };
   for (const folder of folders) add(folder);
   return hash.digest('hex');
+}
+
+/**
+ * The factory's hash under `root`, taken now, once: what a long run records is the release it
+ * started with. A failure to take it is raised only when the hash is needed.
+ */
+export function hashOnce(root: string, folders: readonly string[]): () => string {
+  try {
+    const hash = factoryHash(root, folders);
+    return () => hash;
+  } catch (err) {
+    return () => {
+      throw err;
+    };
+  }
 }

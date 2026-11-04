@@ -55,7 +55,8 @@ import {
   statSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { EnvironmentError } from '../../cli/env.js';
 import { SERVED_HOOKS } from '../../commands/hook.js';
 import { WRAPPERS } from '../../guard/command-guard.js';
@@ -77,6 +78,7 @@ import type { GuardrailManifest, ProjectConfig, ReleasePin, RoleName } from '../
 import { ReleaseTagError } from '../../release/tag.js';
 import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
+import { factoryHash, hashOnce } from '../failures.js';
 import {
   LaunchRefused,
   SessionCapped,
@@ -334,9 +336,21 @@ export const localInvocation = (
   request.prompt,
 ];
 
-const FACTORY = new URL('../../../factory/', import.meta.url);
+/** The installed factory's root, holding `factory/` and its code's folder, `dist/` or `src/`. */
+const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
+const FOLDERS = [relative(ROOT, fileURLToPath(import.meta.url)).split(sep)[0] ?? '', 'factory'];
+let installed: (() => string) | undefined;
+/**
+ * At `factory dispatch` or `factory run`'s start, the installed factory's hash, so a release
+ * installed while it runs never gives the code it started with the new release's hash.
+ */
+export function snapshotFactory(): void {
+  installed = hashOnce(ROOT, FOLDERS);
+}
+/** The installed factory's hash: the one taken at the start, or taken now when none was. */
+export const installedHash = () => installed?.() ?? factoryHash(ROOT, FOLDERS);
 /** A file of the installed factory, never the release a branch pins. */
-const factoryFile = (path: string) => readFileSync(new URL(path, FACTORY), 'utf8');
+const factoryFile = (path: string) => readFileSync(join(ROOT, 'factory', path), 'utf8');
 const factoryPolicy = () => loadPolicy(factoryFile('policy/roles.yaml'));
 
 /**
