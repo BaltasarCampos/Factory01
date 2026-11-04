@@ -54,7 +54,7 @@ import {
   type Launchers,
   type Notice,
 } from './launcher/types.js';
-import { recordIssued, type FailureRecords } from './failures.js';
+import { recordIssued, recordSession, type FailureRecords } from './failures.js';
 import { tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
@@ -478,6 +478,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     );
   // The feature folder and the task's files, for the session's own settings (T061).
   let session = { feature: '', files: [] as readonly string[] };
+  let starting: { starting: (id: string) => void } | undefined;
   if (station >= 2 && station <= 6) {
     const ref: ItemRef = { issue: item.issue.number, branch };
     createItemBranch(git, ref, comments, mainRef);
@@ -489,6 +490,11 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       launcher.mode === 'local'
         ? (sha: string, parent: string) => {
             recordIssued(ctx.failures, at, sha, parent);
+            starting = {
+              starting: (id) => {
+                recordSession(ctx.failures, at, sha, id);
+              },
+            };
           }
         : undefined;
     const manifest = writeStationManifest(git, ref, { station, role }, mainRef, issued);
@@ -525,6 +531,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       item: item.issue.number,
       branch,
       ...session,
+      ...starting,
       prompt,
       heartbeat: ({ elapsed, turns }) => {
         const minutes = `${String(Math.floor(elapsed / 60_000))} min`;

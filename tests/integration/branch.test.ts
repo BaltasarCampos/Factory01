@@ -1467,7 +1467,8 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
 
     expect(t.local.launches).toHaveLength(1);
     const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
-    expect(record).toEqual({ head: tip(t), factory: HASH, count: 0 });
+    // The session's id is in it before the session can run.
+    expect(record).toEqual({ head: tip(t), factory: HASH, count: 0, session: 'fake-local-1' });
     expect(t.show(`${FEATURE}/.station.json`)).toMatch(/"station": 2/);
 
     const cloud = setup({ agents: 'cloud' });

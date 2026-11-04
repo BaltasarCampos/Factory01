@@ -236,6 +236,25 @@ const sessionFiles = (home: string, id = FIRST) => {
 };
 
 describe('LocalLauncher (research R8, R9)', () => {
+  it("gives its caller the session's id just before claude spawns, and spawns none when that throws (T061)", async () => {
+    const t = setup();
+    const heard: { id: string; ran: number }[] = [];
+    await t.launch({ ...REQUEST, starting: (id) => heard.push({ id, ran: t.sessions().length }) });
+    expect(heard).toEqual([{ id: FIRST, ran: 0 }]);
+    expect(t.sessions()).toHaveLength(1);
+
+    const u = setup();
+    const unwritable = () => {
+      throw new EnvironmentError('the failure record /r cannot be written: EROFS; check that /r');
+    };
+    const refused = u.launch({ ...REQUEST, starting: unwritable });
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(
+      'no local session started: the failure record /r cannot be written: EROFS; check that /r',
+    );
+    expect(u.sessions()).toEqual([]);
+  });
+
   it('runs claude in a fresh clone of its own on the item branch, never in the Owner’s working copy', async () => {
     const t = setup();
     const before = t.owner();

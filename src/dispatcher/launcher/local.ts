@@ -1392,6 +1392,13 @@ export class LocalLauncher implements SessionLauncher {
         // From the spawn to the return, every failure is a session that ran on the Owner's plan.
         const session = async (): Promise<LaunchResult> => {
           let result: Awaited<ReturnType<Runner>>;
+          // Its id in its failure record first: a session the count cannot see never starts.
+          try {
+            request.starting?.(files.id);
+          } catch (err) {
+            const why = err instanceof Error ? err.message : String(err);
+            throw new LaunchRefused(`no local session started: ${visible(why)}`);
+          }
           try {
             const invocation = localInvocation(request, files, model, caps.turns);
             result = await this.run('claude', invocation, {

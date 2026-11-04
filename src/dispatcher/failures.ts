@@ -29,6 +29,8 @@ export interface FailureRecord {
   count: number;
   /** The last attempt's failure. */
   last?: string;
+  /** The id of the last session started at `head`, whose group tells whether it still runs. */
+  session?: string;
 }
 
 /** Where local sessions' failure records live, and the installed factory's hash. */
@@ -57,7 +59,7 @@ export function failureFile(home: string, repo: string, item: number, station: S
 /** Whether `value` is a record: what is read, and what may be written. */
 function isRecord(value: unknown): value is FailureRecord {
   const record = (value ?? {}) as Record<string, unknown>;
-  const fields = ['head', 'factory', 'count', 'last'];
+  const fields = ['head', 'factory', 'count', 'last', 'session'];
   return (
     typeof value === 'object' &&
     !Array.isArray(value) &&
@@ -68,7 +70,9 @@ function isRecord(value: unknown): value is FailureRecord {
     /^[0-9a-f]{64}$/.test(record.factory) &&
     Number.isSafeInteger(record.count) &&
     (record.count as number) >= 0 &&
-    (record.last === undefined || typeof record.last === 'string')
+    (record.last === undefined || typeof record.last === 'string') &&
+    (record.session === undefined ||
+      (typeof record.session === 'string' && /^[0-9A-Za-z-]{1,64}$/.test(record.session)))
   );
 }
 
@@ -138,6 +142,27 @@ export function recordIssued(
       `no manifest is pushed on ${parent.slice(0, 12)}: the failure record ${file} names it as the dispatcher's own manifest, which a new one never stacks on; ${OUT}`,
     );
   writeFailureRecord(file, { head, factory: records.factory(), count: 0 });
+}
+
+/**
+ * The session about to start at `head`, the record's: its id goes in the record before it can
+ * run, so a record that cannot be read, names another head or cannot be written refuses it.
+ */
+export function recordSession(
+  records: FailureRecords | undefined,
+  at: { repo: string; item: number; station: Station },
+  head: string,
+  session: string,
+): void {
+  if (records === undefined)
+    throw new EnvironmentError('no failure records are set up for local sessions');
+  const file = failureFile(records.home, at.repo, at.item, at.station);
+  const record = readFailureRecord(file);
+  if (record?.head !== head)
+    throw new EnvironmentError(
+      `the failure record ${file} does not name ${head.slice(0, 12)}, the manifest this session starts on; run the factory again`,
+    );
+  writeFailureRecord(file, { ...record, session });
 }
 
 /**

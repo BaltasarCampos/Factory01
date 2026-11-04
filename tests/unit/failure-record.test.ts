@@ -18,6 +18,7 @@ import {
   failureFile,
   readFailureRecord,
   recordIssued,
+  recordSession,
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
 import { installedHash } from '../../src/dispatcher/launcher/local.js';
@@ -56,6 +57,7 @@ describe('the failure record of local sessions (T061)', () => {
     ['a head that is not a commit', { head: 'main' }, /is malformed/],
     ['a factory that is not a hash', { factory: '' }, /is malformed/],
     ['a last failure that is not text', { last: 1 }, /is malformed/],
+    ['a session that is not an id', { session: '../x' }, /is malformed/],
     ['a field of its own', { extra: true }, /is malformed/],
   ] as const)('stops, naming the file, at a record that is %s', (_name, change, why) => {
     const home = tempDir();
@@ -96,6 +98,31 @@ describe('the failure record of local sessions (T061)', () => {
     expect(() => {
       recordIssued(undefined, { repo: 'owner/project', item: 42, station: 4 }, HEAD, HEAD);
     }).toThrow(/no failure records are set up/);
+  });
+
+  it('records the session about to start at its head, and refuses one it cannot record', () => {
+    const home = tempDir();
+    const records = { home, factory: () => FACTORY };
+    const at = { repo: 'owner/project', item: 42, station: 4 } as const;
+    const file = failureFile(home, 'owner/project', 42, 4);
+    const none = `the failure record ${file} does not name ${HEAD.slice(0, 12)}, the manifest`;
+    expect(() => {
+      recordSession(records, at, HEAD, 'id-1');
+    }).toThrow(none);
+    writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 1 });
+    recordSession(records, at, HEAD, 'id-1');
+    expect(readFailureRecord(file)).toEqual({
+      head: HEAD,
+      factory: FACTORY,
+      count: 1,
+      session: 'id-1',
+    });
+    expect(() => {
+      recordSession(records, at, 'd'.repeat(40), 'id-2');
+    }).toThrow(/does not name dddddddddddd/);
+    expect(() => {
+      recordSession(records, at, HEAD, '../x');
+    }).toThrow(/is not written/);
   });
 
   it.each(['owner/..', 'owner/.', '../project', 'owner/project/x', 'owner', 'own er/project'])(
