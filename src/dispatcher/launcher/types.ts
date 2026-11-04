@@ -74,6 +74,8 @@ export class LaunchRefused extends RefusedError {
  */
 export class SessionFailed extends RefusedError {
   readonly urgent: boolean;
+  /** Its PreCompact hook blocked a compaction: the item is too big for one session (T061). */
+  contextFull?: boolean;
 
   constructor(message: string, urgent: boolean) {
     super(message);

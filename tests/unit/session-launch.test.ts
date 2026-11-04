@@ -37,6 +37,7 @@ import {
   type LaunchRequest,
 } from '../../src/dispatcher/launcher/types.js';
 import { roleVersion } from '../../src/events/schema.js';
+import { runPreCompact } from '../../src/hooks/pre-compact.js';
 import { logBlocked, readSessionRecord } from '../../src/hooks/session.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
 import { MCP_JSON } from '../../src/install/render.js';
@@ -1058,7 +1059,52 @@ describe('LocalLauncher (research R8, R9)', () => {
         ...{ turns: 3, assistant_lines: 4, num_turns: 3, duration_ms: null },
         // The result's per-model totals, summed.
         tokens: { input: 11, output: 22, cache_read: 30, cache_creation: 40, source: 'result' },
+        context_full: false,
       });
+    });
+
+    it('a failed session whose PreCompact hook blocked a compaction is too big for one session', async () => {
+      const cases = [
+        // Logged by the hook itself, so a change in what it logs fails this test.
+        [
+          (home: string) =>
+            runPreCompact(
+              { session_id: FIRST },
+              { cwd: home, now: () => new Date(), env: { HOME: home } },
+            ),
+          true,
+        ],
+        // A line cut off mid-write could be that event: the log cannot tell.
+        [
+          (home: string) => {
+            writeFileSync(
+              join(home, '.factory', 'sessions', FIRST, 'events.jsonl'),
+              '{"kind":"blo',
+            );
+            return Promise.resolve();
+          },
+          null,
+        ],
+      ] as const;
+      for (const [write, full] of cases) {
+        let home = '';
+        const compacted: Runner = async (program, args, options) => {
+          if (args[0] === '-p') await write(home);
+          return fakeRunner(1).run(program, args, options);
+        };
+        const t = setup({ run: compacted });
+        home = t.home;
+        const failed = t.launch(REQUEST);
+        await expect(failed).rejects.toThrow(SessionFailed);
+        await expect(failed).rejects.toMatchObject({
+          contextFull: full === true ? true : undefined,
+        });
+        if (full === true)
+          await expect(failed).rejects.toThrow(
+            /its context was full: the item is too big for one session; split it/,
+          );
+        expect(recorded(t.home).context_full).toBe(full);
+      }
     });
 
     it('totals the tokens from the stream itself when there is no result line, each message once', async () => {

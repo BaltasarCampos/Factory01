@@ -626,6 +626,8 @@ interface Read {
   ids: Set<string>;
   /** Each assistant message's usage, subagents' included, by message id, so each counts once. */
   usage: Map<string, Message>;
+  /** Whether its PreCompact hook blocked a compaction, null when its log cannot tell. */
+  full?: boolean | null;
   /** The longest the watchdog heard nothing, from the spawn to the end, in ms. */
   silence: number;
 }
@@ -691,6 +693,7 @@ function reported({ init = {}, result = {}, ...read }: Read, elapsed: number) {
     elapsed_ms: elapsed,
     longest_silence_ms: read.silence,
     tokens: tokens(result, read.usage),
+    context_full: read.full ?? null,
   };
 }
 
@@ -732,17 +735,16 @@ const mismatch = (problems: readonly string[]) =>
   new SessionFailed(`its init message does not match its launch: ${problems.join('; ')}`, true);
 
 /**
- * Why a session's start failed, from its own log (T061): the session-start hook's last refusal,
- * through `visible()`, or that it logged none, and where the log is.
+ * The summaries of a session log's `blocked` events from the hook of `tool`, and the non-empty
+ * lines that do not parse; a missing log has none, and one that cannot be read says why.
  */
-function startRefusal(home: string, id: string): string {
-  const log = sessionEvents(home, id);
+function blocked(log: string, tool: string) {
   let text = '';
   try {
     text = readFileSync(log, 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
-      return `its log ${log} cannot be read: ${visible(err instanceof Error ? err.message : String(err))}`;
+      return { error: visible(err instanceof Error ? err.message : String(err)) };
   }
   const unread: number[] = [];
   const refusals = text.split('\n').flatMap((line, at) => {
@@ -750,7 +752,7 @@ function startRefusal(home: string, id: string): string {
     try {
       const e = JSON.parse(line) as Message;
       const summary = e.input_summary;
-      return e.kind === 'blocked' && e.tool === 'SessionStart' && typeof summary === 'string'
+      return e.kind === 'blocked' && e.tool === tool && typeof summary === 'string'
         ? [summary]
         : [];
     } catch {
@@ -758,6 +760,30 @@ function startRefusal(home: string, id: string): string {
       return [];
     }
   });
+  return { refusals, unread };
+}
+
+/**
+ * Whether the session's PreCompact hook blocked a compaction, from its own log: its context was
+ * full, so its item is too big for one session (T061). Null when the log cannot tell, unreadable
+ * or with a line that does not parse.
+ */
+function contextFull(home: string, id: string): boolean | null {
+  const read = blocked(sessionEvents(home, id), 'PreCompact');
+  if ('error' in read) return null;
+  if (read.refusals.length > 0) return true;
+  return read.unread.length === 0 ? false : null;
+}
+
+/**
+ * Why a session's start failed, from its own log (T061): the session-start hook's last refusal,
+ * through `visible()`, or that it logged none, and where the log is.
+ */
+function startRefusal(home: string, id: string): string {
+  const log = sessionEvents(home, id);
+  const read = blocked(log, 'SessionStart');
+  if ('error' in read) return `its log ${log} cannot be read: ${read.error}`;
+  const { refusals, unread } = read;
   // A hook killed mid-write leaves a line that does not parse, which may be its refusal.
   const cut =
     unread.length === 0
@@ -1388,6 +1414,12 @@ export class LocalLauncher implements SessionLauncher {
         } finally {
           clearInterval(beat);
         }
+        // A blocked compaction: the item is too big for one session, which no retry changes.
+        live.full = contextFull(this.options.home, files.id);
+        if (failure !== undefined && live.full) {
+          failure.message += `; its PreCompact hook blocked a compaction, so its context was full: the item is too big for one session; split it`;
+          failure.contextFull = true;
+        }
         // What it reported, kept for every session that spawned, a failed one too.
         try {
           const ended = Date.now();
@@ -1396,10 +1428,9 @@ export class LocalLauncher implements SessionLauncher {
           writeFileSync(join(dirname(files.record), 'result.json'), `${text}\n`, WRITE_ONCE);
         } catch (err) {
           const why = `its result.json could not be written: ${visible(err instanceof Error ? err.message : String(err))}`;
-          failure =
-            failure === undefined
-              ? streamFailed(why)
-              : new SessionFailed(`${failure.message}; ${why}`, failure.urgent);
+          // Added to the failure, which keeps its kind, its urgency and its full context.
+          if (failure === undefined) failure = streamFailed(why);
+          else failure.message += `; ${why}`;
         }
         if (outcome === undefined) throw failure ?? streamFailed('it ended with no outcome');
         if (failure !== undefined) throw failure;
