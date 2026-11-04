@@ -980,7 +980,8 @@ describe('LocalLauncher (research R8, R9)', () => {
     await expect(during).rejects.toThrow(
       /claude exited 1 after its result "error_during_execution": boom/,
     );
-  });
+    // Four launches: 3.4 s alone, past the 5 s default beside the parallel integration files.
+  }, 15_000);
 
   describe("the session's stream-json (T061)", () => {
     const streamed = (change: StreamChange | ((args: readonly string[]) => string)) =>
@@ -1032,7 +1033,7 @@ describe('LocalLauncher (research R8, R9)', () => {
               ...{ inputTokens: 10, outputTokens: 20 },
               ...{ cacheReadInputTokens: 30, cacheCreationInputTokens: 40 },
             },
-            'claude-opus-5-5': { inputTokens: 1, outputTokens: 2 },
+            'claude-opus-5-5': { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 0 },
           },
           num_turns: 3,
         };
@@ -1057,30 +1058,79 @@ describe('LocalLauncher (research R8, R9)', () => {
         longest_line: longest,
         // A line with no message id is a turn of its own.
         ...{ turns: 3, assistant_lines: 4, num_turns: 3, duration_ms: null },
-        // The result's per-model totals, summed.
-        tokens: { input: 11, output: 22, cache_read: 30, cache_creation: 40, source: 'result' },
+        // The result's per-model totals, summed, for a field every entry has: one lacks
+        // cache_creation, so that field is the stream's own sum, a lower bound.
+        tokens: {
+          ...{ input: { total: 11, source: 'result' }, output: { total: 22, source: 'result' } },
+          cache_read: { total: 30, source: 'result' },
+          cache_creation: { total: 0 + 1 + 0 + 0, source: 'stream' },
+        },
         context_full: false,
       });
+    });
+
+    const events = (home: string) => join(home, '.factory', 'sessions', FIRST, 'events.jsonl');
+    const compacting = (home: string) =>
+      runPreCompact(
+        { session_id: FIRST },
+        { cwd: home, now: () => new Date(), env: { HOME: home } },
+      );
+
+    it('a session that ends well with a blocked compaction records it and throws nothing', async () => {
+      let home = '';
+      const compacted: Runner = async (program, args, options) => {
+        if (args[0] === '-p') await compacting(home);
+        return fakeRunner().run(program, args, options);
+      };
+      const t = setup({ run: compacted });
+      home = t.home;
+      await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+      expect(recorded(t.home).context_full).toBe(true);
+    });
+
+    it('a capped session whose result.json cannot be written stays capped, its full context kept', async () => {
+      let home = '';
+      const capped: Runner = async (program, args, options) => {
+        if (args[0] !== '-p') return fakeRunner().run(program, args, options);
+        await compacting(home);
+        mkdirSync(join(dirname(args[args.indexOf('--settings') + 1] ?? ''), 'result.json'));
+        const text = sessionStream(args, { result: { subtype: 'error_max_turns' } });
+        return sessionRun(args, text, options);
+      };
+      const t = setup({ run: capped });
+      home = t.home;
+      const failed = t.launch(REQUEST);
+      await expect(failed).rejects.toThrow(SessionCapped);
+      await expect(failed).rejects.toMatchObject({ contextFull: true, urgent: false });
+      await expect(failed).rejects.toThrow(
+        /its context was full: .*; its result.json could not be written: .*EEXIST/,
+      );
     });
 
     it('a failed session whose PreCompact hook blocked a compaction is too big for one session', async () => {
       const cases = [
         // Logged by the hook itself, so a change in what it logs fails this test.
+        [compacting, true],
+        // A guard's internal error may log no summary: it still blocked the compaction.
         [
-          (home: string) =>
-            runPreCompact(
-              { session_id: FIRST },
-              { cwd: home, now: () => new Date(), env: { HOME: home } },
-            ),
+          (home: string) => {
+            writeFileSync(events(home), '{"kind":"blocked","tool":"PreCompact"}\n');
+            return Promise.resolve();
+          },
           true,
         ],
         // A line cut off mid-write could be that event: the log cannot tell.
         [
           (home: string) => {
-            writeFileSync(
-              join(home, '.factory', 'sessions', FIRST, 'events.jsonl'),
-              '{"kind":"blo',
-            );
+            writeFileSync(events(home), '{"kind":"blo');
+            return Promise.resolve();
+          },
+          null,
+        ],
+        // Nor can a log that cannot be read.
+        [
+          (home: string) => {
+            mkdirSync(events(home));
             return Promise.resolve();
           },
           null,
@@ -1114,10 +1164,26 @@ describe('LocalLauncher (research R8, R9)', () => {
       const t = setup({ run: fakeRunner(1, stream).run });
       await expect(t.launch(REQUEST)).rejects.toThrow(/claude exited 1/);
       // msg_1's two lines once (its last), the subagent's, msg_2's and the line with no id.
+      const summed = (total: number) => ({ total, source: 'stream' });
       expect(recorded(t.home).tokens).toEqual({
-        ...{ input: 5 + 1 + 1 + 1, output: 4 * 9999 },
-        ...{ cache_read: 3000 + 1 + 100 + 100, cache_creation: 0 + 1 + 0 + 0 },
-        source: 'stream',
+        ...{ input: summed(5 + 1 + 1 + 1), output: summed(4 * 9999) },
+        ...{ cache_read: summed(3000 + 1 + 100 + 100), cache_creation: summed(0 + 1 + 0 + 0) },
+      });
+    });
+
+    it('never reads result entries it cannot read as nothing spent: the stream sums them, or null', async () => {
+      // Entries with other field names, or none: each field the stream's, null where it has none.
+      const only = { type: 'assistant', message: { id: 'msg_1', usage: { input_tokens: 5 } } };
+      const t = streamed((args) =>
+        sessionStream(args, {
+          assistants: [only],
+          result: { modelUsage: { 'claude-sonnet-5-5': {}, 'claude-opus-5-5': { tokens: 3 } } },
+        }),
+      );
+      await expect(t.launch(REQUEST)).resolves.toEqual({ sessionId: FIRST });
+      expect(recorded(t.home).tokens).toEqual({
+        ...{ input: { total: 5, source: 'stream' }, output: null },
+        ...{ cache_read: null, cache_creation: null },
       });
     });
 
@@ -1166,6 +1232,15 @@ describe('LocalLauncher (research R8, R9)', () => {
           },
           (home: string) =>
             `logged no refusal that can be read in ${log(home)}; line 2 of it does not parse, which may be a refusal cut off mid-write`,
+        ],
+        [
+          'five lines that do not parse',
+          (home: string) => {
+            writeFileSync(log(home), '{\n'.repeat(5));
+            return Promise.resolve();
+          },
+          (home: string) =>
+            `in ${log(home)}; lines 1, 2, 3 and 2 more of it do not parse, which may be`,
         ],
       ] as const;
       for (const [, write, why] of cases) {
@@ -1500,7 +1575,8 @@ describe('LocalLauncher (research R8, R9)', () => {
           ) as Record<string, number>;
           // A loaded machine can stall before bash's first line: only the silence row is sure.
           if (silent) expect(quiet).toBeGreaterThanOrEqual(1500);
-          else expect(quiet).toBeLessThan(elapsed);
+          // No output before the cap: the silence is the whole run.
+          else expect(quiet).toBeLessThanOrEqual(elapsed);
         },
         30_000,
       );
@@ -1882,9 +1958,10 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     { hooks: [{ type: 'command', command: 'factory', args: ['hook', name] }] },
   ];
   // Each reason's own way out: a release whose own settings break the rule must be re-pinned.
+  const HOOKS = 're-pin main to a release that installs the factory hooks';
   const REPIN =
     "re-pin main to a release whose settings register each hook as the installed factory's do";
-  const AGREE = 'install the pinned release, or re-pin main to the installed factory’s release';
+  const AGREE = "install the pinned release, or re-pin main to the installed factory's release";
   it.each([
     ['in shell form', (h: Hooks) => (h.Stop = shell('factory hook stop')), REPIN],
     [
@@ -1896,11 +1973,7 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       REPIN,
     ],
     ['a hook of another event', (h: Hooks) => (h.Notification = shell('notify-send x')), REPIN],
-    [
-      'no Stop hook',
-      (h: Hooks) => (h.Stop = []),
-      're-pin main to a release that installs the factory hooks',
-    ],
+    ['no Stop hook', (h: Hooks) => (h.Stop = []), HOOKS],
     ['a hook the factory does not serve', (h: Hooks) => (h.Stop = served('nope')), AGREE],
     ['a hook under another event', (h: Hooks) => (h.Stop = served('session-start')), AGREE],
   ])('waits, without alarm, for a release whose settings register %s', (_name, change, way) => {
@@ -1913,6 +1986,33 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     });
     expect(check.ok ? '' : check.reason).toMatch(new RegExp(`; ${way}$`));
     expect(check).not.toHaveProperty('urgent');
+  });
+
+  it('names the one event a release registers no hook for, not "installs no factory hooks"', () => {
+    const settings = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+    delete settings.hooks.PreCompact;
+    const check = guardrailCheck({}, Buffer.from(JSON.stringify(settings)), manifestOf({}), 'main');
+    expect(check).toEqual({
+      ok: false,
+      reason: `release v1.0.0 registers no PreCompact hook; ${HOOKS}`,
+    });
+  });
+
+  it('tells a branch that kept an older release from its merge base to be filed again, whatever the reason', () => {
+    const settings = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+    settings.hooks.Stop = served('nope');
+    const check = guardrailCheck(
+      {},
+      Buffer.from(JSON.stringify(settings)),
+      manifestOf({}),
+      BRANCH,
+      true,
+    );
+    expect(check.ok ? '' : check.reason).toMatch(
+      new RegExp(
+        `which the installed factory does not serve; ${BRANCH} keeps release v1\\.0\\.0 from its merge base until main is merged into it: close the item and file it again$`,
+      ),
+    );
   });
 
   it.each([
@@ -1965,6 +2065,27 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     await expect(refused).rejects.toThrow(
       /registers the PostToolUse hook factory hook lint, which the installed factory does not serve/,
     );
+    expect(t.sessions()).toEqual([]);
+  });
+
+  it('tells a clone at an old merge base, with main re-pinned, to file the item again', async () => {
+    const old = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
+    old.hooks.PostToolUse = served('lint');
+    const v1 = { ...GUARDED, '.claude/settings.json': `${JSON.stringify(old)}\n` };
+    const release = (pin: ReleasePin) => manifestOf(pin.tag === 'v1.0.0' ? v1 : GUARDED);
+    // The item's branch is made while main pins v1.0.0, whose settings v2 no longer serves.
+    const t = setup({ mainFiles: v1, release });
+    const later = CONFIG.replace(`v1.0.0@${'a'.repeat(40)}`, `v1.1.0@${'b'.repeat(40)}`);
+    t.repo.commit({ ...GUARDED, '.factory/config': later }, 'upgrade to v1.1.0');
+    t.repo.push('main');
+
+    const refused = t.launch(REQUEST);
+
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(
+      `release v1.0.0 registers the PostToolUse hook factory hook lint, which the installed factory does not serve; ${BRANCH} keeps release v1.0.0 from its merge base until main is merged into it: close the item and file it again`,
+    );
+    await expect(refused).rejects.toMatchObject({ urgent: false });
     expect(t.sessions()).toEqual([]);
   });
 

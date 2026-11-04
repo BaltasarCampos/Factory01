@@ -143,7 +143,7 @@ Test files are under `tests/`; task IDs come from `tasks.md` (`/speckit-tasks`).
 | AC-012, AC-066, AC-080 | integration (branch creation, manifest, guard) | tests/integration/branch.test.ts | tasks.md |
 | AC-012, AC-089 | contract (red-green) | tests/contract/red-green.test.ts | T135 |
 | AC-013, AC-042 | contract (CI checks) | tests/contract/ci-checks.test.ts | tasks.md |
-| AC-014, AC-015, AC-073, AC-078, AC-081–AC-083, AC-086, AC-088 | integration (merge/deploy with fake `gh`, temp repos, real `ssh-keygen`) | tests/integration/merge-deploy.test.ts | T053 |
+| AC-014, AC-015, AC-073, AC-078, AC-081–AC-083, AC-086, AC-088 | integration (merge/deploy with fake `gh`, temp repos, real `ssh-keygen`) | tests/integration/merge-command.test.ts, tests/integration/deploy-command.test.ts | T053 |
 | AC-073, AC-087, AC-088 | integration (signed main history) | tests/integration/signed-history.test.ts | T134 |
 | AC-081, AC-082 | contract (safe diff, append-only) | tests/contract/git-diff.test.ts, tests/contract/append-only.test.ts | T133, T052 |
 | AC-083 | integration (release tags) | tests/integration/release.test.ts | T131 |
@@ -153,7 +153,7 @@ Test files are under `tests/`; task IDs come from `tasks.md` (`/speckit-tasks`).
 | FR-037 (CI minutes) | integration | tests/integration/ops.test.ts | T108 |
 | SC-009 (benchmark ≥ 5 items) | integration | tests/integration/benchmark.test.ts | T149 |
 | FR-034 (daily product backup) | integration | tests/integration/backup.test.ts | T129 |
-| AC-016, AC-017, AC-048, AC-091–AC-096 | unit + integration (per-gate summary, trace, events) | tests/unit/summary.test.ts, tests/unit/events.test.ts, tests/integration/approve-pause.test.ts, tests/integration/merge-deploy.test.ts | T054, T155, T053 |
+| AC-016, AC-017, AC-048, AC-091–AC-096 | unit + integration (per-gate summary, trace, events) | tests/unit/summary.test.ts, tests/unit/events.test.ts, tests/integration/approve-pause.test.ts, tests/integration/merge-command.test.ts, tests/integration/deploy-command.test.ts | T054, T155, T053 |
 | AC-097 | unit + contract (criterion lines, empty checked set) | tests/unit/station-checks.test.ts, tests/contract/ci-checks.test.ts, tests/contract/red-green.test.ts | T152, T051, T135 |
 | AC-018, AC-019, AC-022, AC-067, AC-074 | unit + property (guards) + routine attack suite | tests/unit/guards.test.ts, tests/property/command-guard.prop.test.ts, tests/e2e/attack-suite.test.ts | tasks.md |
 | AC-020, AC-021 | contract + integration | tests/contract/guardrail-change.test.ts, tests/integration/session-start.test.ts | tasks.md |
