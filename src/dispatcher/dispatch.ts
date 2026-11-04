@@ -487,8 +487,8 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     const at = { repo, item: ref.issue, station };
     const issued =
       launcher.mode === 'local'
-        ? (sha: string) => {
-            recordIssued(ctx.failures, at, sha);
+        ? (sha: string, parent: string) => {
+            recordIssued(ctx.failures, at, sha, parent);
           }
         : undefined;
     const manifest = writeStationManifest(git, ref, { station, role }, mainRef, issued);

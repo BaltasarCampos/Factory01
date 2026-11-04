@@ -37,6 +37,7 @@ describe('the failure record of local sessions (T061)', () => {
       { home, factory: () => FACTORY },
       { repo: 'owner/project', item: 42, station: 4 },
       HEAD,
+      'b'.repeat(40),
     );
 
     expect(readFailureRecord(file)).toEqual({ head: HEAD, factory: FACTORY, count: 0 });
@@ -93,7 +94,7 @@ describe('the failure record of local sessions (T061)', () => {
     }).toThrow(/is malformed$/);
     expect(readFailureRecord(file)).toBeUndefined();
     expect(() => {
-      recordIssued(undefined, { repo: 'owner/project', item: 42, station: 4 }, HEAD);
+      recordIssued(undefined, { repo: 'owner/project', item: 42, station: 4 }, HEAD, HEAD);
     }).toThrow(/no failure records are set up/);
   });
 

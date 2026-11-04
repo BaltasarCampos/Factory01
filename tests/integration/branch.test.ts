@@ -14,7 +14,12 @@ import {
   type DispatchContext,
 } from '../../src/dispatcher/dispatch.js';
 import { gatherEvidence } from '../../src/dispatcher/evidence.js';
-import { failureFile, readFailureRecord } from '../../src/dispatcher/failures.js';
+import {
+  failureFile,
+  readFailureRecord,
+  recordIssued,
+  writeFailureRecord,
+} from '../../src/dispatcher/failures.js';
 import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
 import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
@@ -1476,7 +1481,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       throw new EnvironmentError('the installed factory cannot be hashed: x: EACCES');
     };
     const cases = [
-      [true, () => HASH, /^the failure record .*2-2\.json cannot be written: /],
+      [true, () => HASH, /^the failure record .*2-2\.json cannot be read: .*ENOTDIR/],
       [false, unhashable, /^the installed factory cannot be hashed: /],
     ] as const;
     for (const [blocked, factory, why] of cases) {
@@ -1490,6 +1495,33 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       expect(tip(t)).toBe(before);
       expect(t.local.launches).toEqual([]);
     }
+  });
+
+  it("never stacks a manifest on the dispatcher's own spent one, whose count it would wipe (T061)", () => {
+    const t = setup({ branch: CREATED });
+    const at = { projectDir: t.project.path, now: () => new Date('2026-10-01T11:00:00Z') };
+    const before = tip(t);
+    const file = failureFile(t.home, REPO, ISSUE, 2);
+    writeFailureRecord(file, { head: before, factory: HASH, count: 2, last: 'it exited 1' });
+    const records = { home: t.home, factory: () => HASH };
+    const issued = (sha: string, parent: string) => {
+      recordIssued(records, { repo: REPO, item: ISSUE, station: 2 }, sha, parent);
+    };
+
+    expect(() =>
+      writeStationManifest(
+        at,
+        { issue: ISSUE, branch: BRANCH },
+        { station: 2, role: 'spec' },
+        'origin/main',
+        issued,
+      ),
+    ).toThrow(
+      `no manifest is pushed on ${before.slice(0, 12)}: the failure record ${file} names it`,
+    );
+
+    expect(tip(t)).toBe(before);
+    expect(readFailureRecord(file)).toMatchObject({ head: before, count: 2 });
   });
 });
 

@@ -119,17 +119,24 @@ export function writeFailureRecord(file: string, record: FailureRecord): void {
 }
 
 /**
- * The dispatcher's manifest commit `head`, about to be pushed for a local session: a new record,
- * count 0, so a failure to write it stops the pass before the push.
+ * The dispatcher's manifest commit `head` on `parent`, about to be pushed for a local session: a
+ * new record, count 0, so a failure to write it stops the pass before the push. The record there
+ * is read first, and one that names `parent` is the factory's own spent manifest, which a new one
+ * never stacks on, since that would wipe its count.
  */
 export function recordIssued(
   records: FailureRecords | undefined,
   at: { repo: string; item: number; station: Station },
   head: string,
+  parent: string,
 ): void {
   if (records === undefined)
     throw new EnvironmentError('no failure records are set up for local sessions');
   const file = failureFile(records.home, at.repo, at.item, at.station);
+  if (readFailureRecord(file)?.head === parent)
+    throw new EnvironmentError(
+      `no manifest is pushed on ${parent.slice(0, 12)}: the failure record ${file} names it as the dispatcher's own manifest, which a new one never stacks on; ${OUT}`,
+    );
   writeFailureRecord(file, { head, factory: records.factory(), count: 0 });
 }
 
