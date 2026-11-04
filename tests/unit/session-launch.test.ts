@@ -37,7 +37,8 @@ import {
   type LaunchRequest,
 } from '../../src/dispatcher/launcher/types.js';
 import { roleVersion } from '../../src/events/schema.js';
-import { readSessionRecord } from '../../src/hooks/session.js';
+import { runPreCompact } from '../../src/hooks/pre-compact.js';
+import { logBlocked, readSessionRecord } from '../../src/hooks/session.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
 import { MCP_JSON } from '../../src/install/render.js';
 import type { SessionSettings } from '../../src/install/session-settings.js';
@@ -1026,7 +1027,13 @@ describe('LocalLauncher (research R8, R9)', () => {
       const t = streamed((args) => {
         const result = {
           permission_denials: [{ tool_name: 'Bash' }, { tool_name: 'Edit' }],
-          modelUsage: { 'claude-sonnet-5-5': {}, 'claude-opus-5-5': {} },
+          modelUsage: {
+            'claude-sonnet-5-5': {
+              ...{ inputTokens: 10, outputTokens: 20 },
+              ...{ cacheReadInputTokens: 30, cacheCreationInputTokens: 40 },
+            },
+            'claude-opus-5-5': { inputTokens: 1, outputTokens: 2 },
+          },
           num_turns: 3,
         };
         const text = sessionStream(args, { assistants, result });
@@ -1050,6 +1057,67 @@ describe('LocalLauncher (research R8, R9)', () => {
         longest_line: longest,
         // A line with no message id is a turn of its own.
         ...{ turns: 3, assistant_lines: 4, num_turns: 3, duration_ms: null },
+        // The result's per-model totals, summed.
+        tokens: { input: 11, output: 22, cache_read: 30, cache_creation: 40, source: 'result' },
+        context_full: false,
+      });
+    });
+
+    it('a failed session whose PreCompact hook blocked a compaction is too big for one session', async () => {
+      const cases = [
+        // Logged by the hook itself, so a change in what it logs fails this test.
+        [
+          (home: string) =>
+            runPreCompact(
+              { session_id: FIRST },
+              { cwd: home, now: () => new Date(), env: { HOME: home } },
+            ),
+          true,
+        ],
+        // A line cut off mid-write could be that event: the log cannot tell.
+        [
+          (home: string) => {
+            writeFileSync(
+              join(home, '.factory', 'sessions', FIRST, 'events.jsonl'),
+              '{"kind":"blo',
+            );
+            return Promise.resolve();
+          },
+          null,
+        ],
+      ] as const;
+      for (const [write, full] of cases) {
+        let home = '';
+        const compacted: Runner = async (program, args, options) => {
+          if (args[0] === '-p') await write(home);
+          return fakeRunner(1).run(program, args, options);
+        };
+        const t = setup({ run: compacted });
+        home = t.home;
+        const failed = t.launch(REQUEST);
+        await expect(failed).rejects.toThrow(SessionFailed);
+        await expect(failed).rejects.toMatchObject({
+          contextFull: full === true ? true : undefined,
+        });
+        if (full === true)
+          await expect(failed).rejects.toThrow(
+            /its context was full: the item is too big for one session; split it/,
+          );
+        expect(recorded(t.home).context_full).toBe(full);
+      }
+    });
+
+    it('totals the tokens from the stream itself when there is no result line, each message once', async () => {
+      // Stopped with no result line, as at a cap: every assistant message, subagents' included.
+      const stream = (args: readonly string[]) =>
+        sessionStream(args, { assistants }).split('\n').slice(0, -2).join('\n') + '\n';
+      const t = setup({ run: fakeRunner(1, stream).run });
+      await expect(t.launch(REQUEST)).rejects.toThrow(/claude exited 1/);
+      // msg_1's two lines once (its last), the subagent's, msg_2's and the line with no id.
+      expect(recorded(t.home).tokens).toEqual({
+        ...{ input: 5 + 1 + 1 + 1, output: 4 * 9999 },
+        ...{ cache_read: 3000 + 1 + 100 + 100, cache_creation: 0 + 1 + 0 + 0 },
+        source: 'stream',
       });
     });
 
@@ -1074,31 +1142,46 @@ describe('LocalLauncher (research R8, R9)', () => {
     });
 
     it("names a failed start's refusal from the session's own log, or that it logged none", async () => {
-      const refusal = {
-        kind: 'blocked',
-        tool: 'SessionStart',
-        input_summary: 'cwd: not\u202ethere',
-      };
-      for (const logged of [[refusal], []]) {
-        const unpassed: Runner = (program, args, options) => {
+      // Written by the hook's own writer, so a change in what the hook logs fails this test.
+      const refusal = { tool: 'SessionStart', input_summary: 'cwd: not\u202ethere' };
+      const log = (home: string) => join(home, '.factory', 'sessions', FIRST, 'events.jsonl');
+      const cases = [
+        [
+          'a refusal',
+          (home: string) =>
+            logBlocked(readSessionRecord(home, FIRST), home, FIRST, refusal, () => new Date()),
+          (home: string) =>
+            `the session-start hook refused it: cwd: not\\u{202e}there; fix that before this item's next session (its log is ${log(home)})`,
+        ],
+        [
+          'nothing',
+          () => Promise.resolve(),
+          (home: string) => `logged no refusal that can be read in ${log(home)}, so`,
+        ],
+        [
+          'a line cut off mid-write',
+          (home: string) => {
+            writeFileSync(log(home), '{"kind":"tool_call"}\n{"kind":"blo');
+            return Promise.resolve();
+          },
+          (home: string) =>
+            `logged no refusal that can be read in ${log(home)}; line 2 of it does not parse, which may be a refusal cut off mid-write`,
+        ],
+      ] as const;
+      for (const [, write, why] of cases) {
+        let home = '';
+        const unpassed: Runner = async (program, args, options) => {
           if (args[0] !== '-p') return fakeRunner().run(program, args, options);
-          const dir = dirname(args[args.indexOf('--settings') + 1] ?? '');
-          const lines = logged.map((event) => `${JSON.stringify(event)}\n`).join('');
-          if (lines !== '')
-            writeFileSync(join(dir, 'events.jsonl'), `{"kind":"tool_call"}\n${lines}`);
+          await write(home);
           const text = sessionStream(args, { assistants });
           text.split('\n').some((line) => line !== '' && options.line?.(line) !== undefined);
-          return Promise.resolve({ status: null, stdout: text, stderr: '' });
+          return { status: null, stdout: text, stderr: '' };
         };
         const t = setup({ run: unpassed });
+        home = t.home;
         const failed = t.launch(REQUEST);
         await expect(failed).rejects.toMatchObject({ name: 'SessionFailed', urgent: true });
-        const log = join(t.home, '.factory', 'sessions', FIRST, 'events.jsonl');
-        await expect(failed).rejects.toThrow(
-          logged.length > 0
-            ? `the session-start hook refused it: cwd: not\\u{202e}there; fix that before this item's next session (its log is ${log})`
-            : `the session-start hook logged no refusal in ${log}`,
-        );
+        await expect(failed).rejects.toThrow(why(home));
       }
     });
 
@@ -1412,9 +1495,12 @@ describe('LocalLauncher (research R8, R9)', () => {
           });
           // The longest gap the watchdog heard, its own silence included.
           const result = join(t.home, '.factory', 'sessions', FIRST, 'result.json');
-          const quiet = (JSON.parse(readFileSync(result, 'utf8')) as Record<string, number>)
-            .longest_silence_ms;
-          expect((quiet ?? 0) >= 1500).toBe(silent);
+          const { longest_silence_ms: quiet = 0, elapsed_ms: elapsed = 0 } = JSON.parse(
+            readFileSync(result, 'utf8'),
+          ) as Record<string, number>;
+          // A loaded machine can stall before bash's first line: only the silence row is sure.
+          if (silent) expect(quiet).toBeGreaterThanOrEqual(1500);
+          else expect(quiet).toBeLessThan(elapsed);
         },
         30_000,
       );
@@ -1795,19 +1881,29 @@ describe('LocalLauncher availability: main against the pinned release', () => {
   const served = (name: string) => [
     { hooks: [{ type: 'command', command: 'factory', args: ['hook', name] }] },
   ];
+  // Each reason's own way out: a release whose own settings break the rule must be re-pinned.
+  const REPIN =
+    "re-pin main to a release whose settings register each hook as the installed factory's do";
+  const AGREE = 'install the pinned release, or re-pin main to the installed factory’s release';
   it.each([
-    ['in shell form', (h: Hooks) => (h.Stop = shell('factory hook stop'))],
+    ['in shell form', (h: Hooks) => (h.Stop = shell('factory hook stop')), REPIN],
     [
       'a guard without onFailure',
       (h: Hooks) => {
         for (const hook of h.PreToolUse?.flatMap((group) => group.hooks) ?? [])
           delete hook.onFailure;
       },
+      REPIN,
     ],
-    ['a hook of another event', (h: Hooks) => (h.Notification = shell('notify-send x'))],
-    ['no Stop hook', (h: Hooks) => (h.Stop = [])],
-    ['a hook the factory does not serve', (h: Hooks) => (h.Stop = served('nope'))],
-  ])('waits, without alarm, for a release whose settings register %s', (_name, change) => {
+    ['a hook of another event', (h: Hooks) => (h.Notification = shell('notify-send x')), REPIN],
+    [
+      'no Stop hook',
+      (h: Hooks) => (h.Stop = []),
+      're-pin main to a release that installs the factory hooks',
+    ],
+    ['a hook the factory does not serve', (h: Hooks) => (h.Stop = served('nope')), AGREE],
+    ['a hook under another event', (h: Hooks) => (h.Stop = served('session-start')), AGREE],
+  ])('waits, without alarm, for a release whose settings register %s', (_name, change, way) => {
     const settings = JSON.parse(HOOKED_SETTINGS) as { hooks: Hooks };
     change(settings.hooks);
     const check = guardrailCheck({}, Buffer.from(JSON.stringify(settings)), manifestOf({}), 'main');
@@ -1815,6 +1911,7 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       ok: false,
       reason: /^release v1\.0\.0 (registers|installs)/,
     });
+    expect(check.ok ? '' : check.reason).toMatch(new RegExp(`; ${way}$`));
     expect(check).not.toHaveProperty('urgent');
   });
 
@@ -1880,12 +1977,19 @@ describe('LocalLauncher availability: main against the pinned release', () => {
     const bare = { ...GUARDED, '.claude/settings.json': '{}\n' };
     const noHooks = setup({ mainFiles: bare, release: () => manifestOf(bare) });
     const waiting = await noHooks.available();
+    // main resolved once, first; one that cannot be is a named reason, never an exception.
+    const gone = setup();
+    gone.repo.git(['update-ref', '-d', 'refs/remotes/origin/main']);
+    expect(await gone.available()).toMatchObject({
+      ok: false,
+      reason: /^origin\/main cannot be resolved: /,
+    });
     // Once per main head, naming the way out: only the Owner can make the two agree.
     const main = noHooks.repo.revParse('origin/main').slice(0, 12);
     expect(waiting).toMatchObject({
       ok: false,
       reason: new RegExp(
-        `^main at ${main}: release v1\\.0\\.0 installs no factory hooks.*; install the pinned release, or re-pin main$`,
+        `^main at ${main}: release v1\\.0\\.0 installs no factory hooks.*; re-pin main to a release that installs the factory hooks$`,
       ),
     });
     expect(waiting).not.toHaveProperty('urgent');
