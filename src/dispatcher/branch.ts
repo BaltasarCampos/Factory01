@@ -114,13 +114,17 @@ export function fetchBranch(ctx: BranchContext, branch: string): string | undefi
 export const dispatcherMessage = (subject: string, feature: string) =>
   `Dispatcher: ${subject}\n\nFactory-Role: ${DISPATCHER}\nFactory-Item: ${feature}\n`;
 
-/** Commit `files` on top of `parent` and push the commit to `branch` (create or fast-forward). */
+/**
+ * Commit `files` on top of `parent` and push the commit to `branch` (create or fast-forward);
+ * `beforePush` hears the commit first, and nothing is pushed if it throws.
+ */
 export function commitAndPush(
   ctx: BranchContext,
   parent: string,
   files: Record<string, string>,
   message: string,
   branch: string,
+  beforePush?: (sha: string) => void,
 ): string {
   const dir = mkdtempSync(join(tmpdir(), 'factory-index-'));
   const who = { name: 'Factory dispatcher', email: 'dispatcher@factory.invalid' };
@@ -139,6 +143,7 @@ export function commitAndPush(
     }
     const tree = git(at, ['write-tree']);
     const sha = git(at, ['commit-tree', '--no-gpg-sign', tree, '-p', parent, '-m', message]);
+    beforePush?.(sha);
     git(at, ['push', '-q', 'origin', `${sha}:refs/heads/${branch}`]);
     return sha;
   } finally {

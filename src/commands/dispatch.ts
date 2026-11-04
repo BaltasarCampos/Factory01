@@ -11,6 +11,7 @@ import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { dispatchOnce, type DispatchContext, type PassResult } from '../dispatcher/dispatch.js';
 import { gatherEvidence } from '../dispatcher/evidence.js';
+import { factoryHash } from '../dispatcher/failures.js';
 import { auditMain } from '../dispatcher/history-audit.js';
 import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
 import { projectHere } from './pause.js';
@@ -50,6 +51,7 @@ export async function projectDispatch(
       return Promise.resolve();
     },
     now: ctx.now,
+    failures: { home: project.home, factory: () => factoryHash() },
     gh: { env: ctx.env },
   };
   const close = () => {
