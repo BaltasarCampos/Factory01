@@ -35,6 +35,7 @@ export async function projectDispatch(
   const dir = mkdtempSync(join(tmpdir(), 'factory-keys-'));
   const keysFor = releaseKeysFor(ctx.env, dir);
   const out = ctx.io.stdout;
+  const failures = { home: project.home, factory: installedHash };
   const context: DispatchContext = {
     projectDir: ctx.cwd,
     keysFor,
@@ -44,6 +45,7 @@ export async function projectDispatch(
     gatherEvidence: gatherEvidence({
       ...{ projectDir: ctx.cwd, gh: { env: ctx.env } },
       factory: factorySource(ctx.env),
+      failures,
     }),
     launchers: ctx.launchers,
     stationPrompt: (pin, facts) =>
@@ -53,7 +55,7 @@ export async function projectDispatch(
       return Promise.resolve();
     },
     now: ctx.now,
-    failures: { home: project.home, factory: installedHash },
+    failures,
     gh: { env: ctx.env },
   };
   const close = () => {

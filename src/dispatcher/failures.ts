@@ -166,6 +166,26 @@ export function recordSession(
 }
 
 /**
+ * What the record says of `tip` in local mode: running while the group of the session it last
+ * started there runs, spent when nothing of it runs, and a new head when it names another commit
+ * or there is none. Under a newly installed factory its count reads as 0, with nothing written.
+ */
+export function tipState(
+  records: FailureRecords | undefined,
+  at: { repo: string; item: number; station: Station },
+  tip: string,
+  running: (session: string) => boolean,
+): { state: 'new' } | { state: 'running' | 'spent'; count: number } {
+  if (records === undefined)
+    throw new EnvironmentError('no failure records are set up for local sessions');
+  const record = readFailureRecord(failureFile(records.home, at.repo, at.item, at.station));
+  if (record?.head !== tip) return { state: 'new' };
+  const count = record.factory === records.factory() ? record.count : 0;
+  const live = record.session !== undefined && running(record.session);
+  return { state: live ? 'running' : 'spent', count };
+}
+
+/**
  * A SHA-256 over every file of `folders` under `root`, each by its path from `root` and its
  * contents, in a fixed sorted order, so a renamed or moved file changes it too; a symlink is
  * hashed as its link, never followed. Anything else, or anything that cannot be read, throws,

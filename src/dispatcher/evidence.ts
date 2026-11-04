@@ -54,6 +54,8 @@ import {
   pendingManifest,
   testEnded,
 } from './manifest.js';
+import { tipState, type FailureRecords } from './failures.js';
+import { sessionRunning } from './launcher/local.js';
 import { STATION_OF, type DecisionAlert, type Evidence } from './transitions.js';
 
 export interface EvidenceContext {
@@ -62,6 +64,8 @@ export interface EvidenceContext {
   gh?: GhOptions;
   /** The factory clone holding the pinned release, for its `required-checks.json`. */
   factory?: string;
+  /** Local sessions' failure records, which alone tell the dispatcher's own manifest (T061). */
+  failures?: FailureRecords;
 }
 
 /**
@@ -308,9 +312,18 @@ export function gatherEvidence(ctx: EvidenceContext) {
             reviewed: verify !== undefined,
             secured: security !== undefined,
           });
-    // The session the dispatcher last issued has pushed nothing yet: do not start another.
+    // The session the dispatcher last issued has pushed nothing yet: do not start another. In
+    // local mode the tip is its manifest only by the failure record, running or spent; a spent
+    // one still waits, as T059's does in cloud mode.
+    const station = STATION_OF[item.state];
+    const running = (id: string) => sessionRunning(ctx.failures?.home ?? '', id) !== undefined;
     const pending =
-      tip !== undefined && pendingManifest(at, tip)?.station === STATION_OF[item.state];
+      tip !== undefined &&
+      station !== undefined &&
+      (config.agents === 'local'
+        ? tipState(ctx.failures, { repo: config.repo, item: n, station }, tip, running).state !==
+          'new'
+        : pendingManifest(at, tip)?.station === station);
     // Every Verify session the tier needs has ended, so a failing result is the Owner's to hear.
     const verifyEnded =
       item.state === 'verifying' &&

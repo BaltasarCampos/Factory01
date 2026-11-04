@@ -19,6 +19,7 @@ import {
   readFailureRecord,
   recordIssued,
   recordSession,
+  tipState,
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
 import { installedHash } from '../../src/dispatcher/launcher/local.js';
@@ -123,6 +124,28 @@ describe('the failure record of local sessions (T061)', () => {
     expect(() => {
       recordSession(records, at, HEAD, '../x');
     }).toThrow(/is not written/);
+  });
+
+  it('tells running, spent and a new head by the record alone, a new factory reading as count 0', () => {
+    const home = tempDir();
+    const records = { home, factory: () => FACTORY };
+    const at = { repo: 'owner/project', item: 42, station: 4 } as const;
+    const file = failureFile(home, 'owner/project', 42, 4);
+    const live = new Set<string>();
+    const state = (tip: string) => tipState(records, at, tip, (id) => live.has(id));
+    expect(state(HEAD)).toEqual({ state: 'new' });
+    writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 2 });
+    expect(state(HEAD)).toEqual({ state: 'spent', count: 2 });
+    expect(state('d'.repeat(40))).toEqual({ state: 'new' });
+    recordSession(records, at, HEAD, 'id-1');
+    expect(state(HEAD)).toEqual({ state: 'spent', count: 2 });
+    live.add('id-1');
+    expect(state(HEAD)).toEqual({ state: 'running', count: 2 });
+    const installed = { home, factory: () => 'e'.repeat(64) };
+    expect(tipState(installed, at, HEAD, () => false)).toEqual({ state: 'spent', count: 0 });
+    // Read, never written.
+    expect(readFailureRecord(file)).toMatchObject({ factory: FACTORY, count: 2 });
+    expect(() => tipState(undefined, at, HEAD, () => false)).toThrow(/no failure records/);
   });
 
   it.each(['owner/..', 'owner/.', '../project', 'owner/project/x', 'owner', 'own er/project'])(

@@ -145,17 +145,18 @@ function setup(options: Setup = {}) {
   const clock = new FakeClock('2026-10-01T10:00:00Z');
   const home = tempDir();
   const cloud = new FakeLauncher('cloud');
+  const evidence = { projectDir: project.path, failures: { home, factory: () => HASH } };
   const ctx: DispatchContext = {
     projectDir: project.path,
     keysFor: () => keys,
     secondCopy: owner.publicKey,
     auditHistory: () => Promise.resolve({ recreated: [] }),
-    gatherEvidence: gatherEvidence({ projectDir: project.path }),
+    gatherEvidence: gatherEvidence(evidence),
     launchers: { local, cloud },
     stationPrompt: testPrompts,
     logEvent: () => Promise.resolve(),
     now: () => clock.now(),
-    failures: { home, factory: () => HASH },
+    failures: evidence.failures,
   };
   const repoState = () => readState().repos[REPO] ?? { issues: [], prs: [] };
   return {
@@ -164,6 +165,7 @@ function setup(options: Setup = {}) {
     local,
     cloud,
     home,
+    evidence,
     labels: () => repoState().issues.find((i) => i.number === ISSUE)?.labels ?? [],
     inbox: () => repoState().issues.find((i) => i.number === INBOX)?.comments ?? [],
     prs: () => repoState().prs,
@@ -596,7 +598,7 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     const pin = { ...onMain.factory_release, ...(over.factory ? { sha: over.factory.sha } : {}) };
     const config = { ...onMain, factory_release: pin };
     const factory = over.factory === undefined ? {} : { factory: over.factory.path };
-    return gatherEvidence({ projectDir: t.project.path, ...factory })(
+    return gatherEvidence({ ...t.evidence, ...factory })(
       item,
       config,
       { lastVerified: undefined, merges, commits },
@@ -764,6 +766,10 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
       { projectDir: t.project.path, now: () => new Date() },
       { issue: ISSUE, branch: BRANCH },
       { station, role },
+      'origin/main',
+      (sha, parent) => {
+        recordIssued(t.evidence.failures, { repo: REPO, item: ISSUE, station }, sha, parent);
+      },
     );
     // The manifest went straight to origin; the next session's commit follows it.
     t.project.git(['branch', '-f', BRANCH, `origin/${BRANCH}`]);
@@ -941,7 +947,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
     const issue = { number: ISSUE, title: 'Add login', author: 'owner', body: '', labels: [] };
     const onMain = configOnMain(t.project.path);
     const pin = { ...onMain.factory_release, ...(factory ? { sha: factory.sha } : {}) };
-    const ctx = { projectDir: t.project.path, ...(factory ? { factory: factory.path } : {}) };
+    const ctx = { ...t.evidence, ...(factory ? { factory: factory.path } : {}) };
     return gatherEvidence(ctx)(
       { issue, state, branch: BRANCH, tier: 2 },
       { ...onMain, factory_release: pin },
@@ -1020,7 +1026,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
         [`${FEATURE}/reports/security.md`]: SECURITY,
       },
     });
-    t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path, factory: factory.path });
+    t.ctx.gatherEvidence = gatherEvidence({ ...t.evidence, factory: factory.path });
     openPr();
     const red = (tip: string) =>
       `#2: required checks red at ${tip.slice(0, 12)}: semgrep (failure)`;
@@ -1059,7 +1065,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
         [`${FEATURE}/reports/security.md`]: SECURITY,
       },
     });
-    t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path, factory: factory.path });
+    t.ctx.gatherEvidence = gatherEvidence({ ...t.evidence, factory: factory.path });
     openPr();
     await dispatchOnce(t.ctx);
     await dispatchOnce(t.ctx);
@@ -1089,7 +1095,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
         [`${FEATURE}/reports/verify.md`]: '| Check | Result |\n|---|---|\n| Review | fail |\n',
       },
     });
-    t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path, factory: factory.path });
+    t.ctx.gatherEvidence = gatherEvidence({ ...t.evidence, factory: factory.path });
     openPr();
     const green = () => {
       actionsAt(tipOf(t), ITEM_JOBS);
@@ -1155,7 +1161,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
         ...(config === undefined ? {} : { config }),
         branch: { ...SPECIFIED, [TASKS_MD]: TASKS },
       });
-      t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path, factory: factory.path });
+      t.ctx.gatherEvidence = gatherEvidence({ ...t.evidence, factory: factory.path });
       openPr();
       await dispatchOnce(t.ctx);
       return t;
@@ -1251,7 +1257,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
 
     it('T174: a build-test that cannot be read holds Build with one info alert per head, naming why', async () => {
       const t = await issued();
-      t.ctx.gatherEvidence = gatherEvidence({ projectDir: t.project.path });
+      t.ctx.gatherEvidence = gatherEvidence(t.evidence);
       const head = work(t);
       await dispatchOnce(t.ctx);
       await dispatchOnce(t.ctx);
@@ -1495,6 +1501,37 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
 
       expect(tip(t)).toBe(before);
       expect(t.local.launches).toEqual([]);
+    }
+  });
+
+  it('in local mode waits on its own manifest by the record alone, and issues one on any other tip (T061)', async () => {
+    const t = setup();
+    await dispatchOnce(t.ctx); // the Specify manifest, recorded
+    const spent = tip(t);
+    await dispatchOnce(t.ctx);
+    expect(t.local.launches).toHaveLength(1);
+    expect(tip(t)).toBe(spent);
+
+    // The session's own commit is a new head: a new manifest, and a new record for it.
+    t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+    t.project.commit({ [`${FEATURE}/notes.md`]: 'notes\n' }, 'session work');
+    t.project.push(BRANCH);
+    await dispatchOnce(t.ctx);
+    expect(t.local.launches).toHaveLength(2);
+    const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
+    expect(record).toEqual({ head: tip(t), factory: HASH, count: 0, session: 'fake-local-2' });
+
+    // A commit that only looks like the dispatcher's manifest is a new head in local mode, while
+    // cloud mode's T059 rule waits on it.
+    for (const agents of ['local', 'cloud'] as const) {
+      const u = setup({ agents });
+      await dispatchOnce(u.ctx);
+      u.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+      const forged = { [`${FEATURE}/.station.json`]: '{ "station": 2 }\n' };
+      u.project.commit(forged, dispatcherMessage('station 2 (spec) manifest', '2-add-login'));
+      u.project.push(BRANCH);
+      await dispatchOnce(u.ctx);
+      expect(u[agents].launches).toHaveLength(agents === 'local' ? 2 : 1);
     }
   });
 
