@@ -1,7 +1,19 @@
-import { mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  factoryHash,
   failureFile,
   readFailureRecord,
   recordIssued,
@@ -83,5 +95,80 @@ describe('the failure record of local sessions (T061)', () => {
       count: 0,
     });
     expect(readdirSync(join(file, '..'))).toEqual(['42-4.json']);
+  });
+});
+
+describe("the installed factory's hash (T061)", () => {
+  /** A factory of the test's own: its built code and its factory/ folder. */
+  function installed() {
+    const root = tempDir();
+    mkdirSync(join(root, 'dist', 'cli'), { recursive: true });
+    mkdirSync(join(root, 'factory', 'policy'), { recursive: true });
+    writeFileSync(join(root, 'dist', 'cli', 'main.js'), 'run();\n');
+    writeFileSync(join(root, 'factory', 'policy', 'roles.yaml'), 'roles: {}\n');
+    return { root, hash: () => factoryHash(root, ['dist', 'factory']) };
+  }
+
+  it('changes with any file of its code or its factory folder: its contents, its name or its place', () => {
+    const t = installed();
+    const first = t.hash();
+    expect(first).toMatch(/^[0-9a-f]{64}$/);
+    expect(t.hash()).toBe(first);
+    const at = (...path: string[]) => join(t.root, ...path);
+    const seen = new Set([first]);
+    writeFileSync(at('dist', 'cli', 'main.js'), 'run(); \n');
+    seen.add(t.hash());
+    // Renamed, moved in its folder, and moved to the other folder, its contents the same.
+    const moves = [
+      [at('dist', 'cli', 'main.js'), at('dist', 'cli', 'm.js')],
+      [at('dist', 'cli', 'm.js'), at('dist', 'm.js')],
+      [at('dist', 'm.js'), at('factory', 'm.js')],
+    ] as const;
+    for (const [from, to] of moves) {
+      renameSync(from, to);
+      seen.add(t.hash());
+    }
+    writeFileSync(at('factory', 'new.md'), '');
+    seen.add(t.hash());
+    expect(seen.size).toBe(6);
+    // Files outside the two folders are not the factory's.
+    const before = t.hash();
+    writeFileSync(join(t.root, 'README.md'), 'x\n');
+    expect(t.hash()).toBe(before);
+    // The real one: the folder this code runs from and factory/.
+    expect(factoryHash()).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('hashes a symlink as its link, never following it', () => {
+    const t = installed();
+    const outside = tempDir();
+    writeFileSync(join(outside, 'a.js'), 'a\n');
+    writeFileSync(join(outside, 'b.js'), 'b\n');
+    symlinkSync(join(outside, 'a.js'), join(t.root, 'dist', 'link.js'));
+    const linked = t.hash();
+    writeFileSync(join(outside, 'a.js'), 'changed\n');
+    expect(t.hash()).toBe(linked);
+    rmSync(join(t.root, 'dist', 'link.js'));
+    symlinkSync(join(outside, 'b.js'), join(t.root, 'dist', 'link.js'));
+    expect(t.hash()).not.toBe(linked);
+  });
+
+  it('stops, naming it, at a file it cannot read or one that is not a file, never a partial hash', () => {
+    const t = installed();
+    const fifo = join(t.root, 'factory', 'pipe');
+    execFileSync('mkfifo', [fifo]);
+    expect(t.hash).toThrow(
+      `the installed factory cannot be hashed: ${fifo}: it is not a regular file, a folder or a symlink`,
+    );
+    rmSync(fifo);
+    const secret = join(t.root, 'dist', 'cli', 'main.js');
+    chmodSync(secret, 0o000);
+    // Root reads it anyway; the check holds for every other user, CI's included.
+    if (process.getuid?.() !== 0)
+      expect(t.hash).toThrow(
+        new RegExp(`^the installed factory cannot be hashed: ${secret}: .*EACCES`),
+      );
+    chmodSync(secret, 0o644);
+    expect(() => factoryHash(t.root, ['dist', 'missing'])).toThrow(/missing: .*ENOENT/);
   });
 });
