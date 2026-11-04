@@ -29,6 +29,7 @@ import {
   runProcess,
   sessionTools,
   type Runner,
+  sessionRunning,
 } from '../../src/dispatcher/launcher/local.js';
 import {
   LaunchRefused,
@@ -1679,6 +1680,9 @@ describe('LocalLauncher (research R8, R9)', () => {
           );
           expect(t.sessions()).toEqual([]);
           expect(() => process.kill(pgid, 0)).not.toThrow();
+          // The same check for one session, as the failure record reads it.
+          expect(sessionRunning(t.home, OLD)).toMatch(/is still running/);
+          expect(sessionRunning(t.home, 'another')).toBeUndefined();
         } finally {
           stop(pgid);
         }

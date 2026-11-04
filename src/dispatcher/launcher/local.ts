@@ -451,6 +451,48 @@ function groupMembers(pgid: number): number[] {
 }
 
 /**
+ * Why session `id` still runs, or undefined when it does not. Its group still runs if its recorded
+ * leader does, the same process by its start time in this boot, or any process of the group does,
+ * since Linux reuses no pid while it is a group's id; a leader with another start time means the
+ * group ended and its pid was reused. A group record that cannot be read throws, naming it (T061).
+ */
+export function sessionRunning(home: string, id: string): string | undefined {
+  const file = join(home, '.factory', 'sessions', id, 'group.json');
+  let text: string;
+  try {
+    text = readFileSync(file, 'utf8');
+  } catch (err) {
+    // No group recorded, or a stray file that is no session's folder.
+    if (errno(err) === 'ENOENT' || errno(err) === 'ENOTDIR') return undefined;
+    throw err;
+  }
+  let group: Message;
+  try {
+    group = JSON.parse(text) as Message;
+    const { pgid, start, boot } = group;
+    // A group id of 0, as kernel threads have, or less, would match no session's group.
+    const valid = typeof pgid === 'number' && Number.isSafeInteger(pgid) && pgid > 0;
+    if (!valid || typeof start !== 'string' || typeof boot !== 'string')
+      throw new Error('it is not a process group record');
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `${file} cannot be read: ${why}; remove it once ps -eo pid,pgid,args shows nothing of session ${id}`,
+    );
+  }
+  const pgid = group.pgid as number;
+  if (group.boot !== bootId()) return undefined;
+  const leader = procStat(pgid);
+  if (leader !== undefined && leader[19] !== group.start) return undefined;
+  if (leader !== undefined && leader[0] !== 'Z')
+    return `no local session started: session ${visible(id)} is still running (this or another factory) as process group ${String(pgid)}; if no factory runs it, stop it with kill -TERM -${String(pgid)}, then run the factory again`;
+  const members = groupMembers(pgid);
+  if (members.length > 0)
+    return `no local session started: session ${visible(id)}'s claude has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); look at them with ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}, then run the factory again`;
+  return undefined;
+}
+
+/**
  * The names in `dir` that `match`; none when it is missing. A folder that can be searched but not
  * listed, such as a parent of mode 711, is checked for the `exact` names alone, by lstat.
  */
@@ -1590,10 +1632,8 @@ export class LocalLauncher implements SessionLauncher {
 
   /**
    * A session an earlier factory started and could not stop, such as one SIGKILLed, or one another
-   * factory runs now, refuses the launch with an urgent alert. Its group still runs if its recorded
-   * leader does, the same process by its start time in this boot, or any process of the group does,
-   * since Linux reuses no pid while it is a group's id; a leader with another start time means the
-   * group ended and its pid was reused. It is never stopped here: the Owner is told how (T061).
+   * factory runs now, refuses the launch with an urgent alert. It is never stopped here: the Owner
+   * is told how (T061).
    */
   private stillRunning() {
     const sessions = join(this.options.home, '.factory', 'sessions');
@@ -1605,46 +1645,8 @@ export class LocalLauncher implements SessionLauncher {
       throw err;
     }
     for (const id of ids) {
-      const file = join(sessions, id, 'group.json');
-      let text: string;
-      try {
-        text = readFileSync(file, 'utf8');
-      } catch (err) {
-        // No group recorded, or a stray file that is no session's folder.
-        if (errno(err) === 'ENOENT' || errno(err) === 'ENOTDIR') continue;
-        throw err;
-      }
-      let group: Message;
-      try {
-        group = JSON.parse(text) as Message;
-        const { pgid, start, boot } = group;
-        // A group id of 0, as kernel threads have, or less, would match no session's group.
-        const valid = typeof pgid === 'number' && Number.isSafeInteger(pgid) && pgid > 0;
-        if (!valid || typeof start !== 'string' || typeof boot !== 'string')
-          throw new Error('it is not a process group record');
-      } catch (err) {
-        const why = err instanceof Error ? err.message : String(err);
-        throw new Error(
-          `${file} cannot be read: ${why}; remove it once ps -eo pid,pgid,args shows nothing of session ${id}`,
-        );
-      }
-      const pgid = group.pgid as number;
-      if (group.boot !== bootId()) continue;
-      const leader = procStat(pgid);
-      if (leader !== undefined && leader[19] !== group.start) continue;
-      if (leader !== undefined && leader[0] !== 'Z')
-        throw new LaunchRefused(
-          `no local session started: session ${visible(id)} is still running (this or another factory) as process group ${String(pgid)}; if no factory runs it, stop it with kill -TERM -${String(pgid)}, then run the factory again`,
-          true,
-          'session-running',
-        );
-      const members = groupMembers(pgid);
-      if (members.length > 0)
-        throw new LaunchRefused(
-          `no local session started: session ${visible(id)}'s claude has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); look at them with ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}, then run the factory again`,
-          true,
-          'session-running',
-        );
+      const running = sessionRunning(this.options.home, id);
+      if (running !== undefined) throw new LaunchRefused(running, true, 'session-running');
     }
   }
 
