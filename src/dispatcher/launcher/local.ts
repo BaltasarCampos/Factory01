@@ -641,25 +641,30 @@ const TOKENS = {
 } as const;
 
 /**
- * The session's token totals (T097's per-item budget): the result line's per-model totals, or,
- * with no result line, as after a cap stopped it, the factory's own sum over every assistant
- * message, each id once; `source` says which.
+ * The session's token totals (T097's per-item budget), each field on its own: the result line's
+ * per-model totals when every entry has a number for it, else the factory's own sum over the
+ * assistant messages that have one, each id once, a lower bound, since the advisor's calls are
+ * not in the stream; null when neither has it, never 0. `source` says which.
  */
 function tokens(result: Message, usage: Map<string, Message>) {
   const models = result.modelUsage;
-  const fromResult = typeof models === 'object' && models !== null;
-  const counted = fromResult ? Object.values(models as Message) : [...usage.values()];
-  const sum = (names: readonly string[]) =>
-    counted.reduce<number>((total, entry) => {
-      const value = names.map((name) => (entry as Message | null)?.[name]).find(Number.isFinite);
-      return total + (typeof value === 'number' ? value : 0);
-    }, 0);
+  const entries = typeof models === 'object' && models !== null ? Object.values(models) : [];
+  const value = (entry: unknown, names: readonly string[]) =>
+    names.map((name) => (entry as Message | null)?.[name]).find(Number.isFinite) as
+      number | undefined;
+  const total = (names: readonly string[]) => {
+    const counted = entries.map((entry) => value(entry, names));
+    if (counted.length > 0 && counted.every((n): n is number => n !== undefined))
+      return { total: counted.reduce((sum, n) => sum + n, 0), source: 'result' };
+    const streamed = [...usage.values()].flatMap((entry) => value(entry, names) ?? []);
+    if (streamed.length === 0) return null;
+    return { total: streamed.reduce((sum, n) => sum + n, 0), source: 'stream' };
+  };
   return {
-    input: sum(TOKENS.input),
-    output: sum(TOKENS.output),
-    cache_read: sum(TOKENS.cache_read),
-    cache_creation: sum(TOKENS.cache_creation),
-    source: fromResult ? 'result' : 'stream',
+    input: total(TOKENS.input),
+    output: total(TOKENS.output),
+    cache_read: total(TOKENS.cache_read),
+    cache_creation: total(TOKENS.cache_creation),
   };
 }
 
@@ -735,8 +740,9 @@ const mismatch = (problems: readonly string[]) =>
   new SessionFailed(`its init message does not match its launch: ${problems.join('; ')}`, true);
 
 /**
- * The summaries of a session log's `blocked` events from the hook of `tool`, and the non-empty
- * lines that do not parse; a missing log has none, and one that cannot be read says why.
+ * A session log's `blocked` events from the hook of `tool`, each by its summary, undefined for
+ * one with none, such as a guard's internal error, and the non-empty lines that do not parse; a
+ * missing log has none, and one that cannot be read says why.
  */
 function blocked(log: string, tool: string) {
   let text = '';
@@ -752,9 +758,8 @@ function blocked(log: string, tool: string) {
     try {
       const e = JSON.parse(line) as Message;
       const summary = e.input_summary;
-      return e.kind === 'blocked' && e.tool === tool && typeof summary === 'string'
-        ? [summary]
-        : [];
+      if (e.kind !== 'blocked' || e.tool !== tool) return [];
+      return [typeof summary === 'string' ? summary : undefined];
     } catch {
       unread.push(at + 1);
       return [];
@@ -763,9 +768,19 @@ function blocked(log: string, tool: string) {
   return { refusals, unread };
 }
 
+/** The lines of a log that do not parse: the first few, then how many more. */
+function unparsed(unread: readonly number[]): string {
+  const shown = unread.slice(0, 3).join(', ');
+  if (unread.length === 1) return `line ${shown} of it does not parse`;
+  const more = unread.length > 3 ? ` and ${String(unread.length - 3)} more` : '';
+  return `lines ${shown}${more} of it do not parse`;
+}
+
 /**
- * Whether the session's PreCompact hook blocked a compaction, from its own log: its context was
- * full, so its item is too big for one session (T061). Null when the log cannot tell, unreadable
+ * Whether the session's PreCompact hook blocked a compaction, from its own log, by any blocked
+ * event, with a summary or none: its context was full, so its item is too big for one session
+ * (T061). Until T125's part (7) tells a subagent's compaction apart, a subagent's counts too.
+ * Null when the log cannot tell, unreadable
  * or with a line that does not parse.
  */
 function contextFull(home: string, id: string): boolean | null {
@@ -786,10 +801,8 @@ function startRefusal(home: string, id: string): string {
   const { refusals, unread } = read;
   // A hook killed mid-write leaves a line that does not parse, which may be its refusal.
   const cut =
-    unread.length === 0
-      ? ''
-      : `; line ${unread.join(', ')} of it ${unread.length === 1 ? 'does' : 'do'} not parse, which may be a refusal cut off mid-write`;
-  const refused = refusals.at(-1);
+    unread.length === 0 ? '' : `; ${unparsed(unread)}, which may be a refusal cut off mid-write`;
+  const refused = refusals.filter((summary) => summary !== undefined).at(-1);
   return refused === undefined
     ? `the session-start hook logged no refusal that can be read in ${log}${cut}, so it failed before it could or never ran; find why before this item's next session`
     : `the session-start hook refused it: ${visible(refused)}; fix that before this item's next session (its log is ${log}${cut})`;
@@ -904,13 +917,17 @@ const sha256 = (bytes: Buffer) => createHash('sha256').update(bytes).digest('hex
 
 /** The events whose hooks are guards: one that cannot run must block the action (T082). */
 const GUARD_EVENTS = new Set(['SessionStart', 'PreToolUse', 'PreCompact']);
-const NO_HOOKS =
-  'installs no factory hooks; local sessions wait for the guards (slice 28); re-pin main to a release that installs the factory hooks';
-/** The way out when the release's own settings break the rule: installing it cannot help. */
-const REPIN =
-  "; re-pin main to a release whose settings register each hook as the installed factory's do";
-/** The way out when the pin and the installed factory disagree on what is served. */
-const AGREE = '; install the pinned release, or re-pin main to the installed factory’s release';
+const NO_HOOKS = 'installs no factory hooks; local sessions wait for the guards (slice 28)';
+/** Main's way out for each reason; a branch's is its own (`guardrailCheck`). */
+const WAYS = {
+  // An old pin: only a release that installs them helps.
+  hooks: 're-pin main to a release that installs the factory hooks',
+  // The release's own settings break the rule: installing it cannot help.
+  repin: "re-pin main to a release whose settings register each hook as the installed factory's do",
+  // The pin and the installed factory disagree on what is served.
+  agree: "install the pinned release, or re-pin main to the installed factory's release",
+} as const;
+type Problem = { why: string; way: keyof typeof WAYS };
 const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value]);
 
 /**
@@ -932,16 +949,20 @@ function hookEvents(): Map<string, Set<string>> {
  * any other blocks every call, and every guard with `onFailure: "block"`, which needs Claude
  * Code 2.1.295 or later; undefined when they do.
  */
-function hookProblem(settings: Buffer | undefined): string | undefined {
+function hookProblem(settings: Buffer | undefined): Problem | undefined {
+  const none: Problem = { why: NO_HOOKS, way: 'hooks' };
+  const repin = (why: string): Problem => ({ why, way: 'repin' });
+  const agree = (why: string): Problem => ({ why, way: 'agree' });
   let hooks: unknown;
   try {
     hooks = (JSON.parse(settings?.toString('utf8') ?? '') as { hooks?: unknown }).hooks;
   } catch {
-    return NO_HOOKS;
+    return none;
   }
-  if (typeof hooks !== 'object' || hooks === null) return NO_HOOKS;
+  if (typeof hooks !== 'object' || hooks === null) return none;
   const byEvent = hooks as Record<string, unknown>;
-  if (!HOOK_EVENTS.every((event) => list(byEvent[event] ?? []).length > 0)) return NO_HOOKS;
+  const missing = HOOK_EVENTS.find((event) => list(byEvent[event] ?? []).length === 0);
+  if (missing !== undefined) return { why: `registers no ${missing} hook`, way: 'hooks' };
   const events = hookEvents();
   for (const [event, groups] of Object.entries(byEvent))
     for (const group of list(groups))
@@ -949,29 +970,39 @@ function hookProblem(settings: Buffer | undefined): string | undefined {
         const hook = (one ?? {}) as { type?: unknown; command?: unknown; args?: unknown };
         const args = list(hook.args);
         if (hook.type !== 'command' || hook.command !== 'factory' || args.length !== 2)
-          return `registers a ${event} hook that is not factory hook <name> in exec form${REPIN}`;
+          return repin(`registers a ${event} hook that is not factory hook <name> in exec form`);
         if (args[0] !== 'hook' || typeof args[1] !== 'string')
-          return `registers a ${event} hook that is not factory hook <name> in exec form${REPIN}`;
+          return repin(`registers a ${event} hook that is not factory hook <name> in exec form`);
         if (!SERVED_HOOKS.includes(args[1]))
-          return `registers the ${event} hook factory hook ${visible(args[1])}, which the installed factory does not serve${AGREE}`;
+          return agree(
+            `registers the ${event} hook factory hook ${visible(args[1])}, which the installed factory does not serve`,
+          );
         const served = events.get(args[1]) ?? new Set<string>();
         if (!served.has(event))
-          return `registers factory hook ${args[1]} under ${visible(event)}; the installed factory serves it under ${[...served].join(', ') || 'no event'}${AGREE}`;
+          return agree(
+            `registers factory hook ${args[1]} under ${visible(event)}; the installed factory serves it under ${[...served].join(', ') || 'no event'}`,
+          );
         if (GUARD_EVENTS.has(event) && (one as { onFailure?: unknown }).onFailure !== 'block')
-          return `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"${REPIN}`;
+          return repin(
+            `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"`,
+          );
       }
   return undefined;
 }
 
 /**
  * The protected files found (path → SHA-256) against the manifest, in both directions: every
- * manifest file present with its hash, and every hashed protected file listed. Then the hooks.
+ * manifest file present with its hash, and every hashed protected file listed. Then the hooks,
+ * with the way out: main's for main, or, for a branch that `kept` from its merge base another
+ * release than main's pin, to file the item again, since neither a pin nor an install changes
+ * what the branch carries until main is merged into it.
  */
 export function guardrailCheck(
   found: Readonly<Record<string, string>>,
   settings: Buffer | undefined,
   manifest: GuardrailManifest,
   where: string,
+  kept = false,
 ): Availability {
   const tampered = (reason: string): Availability => ({
     ok: false,
@@ -985,8 +1016,11 @@ export function guardrailCheck(
   for (const path of Object.keys(found))
     if (manifest.files[path] === undefined) return tampered(`${path} is not in the manifest`);
   const problem = hookProblem(settings);
-  if (problem !== undefined) return { ok: false, reason: `release ${manifest.release} ${problem}` };
-  return { ok: true };
+  if (problem === undefined) return { ok: true };
+  const way = kept
+    ? `${where} keeps release ${manifest.release} from its merge base until main is merged into it: close the item and file it again`
+    : WAYS[problem.way];
+  return { ok: false, reason: `release ${manifest.release} ${problem.why}; ${way}` };
 }
 
 export interface LocalOptions {
@@ -1136,9 +1170,9 @@ export class LocalLauncher implements SessionLauncher {
 
   /**
    * The checks on the branch's history, in the factory's own clone: its own commits since the
-   * merge base change no protected path, and the manifest is the release pinned at the merge base.
+   * merge base change no protected path; the release pinned at the merge base, and its manifest.
    */
-  private history(project: string, branch: string, heads: Heads): GuardrailManifest {
+  private history(project: string, branch: string, heads: Heads) {
     const { env } = this.options;
     const base = step('the merge base with main', () =>
       mergeBase(project, heads.main, heads.head, env),
@@ -1154,7 +1188,7 @@ export class LocalLauncher implements SessionLauncher {
       );
     const pin = step(`the release pinned at ${base}`, () => this.config(project, base));
     try {
-      return this.options.release(pin.factory_release);
+      return { manifest: this.options.release(pin.factory_release), pin: pin.factory_release };
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       // A tag that is not the Owner's is tampering. One git cannot read, and any other failure,
@@ -1212,10 +1246,12 @@ export class LocalLauncher implements SessionLauncher {
         this.heads(request.project, request.branch),
       );
       at = heads.head;
-      const manifest = this.history(request.project, request.branch, heads);
-      const { repo, inbox_issue } = step("reading main's config", () =>
+      const { manifest, pin } = this.history(request.project, request.branch, heads);
+      const { repo, inbox_issue, factory_release } = step("reading main's config", () =>
         this.config(request.project, heads.main),
       );
+      // A branch made before main's pin moved keeps the release pinned at its merge base.
+      const kept = pin.tag !== factory_release.tag || pin.sha !== factory_release.sha;
       const token = runsGh(factoryPolicy(), request.role)
         ? step("reading the project's gh token", () => this.ghToken(request.role, repo))
         : undefined;
@@ -1237,7 +1273,9 @@ export class LocalLauncher implements SessionLauncher {
         this.treeFiles(cwd, 'HEAD', request.branch),
       );
       const committed =
-        'ok' in tree ? tree : guardrailCheck(tree.found, tree.settings, manifest, request.branch);
+        'ok' in tree
+          ? tree
+          : guardrailCheck(tree.found, tree.settings, manifest, request.branch, kept);
       if (!committed.ok && committed.urgent === true)
         throw new LaunchRefused(`no local session started: ${committed.reason}`, true);
       let found: Record<string, string>;
@@ -1249,7 +1287,7 @@ export class LocalLauncher implements SessionLauncher {
       }
       const settingsPath = join(cwd, SETTINGS);
       const settings = existsSync(settingsPath) ? readFileSync(settingsPath) : undefined;
-      const check = guardrailCheck(found, settings, manifest, request.branch);
+      const check = guardrailCheck(found, settings, manifest, request.branch, kept);
       if (!check.ok)
         throw new LaunchRefused(`no local session started: ${check.reason}`, check.urgent);
       const roleFile = join(cwd, '.claude', 'agents', `${request.role}.md`);
