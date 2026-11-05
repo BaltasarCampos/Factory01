@@ -316,7 +316,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
     // local mode the tip is its manifest only by the failure record, running or spent; a spent
     // one still waits, as T059's does in cloud mode.
     const station = STATION_OF[item.state];
-    const running = (id: string) => sessionRunning(ctx.failures?.home ?? '', id) !== undefined;
+    const running = (home: string, id: string) => sessionRunning(home, id) !== undefined;
     const pending =
       tip !== undefined &&
       station !== undefined &&

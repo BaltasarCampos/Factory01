@@ -1,5 +1,8 @@
 // Fake session launcher: records every launch instead of starting a Claude Code session.
-// Mirrors the `SessionLauncher` interface of src/dispatcher/launcher/types.ts (T037).
+// Mirrors the `SessionLauncher` interface of src/dispatcher/launcher/types.ts (T037), and refuses
+// as the local launcher does when `starting` throws: a `LaunchRefused`, with nothing launched.
+import { LaunchRefused } from '../../src/dispatcher/launcher/types.js';
+import { visible } from '../../src/notify/summary.js';
 
 export interface LaunchRequest {
   project: string;
@@ -25,6 +28,10 @@ export class FakeLauncher {
   private isAvailable = true;
   /** What every launch throws once the session has run, such as a `SessionFailed`. */
   failure?: Error;
+  /** What every launch throws before `starting`, as the local launcher's checks refuse. */
+  refusal?: LaunchRefused;
+  /** Runs before `starting`, as anything else may between the manifest's issue and the start. */
+  beforeStart?: () => void;
   /** The heartbeats every launch gives while its session runs. */
   beats: { elapsed: number; turns: number }[] = [];
 
@@ -49,8 +56,15 @@ export class FakeLauncher {
 
   launch(request: LaunchRequest): Promise<{ sessionId: string }> {
     if (!this.isAvailable) return Promise.reject(new Error(`${this.mode} launcher unavailable`));
+    if (this.refusal !== undefined) return Promise.reject(this.refusal);
     const sessionId = `fake-${this.mode}-${String(this.launches.length + 1)}`;
-    request.starting?.(sessionId);
+    this.beforeStart?.();
+    try {
+      request.starting?.(sessionId);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      return Promise.reject(new LaunchRefused(`no local session started: ${visible(why)}`));
+    }
     this.launches.push({ ...request, mode: this.mode, sessionId });
     for (const beat of this.beats) request.heartbeat?.(beat);
     return this.failure === undefined

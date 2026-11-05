@@ -78,7 +78,7 @@ import type { GuardrailManifest, ProjectConfig, ReleasePin, RoleName } from '../
 import { ReleaseTagError } from '../../release/tag.js';
 import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
-import { factoryHash, hashOnce } from '../failures.js';
+import { hashOnce } from '../failures.js';
 import {
   LaunchRefused,
   SessionCapped,
@@ -338,17 +338,33 @@ export const localInvocation = (
 
 /** The installed factory's root, holding `factory/` and its code's folder, `dist/` or `src/`. */
 const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
-const FOLDERS = [relative(ROOT, fileURLToPath(import.meta.url)).split(sep)[0] ?? '', 'factory'];
+/** The folder the code runs from, below the root: `dist/` installed, `src/` under the tests. */
+const CODE = relative(ROOT, fileURLToPath(import.meta.url)).split(sep)[0] ?? '';
 let installed: (() => string) | undefined;
 /**
  * At `factory dispatch` or `factory run`'s start, the installed factory's hash, so a release
- * installed while it runs never gives the code it started with the new release's hash.
+ * installed while it runs never gives the code it started with the new release's hash. Code that
+ * runs from neither `dist/` nor `src/` has no hash; like any failure to take it, that is an error
+ * only when a local pass asks for it.
  */
 export function snapshotFactory(): void {
-  installed = hashOnce(ROOT, FOLDERS);
+  installed =
+    CODE === 'dist' || CODE === 'src'
+      ? hashOnce(ROOT, [CODE, 'factory'])
+      : () => {
+          throw new EnvironmentError(
+            `the installed factory cannot be hashed: its code runs from ${visible(CODE)} below ${ROOT}, not dist/ or src/; reinstall the pinned release`,
+          );
+        };
 }
-/** The installed factory's hash: the one taken at the start, or taken now when none was. */
-export const installedHash = () => installed?.() ?? factoryHash(ROOT, FOLDERS);
+/** The installed factory's hash, the one taken at the start; none taken is an error. */
+export const installedHash = (): string => {
+  if (installed === undefined)
+    throw new EnvironmentError(
+      'the installed factory was not read at start, so it has no hash to record; run factory dispatch or factory run again',
+    );
+  return installed();
+};
 /** A file of the installed factory, never the release a branch pins. */
 const factoryFile = (path: string) => readFileSync(join(ROOT, 'factory', path), 'utf8');
 const factoryPolicy = () => loadPolicy(factoryFile('policy/roles.yaml'));
@@ -1296,6 +1312,11 @@ export class LocalLauncher implements SessionLauncher {
     if (request.feature !== expectedFeature(request))
       throw new LaunchRefused(
         `no local session started: ${JSON.stringify(request.feature)} is not the feature folder of ${request.role} on ${request.branch}`,
+      );
+    // A session at stations 2–6 is counted in its failure record before it can run (T061).
+    if (request.station >= 2 && request.station <= 6 && request.starting === undefined)
+      throw new LaunchRefused(
+        `no local session started: the ${request.role} session at station ${String(request.station)} has no failure record to count it in, and a session the count cannot see never starts; it is the factory's own error, so reinstall the pinned release`,
       );
     if (this.running) throw new LaunchRefused('a local session is already running');
     this.running = true;

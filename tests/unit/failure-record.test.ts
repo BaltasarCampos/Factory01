@@ -22,7 +22,7 @@ import {
   tipState,
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
-import { installedHash } from '../../src/dispatcher/launcher/local.js';
+import { installedHash, snapshotFactory } from '../../src/dispatcher/launcher/local.js';
 import { tempDir } from '../helpers/keys.js';
 
 const HEAD = 'c'.repeat(40);
@@ -132,7 +132,9 @@ describe('the failure record of local sessions (T061)', () => {
     const at = { repo: 'owner/project', item: 42, station: 4 } as const;
     const file = failureFile(home, 'owner/project', 42, 4);
     const live = new Set<string>();
-    const state = (tip: string) => tipState(records, at, tip, (id) => live.has(id));
+    // The session's own home is the record's, never another.
+    const state = (tip: string) =>
+      tipState(records, at, tip, (where, id) => where === home && live.has(id));
     expect(state(HEAD)).toEqual({ state: 'new' });
     writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 2 });
     expect(state(HEAD)).toEqual({ state: 'spent', count: 2 });
@@ -213,9 +215,13 @@ describe("the installed factory's hash (T061)", () => {
     const before = t.hash();
     writeFileSync(join(t.root, 'README.md'), 'x\n');
     expect(t.hash()).toBe(before);
-    // The real one: the folder this code runs from and factory/.
-    expect(installedHash()).toMatch(/^[0-9a-f]{64}$/);
-    expect(installedHash()).not.toBe(factoryHash(join(import.meta.dirname, '../..'), ['factory']));
+    // The real one, read at start: the folder this code runs from, src/ under the tests, and
+    // factory/; asked for before it was read, it throws rather than hash the files of now.
+    expect(installedHash).toThrow('the installed factory was not read at start');
+    snapshotFactory();
+    expect(installedHash()).toBe(
+      factoryHash(join(import.meta.dirname, '../..'), ['src', 'factory']),
+    );
   });
 
   it('hashes a symlink as its link, never following it', () => {
