@@ -1,6 +1,9 @@
 // Fake session launcher: records every launch instead of starting a Claude Code session.
 // Mirrors the `SessionLauncher` interface of src/dispatcher/launcher/types.ts (T037), and refuses
 // as the local launcher does when `starting` throws: a `LaunchRefused`, with nothing launched.
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { LaunchRefused } from '../../src/dispatcher/launcher/types.js';
 import { visible } from '../../src/notify/summary.js';
 
@@ -35,8 +38,12 @@ export class FakeLauncher {
   /** The heartbeats every launch gives while its session runs. */
   beats: { elapsed: number; turns: number }[] = [];
 
-  constructor(mode: 'cloud' | 'local' = 'cloud') {
+  /** Where a local launcher keeps its sessions, and so their failure records. */
+  readonly home: string;
+
+  constructor(mode: 'cloud' | 'local' = 'cloud', home?: string) {
     this.mode = mode;
+    this.home = home ?? mkdtempSync(join(tmpdir(), 'fake-launcher-'));
   }
 
   /** Make the launcher report itself unavailable (cloud outage, missing `claude` binary). */

@@ -86,6 +86,8 @@ export type StationEvidence = Omit<Evidence, 'owner' | 'rotationPending' | 'hist
   buildFailure?: string;
   /** A commit that makes the branch's `answers.md` not the Owner's: its answers count as none (T182). */
   answersTampered?: { commit: string; reason: string };
+  /** In local mode, the tip is the dispatcher's own manifest, by its failure record (T061). */
+  ownManifest?: 'running' | 'spent';
 };
 
 export interface Candidate {
@@ -126,8 +128,8 @@ export interface DispatchContext {
   now?: () => Date;
   /** Hears a line about once a minute while a local session runs: `factory run`'s heartbeat. */
   heartbeat?: (line: string) => void;
-  /** Local sessions' failure records, under the Owner's home (T061); a local launch needs them. */
-  failures?: FailureRecords;
+  /** Local sessions' failure records, under the local launcher's home (T061). */
+  failures: FailureRecords;
   gh?: GhOptions;
 }
 

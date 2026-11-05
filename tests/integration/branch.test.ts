@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import { EnvironmentError } from '../../src/cli/env.js';
@@ -21,6 +21,7 @@ import {
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
 import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
+import { groupRecord } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
@@ -1584,6 +1585,47 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       await dispatchOnce(u.ctx);
       expect(u[agents].launches).toHaveLength(agents === 'local' ? 2 : 1);
     }
+  });
+
+  it('in local mode tells its own manifest running while its last session’s group lives and spent once it has ended, stopping on a group record it cannot read (T061)', async () => {
+    const t = setup();
+    await dispatchOnce(t.ctx); // the Specify manifest, its record naming fake-local-1
+    const seen: (string | undefined)[] = [];
+    const evidence = t.ctx.gatherEvidence;
+    t.ctx.gatherEvidence = async (...args) => {
+      const found = await evidence(...args);
+      seen.push(found.ownManifest);
+      return found;
+    };
+    // The group lives under the home the records are in, where the launcher keeps its sessions.
+    const dir = join(t.home, '.factory', 'sessions', 'fake-local-1');
+    mkdirSync(dir, { recursive: true });
+    const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    const pgid = child.pid ?? 0;
+    try {
+      writeFileSync(join(dir, 'group.json'), JSON.stringify(groupRecord(pgid)));
+      await dispatchOnce(t.ctx);
+    } finally {
+      process.kill(-pgid, 'SIGKILL');
+    }
+    await vi.waitFor(() => {
+      expect(() => process.kill(-pgid, 0)).toThrow();
+    });
+    await dispatchOnce(t.ctx);
+    expect(seen).toEqual(['running', 'spent']);
+    expect(t.local.launches).toHaveLength(1);
+
+    // Never read as spent: a group record that is not one, or one that cannot be read.
+    writeFileSync(join(dir, 'group.json'), '{}');
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow(
+      `${join(dir, 'group.json')} cannot be read: it is not a process group record`,
+    );
+    rmSync(dir, { recursive: true });
+    writeFileSync(dir, '');
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow(
+      new RegExp(`^${join(dir, 'group.json')} cannot be read: ENOTDIR`),
+    );
+    expect(t.local.launches).toHaveLength(1);
   });
 
   it("never stacks a manifest on the dispatcher's own spent one, whose count it would wipe (T061)", () => {

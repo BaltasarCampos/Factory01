@@ -86,8 +86,8 @@ import {
   type Availability,
   type LaunchRequest,
   type LaunchResult,
+  type LocalSessionLauncher,
   type Notice,
-  type SessionLauncher,
 } from './types.js';
 
 export type Runner = (
@@ -478,9 +478,12 @@ export function sessionRunning(home: string, id: string): string | undefined {
   try {
     text = readFileSync(file, 'utf8');
   } catch (err) {
-    // No group recorded, or a stray file that is no session's folder.
-    if (errno(err) === 'ENOENT' || errno(err) === 'ENOTDIR') return undefined;
-    throw err;
+    // No group recorded; any other failure never reads as a session that has ended.
+    if (errno(err) === 'ENOENT') return undefined;
+    const why = err instanceof Error ? err.message : String(err);
+    throw new EnvironmentError(
+      `${file} cannot be read: ${visible(why)}; remove it once ps -eo pid,pgid,args shows nothing of session ${visible(id)}`,
+    );
   }
   let group: Message;
   try {
@@ -1125,7 +1128,7 @@ export interface LocalOptions {
   heartbeat?: number;
 }
 
-export class LocalLauncher implements SessionLauncher {
+export class LocalLauncher implements LocalSessionLauncher {
   readonly mode = 'local';
   private running = false;
   private readonly options: LocalOptions;
@@ -1134,6 +1137,11 @@ export class LocalLauncher implements SessionLauncher {
   constructor(options: LocalOptions) {
     this.options = options;
     this.run = options.run ?? runProcess;
+  }
+
+  /** Where its sessions' folders are, and so the failure records that count them (T061). */
+  get home(): string {
+    return this.options.home;
   }
 
   /**
@@ -1660,7 +1668,10 @@ export class LocalLauncher implements SessionLauncher {
     const sessions = join(this.options.home, '.factory', 'sessions');
     let ids: string[];
     try {
-      ids = readdirSync(sessions);
+      // A stray file there is no session's folder.
+      ids = readdirSync(sessions, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => entry.name);
     } catch (err) {
       if (errno(err) === 'ENOENT') return;
       throw err;

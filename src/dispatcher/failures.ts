@@ -141,13 +141,11 @@ export function writeFailureRecord(file: string, record: FailureRecord): void {
  * never stacks on, since that would wipe its count.
  */
 export function recordIssued(
-  records: FailureRecords | undefined,
+  records: FailureRecords,
   at: { repo: string; item: number; station: Station },
   head: string,
   parent: string,
 ): void {
-  if (records === undefined)
-    throw new EnvironmentError('no failure records are set up for local sessions');
   const file = failureFile(records.home, at.repo, at.item, at.station);
   if (readFailureRecord(file)?.head === parent)
     throw new StackRefused(
@@ -162,13 +160,11 @@ export function recordIssued(
  * run, so a record that cannot be read, names another head or cannot be written refuses it.
  */
 export function recordSession(
-  records: FailureRecords | undefined,
+  records: FailureRecords,
   at: { repo: string; item: number; station: Station },
   head: string,
   session: string,
 ): void {
-  if (records === undefined)
-    throw new EnvironmentError('no failure records are set up for local sessions');
   const file = failureFile(records.home, at.repo, at.item, at.station);
   const record = readFailureRecord(file);
   if (record?.head !== head)
@@ -184,14 +180,12 @@ export function recordSession(
  * or there is none. Under a newly installed factory its count reads as 0, with nothing written.
  */
 export function tipState(
-  records: FailureRecords | undefined,
+  records: FailureRecords,
   at: { repo: string; item: number; station: Station },
   tip: string,
   /** Whether the session with this id, its folder under this home, still runs. */
   running: (home: string, session: string) => boolean,
 ): { state: 'new' } | { state: 'running' | 'spent'; count: number } {
-  if (records === undefined)
-    throw new EnvironmentError('no failure records are set up for local sessions');
   const record = readFailureRecord(failureFile(records.home, at.repo, at.item, at.station));
   if (record?.head !== tip) return { state: 'new' };
   const count = record.factory === records.factory() ? record.count : 0;

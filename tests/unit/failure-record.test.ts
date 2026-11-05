@@ -96,9 +96,6 @@ describe('the failure record of local sessions (T061)', () => {
       writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: -1 });
     }).toThrow(/is malformed$/);
     expect(readFailureRecord(file)).toBeUndefined();
-    expect(() => {
-      recordIssued(undefined, { repo: 'owner/project', item: 42, station: 4 }, HEAD, HEAD);
-    }).toThrow(/no failure records are set up/);
   });
 
   it('records the session about to start at its head, and refuses one it cannot record', () => {
@@ -147,7 +144,6 @@ describe('the failure record of local sessions (T061)', () => {
     expect(tipState(installed, at, HEAD, () => false)).toEqual({ state: 'spent', count: 0 });
     // Read, never written.
     expect(readFailureRecord(file)).toMatchObject({ factory: FACTORY, count: 2 });
-    expect(() => tipState(undefined, at, HEAD, () => false)).toThrow(/no failure records/);
   });
 
   it.each(['owner/..', 'owner/.', '../project', 'owner/project/x', 'owner', 'own er/project'])(
