@@ -11,6 +11,7 @@ export interface LaunchRequest {
   files: readonly string[];
   prompt: string;
   heartbeat?: (progress: { elapsed: number; turns: number }) => void;
+  starting?: (session: string) => void;
 }
 
 export interface LaunchRecord extends LaunchRequest {
@@ -49,6 +50,7 @@ export class FakeLauncher {
   launch(request: LaunchRequest): Promise<{ sessionId: string }> {
     if (!this.isAvailable) return Promise.reject(new Error(`${this.mode} launcher unavailable`));
     const sessionId = `fake-${this.mode}-${String(this.launches.length + 1)}`;
+    request.starting?.(sessionId);
     this.launches.push({ ...request, mode: this.mode, sessionId });
     for (const beat of this.beats) request.heartbeat?.(beat);
     return this.failure === undefined

@@ -16,7 +16,6 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { EnvironmentError } from '../cli/env.js';
 import type { Station } from '../model/types.js';
 import { visible } from '../notify/summary.js';
@@ -26,10 +25,12 @@ export interface FailureRecord {
   head: string;
   /** The installed factory's hash when the manifest was issued (`factoryHash`). */
   factory: string;
-  /** The failed attempts at `head`. */
+  /** The attempts at `head`, each counted when it starts. */
   count: number;
   /** The last attempt's failure. */
   last?: string;
+  /** The id of the last session started at `head`, whose group tells whether it still runs. */
+  session?: string;
 }
 
 /** Where local sessions' failure records live, and the installed factory's hash. */
@@ -41,8 +42,39 @@ export interface FailureRecords {
 const why = (err: unknown) => visible(err instanceof Error ? err.message : String(err));
 const OUT = 'delete it, by its path, to start its count again';
 
-export const failureFile = (home: string, repo: string, item: number, station: Station) =>
-  join(home, '.factory', 'failures', ...repo.split('/'), `${String(item)}-${String(station)}.json`);
+/**
+ * The record's file for `repo`, exactly `owner/name` in GitHub's name characters, neither part
+ * `.` or `..`, both lower-cased, since GitHub names ignore case.
+ */
+export function failureFile(home: string, repo: string, item: number, station: Station) {
+  const parts = repo.toLowerCase().split('/');
+  const [owner = '', name = ''] = parts;
+  if (parts.length !== 2 || !/^[a-z0-9-]+$/.test(owner) || !/^(?!\.\.?$)[a-z0-9._-]+$/.test(name))
+    throw new EnvironmentError(
+      `${visible(repo)} is not a GitHub owner/name: it has no failure record`,
+    );
+  return join(home, '.factory', 'failures', owner, name, `${String(item)}-${String(station)}.json`);
+}
+
+/** Whether `value` is a record: what is read, and what may be written. */
+function isRecord(value: unknown): value is FailureRecord {
+  const record = (value ?? {}) as Record<string, unknown>;
+  const fields = ['head', 'factory', 'count', 'last', 'session'];
+  return (
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(record).every((key) => fields.includes(key)) &&
+    typeof record.head === 'string' &&
+    /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(record.head) &&
+    typeof record.factory === 'string' &&
+    /^[0-9a-f]{64}$/.test(record.factory) &&
+    Number.isSafeInteger(record.count) &&
+    (record.count as number) >= 0 &&
+    (record.last === undefined || typeof record.last === 'string') &&
+    (record.session === undefined ||
+      (typeof record.session === 'string' && /^[0-9A-Za-z-]{1,64}$/.test(record.session)))
+  );
+}
 
 /** The record at `file`; undefined when there is none. */
 export function readFailureRecord(file: string): FailureRecord | undefined {
@@ -59,25 +91,20 @@ export function readFailureRecord(file: string): FailureRecord | undefined {
   } catch (err) {
     throw new EnvironmentError(`the failure record ${file} is not JSON: ${why(err)}; ${OUT}`);
   }
-  const record = (value ?? {}) as Record<string, unknown>;
-  const fields = ['head', 'factory', 'count', 'last'];
-  const ok =
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    Object.keys(record).every((key) => fields.includes(key)) &&
-    typeof record.head === 'string' &&
-    /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(record.head) &&
-    typeof record.factory === 'string' &&
-    /^[0-9a-f]{64}$/.test(record.factory) &&
-    Number.isSafeInteger(record.count) &&
-    (record.count as number) >= 0 &&
-    (record.last === undefined || typeof record.last === 'string');
-  if (!ok) throw new EnvironmentError(`the failure record ${file} is malformed; ${OUT}`);
-  return record as unknown as FailureRecord;
+  if (!isRecord(value))
+    throw new EnvironmentError(`the failure record ${file} is malformed; ${OUT}`);
+  return value;
 }
 
-/** Writes the record by rename; one that cannot be written throws, naming the file. */
+/**
+ * Writes the record by rename; one the reader would refuse, or one that cannot be written, throws,
+ * naming the file, so a bad record never stops every later pass.
+ */
 export function writeFailureRecord(file: string, record: FailureRecord): void {
+  if (!isRecord(record))
+    throw new EnvironmentError(
+      `the failure record ${file} is not written: ${visible(JSON.stringify(record))} is malformed`,
+    );
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
@@ -89,30 +116,74 @@ export function writeFailureRecord(file: string, record: FailureRecord): void {
     } catch {
       // Its folder cannot be reached either: there is no temporary file to remove.
     }
-    throw new EnvironmentError(`the failure record ${file} cannot be written: ${why(err)}`);
+    throw new EnvironmentError(
+      `the failure record ${file} cannot be written: ${why(err)}; check that ${dirname(file)} can be written and its disk has free space, then run the factory again`,
+    );
   }
 }
 
 /**
- * The dispatcher's manifest commit `head`, about to be pushed for a local session: a new record,
- * count 0, so a failure to write it stops the pass before the push.
+ * The dispatcher's manifest commit `head` on `parent`, about to be pushed for a local session: a
+ * new record, count 0, so a failure to write it stops the pass before the push. The record there
+ * is read first, and one that names `parent` is the factory's own spent manifest, which a new one
+ * never stacks on, since that would wipe its count.
  */
 export function recordIssued(
   records: FailureRecords | undefined,
   at: { repo: string; item: number; station: Station },
   head: string,
+  parent: string,
 ): void {
   if (records === undefined)
     throw new EnvironmentError('no failure records are set up for local sessions');
   const file = failureFile(records.home, at.repo, at.item, at.station);
+  if (readFailureRecord(file)?.head === parent)
+    throw new EnvironmentError(
+      `no manifest is pushed on ${parent.slice(0, 12)}: the failure record ${file} names it as the dispatcher's own manifest, which a new one never stacks on; ${OUT}`,
+    );
   writeFailureRecord(file, { head, factory: records.factory(), count: 0 });
 }
 
-/** The installed factory: the folder its code runs from, `dist/` or `src/`, and `factory/`. */
-const ROOT = fileURLToPath(new URL('../..', import.meta.url));
-const CODE = fileURLToPath(new URL('..', import.meta.url))
-  .slice(ROOT.length)
-  .replace(/\/$/, '');
+/**
+ * The session about to start at `head`, the record's: its id goes in the record before it can
+ * run, so a record that cannot be read, names another head or cannot be written refuses it.
+ */
+export function recordSession(
+  records: FailureRecords | undefined,
+  at: { repo: string; item: number; station: Station },
+  head: string,
+  session: string,
+): void {
+  if (records === undefined)
+    throw new EnvironmentError('no failure records are set up for local sessions');
+  const file = failureFile(records.home, at.repo, at.item, at.station);
+  const record = readFailureRecord(file);
+  if (record?.head !== head)
+    throw new EnvironmentError(
+      `the failure record ${file} does not name ${head.slice(0, 12)}, the manifest this session starts on; run the factory again`,
+    );
+  writeFailureRecord(file, { ...record, session });
+}
+
+/**
+ * What the record says of `tip` in local mode: running while the group of the session it last
+ * started there runs, spent when nothing of it runs, and a new head when it names another commit
+ * or there is none. Under a newly installed factory its count reads as 0, with nothing written.
+ */
+export function tipState(
+  records: FailureRecords | undefined,
+  at: { repo: string; item: number; station: Station },
+  tip: string,
+  running: (session: string) => boolean,
+): { state: 'new' } | { state: 'running' | 'spent'; count: number } {
+  if (records === undefined)
+    throw new EnvironmentError('no failure records are set up for local sessions');
+  const record = readFailureRecord(failureFile(records.home, at.repo, at.item, at.station));
+  if (record?.head !== tip) return { state: 'new' };
+  const count = record.factory === records.factory() ? record.count : 0;
+  const live = record.session !== undefined && running(record.session);
+  return { state: live ? 'running' : 'spent', count };
+}
 
 /**
  * A SHA-256 over every file of `folders` under `root`, each by its path from `root` and its
@@ -120,14 +191,14 @@ const CODE = fileURLToPath(new URL('..', import.meta.url))
  * hashed as its link, never followed. Anything else, or anything that cannot be read, throws,
  * naming it: never an empty or partial hash.
  */
-export function factoryHash(root = ROOT, folders: readonly string[] = [CODE, 'factory']): string {
+export function factoryHash(root: string, folders: readonly string[]): string {
   const hash = createHash('sha256');
   const named = <T>(path: string, read: () => T): T => {
     try {
       return read();
     } catch (err) {
       throw new EnvironmentError(
-        `the installed factory cannot be hashed: ${join(root, path)}: ${why(err)}`,
+        `the installed factory cannot be hashed: ${join(root, path)}: ${why(err)}; reinstall the pinned release, or remove that file if it is not the factory's`,
       );
     }
   };
@@ -151,4 +222,19 @@ export function factoryHash(root = ROOT, folders: readonly string[] = [CODE, 'fa
   };
   for (const folder of folders) add(folder);
   return hash.digest('hex');
+}
+
+/**
+ * The factory's hash under `root`, taken now, once: what a long run records is the release it
+ * started with. A failure to take it is raised only when the hash is needed.
+ */
+export function hashOnce(root: string, folders: readonly string[]): () => string {
+  try {
+    const hash = factoryHash(root, folders);
+    return () => hash;
+  } catch (err) {
+    return () => {
+      throw err;
+    };
+  }
 }

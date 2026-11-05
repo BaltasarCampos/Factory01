@@ -11,8 +11,8 @@ import type { CommandContext } from '../cli/commands.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
 import { dispatchOnce, type DispatchContext, type PassResult } from '../dispatcher/dispatch.js';
 import { gatherEvidence } from '../dispatcher/evidence.js';
-import { factoryHash } from '../dispatcher/failures.js';
 import { auditMain } from '../dispatcher/history-audit.js';
+import { installedHash, snapshotFactory } from '../dispatcher/launcher/local.js';
 import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
 import { projectHere } from './pause.js';
 
@@ -23,6 +23,8 @@ import { projectHere } from './pause.js';
 export async function projectDispatch(
   ctx: CommandContext,
 ): Promise<{ context: DispatchContext; close: () => void }> {
+  // The installed factory read once, at the start of `factory dispatch` or `factory run` (T061).
+  snapshotFactory();
   const project = await projectHere(ctx);
   const fetched = spawnSync('git', ['-C', ctx.cwd, 'fetch', '-q', 'origin', 'main'], {
     env: ctx.env,
@@ -33,6 +35,7 @@ export async function projectDispatch(
   const dir = mkdtempSync(join(tmpdir(), 'factory-keys-'));
   const keysFor = releaseKeysFor(ctx.env, dir);
   const out = ctx.io.stdout;
+  const failures = { home: project.home, factory: installedHash };
   const context: DispatchContext = {
     projectDir: ctx.cwd,
     keysFor,
@@ -42,6 +45,7 @@ export async function projectDispatch(
     gatherEvidence: gatherEvidence({
       ...{ projectDir: ctx.cwd, gh: { env: ctx.env } },
       factory: factorySource(ctx.env),
+      failures,
     }),
     launchers: ctx.launchers,
     stationPrompt: (pin, facts) =>
@@ -51,7 +55,7 @@ export async function projectDispatch(
       return Promise.resolve();
     },
     now: ctx.now,
-    failures: { home: project.home, factory: () => factoryHash() },
+    failures,
     gh: { env: ctx.env },
   };
   const close = () => {
