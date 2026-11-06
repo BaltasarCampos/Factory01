@@ -1264,6 +1264,14 @@ export class LocalLauncher implements LocalSessionLauncher {
 
   async available(project: string): Promise<Availability> {
     const { mainRef = 'origin/main' } = this.options;
+    // What refuses every item, before any manifest is pushed (T061); the launch looks again last.
+    try {
+      this.stillRunning();
+    } catch (err) {
+      if (!(err instanceof LaunchRefused)) throw err;
+      const kind = err.kind === undefined ? {} : { kind: err.kind };
+      return { ok: false, reason: err.message, urgent: err.urgent, ...kind };
+    }
     // Once, first: a fetch while it is checked cannot make it name a commit it did not check.
     let head: string;
     try {

@@ -24,7 +24,9 @@ export interface LaunchRequest {
 }
 
 /** Whether a session can start now; if not, why, and whether it is tampering (urgent). */
-export type Availability = { ok: true } | { ok: false; reason: string; urgent?: boolean };
+export type Availability =
+  | { ok: true }
+  | { ok: false; reason: string; urgent?: boolean; /** The alert's kind. */ kind?: string };
 
 /** An info alert for the Owner about a session that ran, such as another Claude Code version. */
 export interface Notice {

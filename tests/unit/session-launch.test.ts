@@ -1811,6 +1811,20 @@ describe('LocalLauncher (research R8, R9)', () => {
         }
       });
 
+      it('is unavailable, urgent, while a session runs, and stops on a stray entry, before any manifest is pushed (T061)', async () => {
+        const t = setup();
+        const { pgid } = recorded(t.home, 'sleep 30');
+        try {
+          const busy = await t.available();
+          expect(busy).toMatchObject({ ok: false, urgent: true, kind: 'session-running' });
+          expect('reason' in busy ? busy.reason : '').toMatch(`session ${OLD} is still running`);
+        } finally {
+          stop(pgid);
+        }
+        symlinkSync(homeDir(), join(t.home, '.factory', 'sessions', 'linked'));
+        await expect(t.available()).rejects.toThrow(/linked is not a session's folder/);
+      });
+
       it('reads a session folder by its markers, and fails closed when it has none (T061)', () => {
         const home = homeDir();
         const { dir, pgid } = recorded(home, 'sleep 30');

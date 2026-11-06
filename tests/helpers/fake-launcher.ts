@@ -4,7 +4,7 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { LaunchRefused } from '../../src/dispatcher/launcher/types.js';
+import { LaunchRefused, type Availability } from '../../src/dispatcher/launcher/types.js';
 import { visible } from '../../src/notify/summary.js';
 
 export interface LaunchRequest {
@@ -54,7 +54,7 @@ export class FakeLauncher {
   /** The projects whose availability was asked. */
   readonly asked: string[] = [];
 
-  available(project: string): Promise<{ ok: true } | { ok: false; reason: string }> {
+  available(project: string): Promise<Availability> {
     this.asked.push(project);
     return Promise.resolve(
       this.isAvailable ? { ok: true } : { ok: false, reason: `${this.mode} launcher unavailable` },

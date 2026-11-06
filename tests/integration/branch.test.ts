@@ -1594,6 +1594,21 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     expect(none).toEqual({ head: tip(refused), factory: HASH, count: 0 });
   });
 
+  it('pushes no manifest while the launcher finds a session still running, with one urgent alert of its kind (T061)', async () => {
+    const t = setup({ branch: CREATED, states: ['state:triaged'] });
+    const before = tip(t);
+    const reason = 'no local session started: session x is still running';
+    t.local.available = () =>
+      Promise.resolve({ ok: false, reason, urgent: true, kind: 'session-running' });
+    await dispatchOnce(t.ctx);
+    await dispatchOnce(t.ctx);
+
+    expect(tip(t)).toBe(before);
+    expect(t.local.launches).toEqual([]);
+    const running = t.inbox().filter((c) => /kind=session-running/.test(c.body));
+    expect(running).toHaveLength(1);
+  });
+
   it('in local mode records how a failed session ended after it: its text through visible() and its full context (T061)', async () => {
     const t = setup();
     const failure = new SessionFailed('claude exited 1: \u0007', false);

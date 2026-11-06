@@ -489,13 +489,13 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   const refuse = async (
     refused: string,
     urgent: boolean | undefined,
-    kind = 'launcher-unavailable',
+    kind?: string,
   ): Promise<PassResult> => {
     const text = `no session started for ${repo}: ${refused}`;
     await alertOnce(
       urgent === true
-        ? { urgency: 'urgent', kind: 'tampering', text }
-        : { urgency: 'info', kind, text },
+        ? { urgency: 'urgent', kind: kind ?? 'tampering', text }
+        : { urgency: 'info', kind: kind ?? 'launcher-unavailable', text },
     );
     return { ...result, refused };
   };
@@ -504,6 +504,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     return refuse(
       `the ${launcher.mode} launcher is unavailable: ${availability.reason}`,
       availability.urgent,
+      availability.kind,
     );
   const pass = { ctx, result, config, git, mainRef, keys, history, released, alertOnce };
   for (const target of targets) {
