@@ -45,6 +45,7 @@ import {
   accessSync,
   constants,
   existsSync,
+  linkSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -319,6 +320,20 @@ export interface SessionFiles {
 const WRITE_ONCE = { flag: 'wx', mode: 0o600 } as const;
 
 /**
+ * `text` written once at `file`, whole or not at all: a temporary file linked to its name, which
+ * fails if it exists, so a crash leaves no torn file there, only a temporary one beside it.
+ */
+export function writeWhole(file: string, text: string): void {
+  const temp = `${file}.${randomUUID()}.tmp`;
+  writeFileSync(temp, text, WRITE_ONCE);
+  try {
+    linkSync(temp, file);
+  } finally {
+    rmSync(temp, { force: true });
+  }
+}
+
+/**
  * The `claude` arguments for a local session (T061): its id, its own settings, only the project's
  * settings besides, only the factory's MCP server and `dontAsk`, so a tool call no rule allows is
  * refused; never auto mode, a resume or a skipped permission check.
@@ -494,9 +509,10 @@ export function sessionRunning(home: string, id: string): string | undefined {
     if (!valid || typeof start !== 'string' || typeof boot !== 'string')
       throw new Error('it is not a process group record');
   } catch (err) {
+    // The parse message quotes the file's text.
     const why = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `${file} cannot be read: ${why}; remove it once ps -eo pid,pgid,args shows nothing of session ${id}`,
+    throw new EnvironmentError(
+      `${file} cannot be read: ${visible(why)}; remove it once ps -eo pid,pgid,args shows nothing of session ${visible(id)}`,
     );
   }
   const pgid = group.pgid as number;
@@ -1481,7 +1497,7 @@ export class LocalLauncher implements LocalSessionLauncher {
               ...{ timeout: caps.minutes * (this.options.minute ?? 60_000), silence },
               started: (pgid) => {
                 ran.spawned = true;
-                writeFileSync(group, `${JSON.stringify(groupRecord(pgid))}\n`, WRITE_ONCE);
+                writeWhole(group, `${JSON.stringify(groupRecord(pgid))}\n`);
               },
             });
           } catch (err) {
@@ -1666,17 +1682,20 @@ export class LocalLauncher implements LocalSessionLauncher {
    */
   private stillRunning() {
     const sessions = join(this.options.home, '.factory', 'sessions');
-    let ids: string[];
+    let entries;
     try {
-      // A stray file there is no session's folder.
-      ids = readdirSync(sessions, { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => entry.name);
+      entries = readdirSync(sessions, { withFileTypes: true });
     } catch (err) {
       if (errno(err) === 'ENOENT') return;
       throw err;
     }
-    for (const id of ids) {
+    // Anything else, a symlink to a live session's folder included, could hide a running group.
+    const odd = entries.find((entry) => !entry.isDirectory());
+    if (odd !== undefined)
+      throw new EnvironmentError(
+        `no local session started: ${join(sessions, visible(odd.name))} is not a session's folder; remove it, then run the factory again`,
+      );
+    for (const id of entries.map((entry) => entry.name)) {
       const running = sessionRunning(this.options.home, id);
       if (running !== undefined) throw new LaunchRefused(running, true, 'session-running');
     }

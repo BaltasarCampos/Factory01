@@ -11,11 +11,13 @@ import {
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentError } from '../../src/cli/env.js';
-import { runLoop } from '../../src/commands/run.js';
+import { passLines } from '../../src/commands/dispatch.js';
+import { alertThrown, runLoop, thrownText } from '../../src/commands/run.js';
 import type { PassResult } from '../../src/dispatcher/dispatch.js';
 import { SERVED_HOOKS } from '../../src/commands/hook.js';
 import { CloudLauncher, cloudInvocation } from '../../src/dispatcher/launcher/cloud.js';
@@ -30,6 +32,7 @@ import {
   sessionTools,
   type Runner,
   sessionRunning,
+  writeWhole,
 } from '../../src/dispatcher/launcher/local.js';
 import {
   LaunchRefused,
@@ -42,6 +45,7 @@ import { runPreCompact } from '../../src/hooks/pre-compact.js';
 import { logBlocked, readSessionRecord } from '../../src/hooks/session.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
 import { MCP_JSON } from '../../src/install/render.js';
+import type { NewAlert } from '../../src/notify/inbox.js';
 import type { SessionSettings } from '../../src/install/session-settings.js';
 import type { GuardrailManifest, ReleasePin } from '../../src/model/types.js';
 import { ReleaseTagError } from '../../src/release/tag.js';
@@ -1756,7 +1760,103 @@ describe('LocalLauncher (research R8, R9)', () => {
           new RegExp(`${OLD}/group.json cannot be read: .*; remove it once ps .* session ${OLD}`),
         );
       });
+
+      it("shows a group.json's text, which its parse message quotes, through visible() (T061)", () => {
+        const home = homeDir();
+        const dir = join(home, '.factory', 'sessions', OLD);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'group.json'), '\u001b[2J{');
+        const read = () => sessionRunning(home, OLD);
+        expect(read).toThrow(EnvironmentError);
+        expect(read).toThrow(/group\.json cannot be read: .*\\u\{1b\}\[2J/);
+        expect(read).not.toThrow(/\u001b/);
+      });
+
+      it('writes group.json whole or not at all: a crash leaves only a temporary file beside it, read as no group (T061)', () => {
+        const home = homeDir();
+        const dir = join(home, '.factory', 'sessions', OLD);
+        mkdirSync(dir, { recursive: true });
+        const file = join(dir, 'group.json');
+        writeFileSync(`${file}.left.tmp`, '');
+        expect(sessionRunning(home, OLD)).toBeUndefined();
+        writeWhole(file, 'first\n');
+        expect(() => {
+          writeWhole(file, 'second\n');
+        }).toThrow(/EEXIST/);
+        expect(readFileSync(file, 'utf8')).toBe('first\n');
+        expect(statSync(file).mode & 0o777).toBe(0o600);
+        expect(readdirSync(dir).sort()).toEqual(['group.json', 'group.json.left.tmp']);
+      });
+
+      it("refuses a launch over anything under sessions/ that is not a plain folder, a symlink to a live session's included, naming it (T061)", async () => {
+        const t = setup();
+        const { dir, pgid } = recorded(homeDir(), 'sleep 30');
+        const sessions = join(t.home, '.factory', 'sessions');
+        mkdirSync(sessions, { recursive: true });
+        symlinkSync(dir, join(sessions, 'linked'));
+        try {
+          const refused = t.launch(REQUEST);
+          await expect(refused).rejects.toThrow(EnvironmentError);
+          await expect(refused).rejects.toThrow(
+            `no local session started: ${join(sessions, 'linked')} is not a session's folder; remove it, then run the factory again`,
+          );
+          expect(t.sessions()).toEqual([]);
+        } finally {
+          stop(pgid);
+        }
+      });
     });
+  });
+});
+
+describe('factory run: the alert for a pass that throws (T061)', () => {
+  const inbox = { repo: 'owner/project', inboxIssue: 1 };
+  const sink = () => {
+    const lines: string[] = [];
+    return { lines, write: (s: string) => void lines.push(s) };
+  };
+  const into = (posted: NewAlert[]) => (input: NewAlert) => {
+    posted.push(input);
+    return Promise.resolve();
+  };
+
+  it('alerts once per main head and message, compared with no temporary path, session id, pid or time', async () => {
+    const thrown = (n: string) =>
+      new EnvironmentError(
+        `${join(tmpdir(), `factory-keys-${n}`, 'x')} at 2026-11-06T10:0${n}:00Z: session 0b6c7f3e-2a4d-4c1e-9f00-00000000000${n} as process group 12${n}; kill -TERM -12${n}\nsecond line`,
+      );
+    const text = thrownText('96ca65d33f7c', thrown('1'));
+    expect(text).toBe(
+      'factory run stopped: a pass threw EnvironmentError: <tmp> at <time>: session <id> as process group <pid>; kill -TERM -<pid>; main is at 96ca65d33f7c',
+    );
+    expect(thrownText('96ca65d33f7c', thrown('2'))).toBe(text);
+    expect(thrownText('0123456789ab', thrown('2'))).not.toBe(text);
+    const posted: NewAlert[] = [];
+    const read = () => Promise.resolve(posted.map((a, i) => ({ ...a, id: String(i) })));
+    await alertThrown(inbox, text, sink(), { read, post: into(posted) });
+    await alertThrown(inbox, text, sink(), { read, post: into(posted) });
+    expect(posted).toEqual([{ urgency: 'urgent', kind: 'pass-threw', text }]);
+  });
+
+  it('shows the message through visible(), posts when the alerts cannot be read, and writes both errors to stderr when the post fails', async () => {
+    const text = thrownText('96ca65d33f7c', new Error('bad \u001b[2J name'));
+    expect(text).toBe(
+      'factory run stopped: a pass threw Error: bad \\u{1b}[2J name; main is at 96ca65d33f7c',
+    );
+    const posted: NewAlert[] = [];
+    const unread = sink();
+    const read = () => Promise.reject(new Error('gh: HTTP 502'));
+    await alertThrown(inbox, text, unread, { read, post: into(posted) });
+    expect(posted).toHaveLength(1);
+    expect(unread.lines.join('')).toBe(
+      "factory run: the inbox's alerts cannot be read, so it is alerted anyway: gh: HTTP 502\n",
+    );
+    const both = sink();
+    const post = () => Promise.reject(new Error('gh: HTTP 401'));
+    await alertThrown(inbox, text, both, { read: () => Promise.resolve([]), post });
+    expect(both.lines.join('')).toBe(
+      `factory run: ${text}\nfactory run: its alert cannot be posted: gh: HTTP 401\n`,
+    );
   });
 });
 
@@ -2367,6 +2467,13 @@ describe('factory run loop (FR-005)', () => {
       passes: 2,
       reason: failed,
     });
+  });
+
+  it('says which items held when a pass starts nothing because they hold (T061)', async () => {
+    const held = pass({ held: [{ issue: 3, reason: 'no manifest is pushed on 0123456789ab' }] });
+    const stop = await runLoop(passes(held), {});
+    expect(stop).toEqual({ passes: 1, reason: 'nothing started: #3 held' });
+    expect(passLines(held)).toBe('#3 holds: no manifest is pushed on 0123456789ab\n');
   });
 
   it('--once runs one pass, and the loop stops at its pass cap', async () => {

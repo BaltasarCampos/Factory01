@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
@@ -11,6 +12,7 @@ import {
   changedFiles,
   dispatchOnce,
   ownerAnswers,
+  shellWord,
   type DispatchContext,
 } from '../../src/dispatcher/dispatch.js';
 import { gatherEvidence } from '../../src/dispatcher/evidence.js';
@@ -1330,6 +1332,19 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(t.inbox()).toEqual([]);
     });
 
+    it('T061: with its failure record deleted, CI green at the manifest itself ticks nothing, and the task is issued again', async () => {
+      const t = await issued();
+      const manifest = tipOf(t);
+      buildTest(manifest, 'success');
+      rmSync(failureFile(t.home, REPO, ISSUE, 4));
+      await dispatchOnce(t.ctx);
+
+      expect(t.show(TASKS_MD)).toBe(TASKS);
+      expect(t.local.launches).toHaveLength(2);
+      expect(task(t)).toBe('T001');
+      expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(manifest);
+    });
+
     it("T061: holds Build, naming how to restore the clone's record, when the failure record names a tip the evidence reads as new", async () => {
       const t = await issued();
       const manifest = tipOf(t);
@@ -1345,9 +1360,11 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(t.local.launches).toHaveLength(1);
       expect(tipOf(t)).toBe(manifest);
       const file = failureFile(t.home, REPO, ISSUE, 4);
-      const reason = `no manifest is pushed on ${manifest.slice(0, 12)}: the failure record ${file} names it as the dispatcher's own manifest, which a new one never stacks on; delete it, by its path, to start its count again; the dispatcher's own record of that Build manifest is missing too: restore it with git -C ${t.project.path} update-ref refs/factory/build/${BRANCH} ${manifest}`;
+      const reason = `no manifest is pushed on ${manifest.slice(0, 12)}: the failure record ${file} names it as the dispatcher's own manifest, which a new one never stacks on; delete it, by its path, to start its count again; the dispatcher's own record of that Build manifest is missing too: restore it with git -C '${t.project.path}' update-ref refs/factory/build/${BRANCH} ${manifest}`;
       expect(result.held).toEqual([{ issue: ISSUE, reason }]);
       expect(alerts(t, 'manifest-held')).toEqual([`info #2 holds: ${reason}`]);
+      // The clone's path is one shell word, whatever it holds.
+      expect(shellWord("/a b/it's")).toBe(`'/a b/it'\\''s'`);
     });
 
     /** An item in Build with every task ticked and a current conflict report from Integrate. */
@@ -1601,7 +1618,10 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     const dir = join(t.home, '.factory', 'sessions', 'fake-local-1');
     mkdirSync(dir, { recursive: true });
     const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
-    const pgid = child.pid ?? 0;
+    // With no pid, killing group 0 would kill the test runner's own group.
+    await once(child, 'spawn');
+    const pgid = child.pid;
+    if (pgid === undefined) throw new Error('sleep has no pid');
     try {
       writeFileSync(join(dir, 'group.json'), JSON.stringify(groupRecord(pgid)));
       await dispatchOnce(t.ctx);

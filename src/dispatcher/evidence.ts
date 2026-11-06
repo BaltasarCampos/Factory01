@@ -202,6 +202,8 @@ async function buildRound(
     return { hold: { urgency: 'urgent', kind: 'tampering', text } };
   }
   if (!new RegExp(`^\\s*- \\[ \\] ${task}\\b`, 'm').test(tasks)) return issue();
+  // The manifest itself is the tip: no Builder work to judge, and CI there is the manifest's own.
+  if (issued === tip) return issue();
   const state = await buildTestAt(ctx, config, tip);
   if (state === 'success') return { tick: task, head: tip };
   if (['pending', 'missing'].includes(state)) return { hold: `build-test ${state}` };
