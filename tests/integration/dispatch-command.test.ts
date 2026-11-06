@@ -7,6 +7,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { randomBytes } from 'node:crypto';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
@@ -15,6 +16,7 @@ import { runCli } from '../../src/cli/commands.js';
 import { LocalLauncher, runProcess } from '../../src/dispatcher/launcher/local.js';
 import type { Launchers } from '../../src/dispatcher/launcher/types.js';
 import { STATES, type ApprovalRecord, type GuardrailManifest } from '../../src/model/types.js';
+import { parseAlert } from '../../src/notify/inbox.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, mergeBrief } from '../helpers/git-repo.js';
@@ -232,6 +234,27 @@ describe('factory dispatch and factory run (contracts/cli.md)', { timeout: 60_00
     const r = await t.cli(['run']);
 
     expect(r.stdout).toContain('still running: spec on owner/project#2, 3 min, 17 turns\n');
+  });
+
+  it('factory run alerts once, urgent, per main head and message when a pass throws (T061)', async () => {
+    const t = setup();
+    let n = 0;
+    t.local.available = () =>
+      Promise.reject(new Error(`no answer from ${join(tmpdir(), `factory-${String(++n)}`)}`));
+
+    const first = await t.cli(['run']);
+    await t.cli(['run']);
+
+    expect(first.code).not.toBe(0);
+    expect(first.stderr).toContain(`no answer from ${join(tmpdir(), 'factory-1')}`);
+    const head = t.project.git(['rev-parse', 'origin/main']).slice(0, 12);
+    const alerts = t.inbox().flatMap((c) => parseAlert({ ...c, id: String(c.id) }) ?? []);
+    expect(alerts.filter((a) => a.kind === 'pass-threw')).toEqual([
+      expect.objectContaining({
+        urgency: 'urgent',
+        text: `factory run stopped: a pass threw Error: no answer from <tmp>; main is at ${head}`,
+      }),
+    ]);
   });
 
   it('without launchers from the caller, an agents: cloud project starts no session and the Owner gets one info alert (T125)', async () => {

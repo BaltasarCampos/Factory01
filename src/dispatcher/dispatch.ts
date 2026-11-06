@@ -611,6 +611,9 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
   };
 }
 
+/** `word` as one shell word, single-quoted, for a command the Owner copies. */
+export const shellWord = (word: string) => `'${word.replaceAll("'", `'\\''`)}'`;
+
 /**
  * The record names the tip as the dispatcher's own spent manifest while the evidence read a new
  * head: no manifest is stacked on it, and the item holds with one alert per head (T061). At Build,
@@ -622,7 +625,7 @@ async function hold(pass: Pass, ref: ItemRef, station: Station, err: StackRefuse
     const name = issuedRef(ref.branch);
     const issued = gitAnswer(pass.git, ['rev-parse', '--verify', '-q', `${name}^{commit}`]);
     if (issued !== err.head)
-      restore = `; the dispatcher's own record of that Build manifest is ${issued === undefined ? 'missing too' : `at ${issued.slice(0, 12)} instead`}: restore it with git -C ${pass.ctx.projectDir} update-ref ${visible(name)} ${err.head}`;
+      restore = `; the dispatcher's own record of that Build manifest is ${issued === undefined ? 'missing too' : `at ${issued.slice(0, 12)} instead`}: restore it with git -C ${visible(shellWord(pass.ctx.projectDir))} update-ref ${visible(name)} ${err.head}`;
   }
   const reason = `${err.message}${restore}`;
   const text = `#${String(ref.issue)} holds: ${reason}`;

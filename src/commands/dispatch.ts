@@ -14,6 +14,7 @@ import { gatherEvidence } from '../dispatcher/evidence.js';
 import { auditMain } from '../dispatcher/history-audit.js';
 import { installedHash, snapshotFactory } from '../dispatcher/launcher/local.js';
 import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
+import type { InboxTarget } from '../notify/inbox.js';
 import { projectHere } from './pause.js';
 
 /**
@@ -22,7 +23,7 @@ import { projectHere } from './pause.js';
  */
 export async function projectDispatch(
   ctx: CommandContext,
-): Promise<{ context: DispatchContext; close: () => void }> {
+): Promise<{ context: DispatchContext; close: () => void; inbox: InboxTarget }> {
   // The installed factory read once, at the start of `factory dispatch` or `factory run` (T061).
   snapshotFactory();
   const project = await projectHere(ctx);
@@ -63,7 +64,7 @@ export async function projectDispatch(
   const close = () => {
     rmSync(dir, { recursive: true, force: true });
   };
-  return { context, close };
+  return { context, close, inbox: project };
 }
 
 /** What one pass did, for the Owner or the routine log. */
@@ -77,6 +78,7 @@ export function passLines(r: PassResult): string {
       : [
           `started ${r.launched.role} (station ${String(r.launched.station)}) for #${String(r.launched.issue)} on ${r.launched.branch}: ${r.launched.mode} session ${r.launched.sessionId}`,
         ]),
+    ...(r.held ?? []).map((h) => `#${String(h.issue)} holds: ${h.reason}`),
     ...(r.refused === undefined ? [] : [`no session started: ${r.refused}`]),
     ...(r.failed === undefined ? [] : [r.failed]),
   ];
