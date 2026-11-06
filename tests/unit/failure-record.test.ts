@@ -109,12 +109,16 @@ describe('the failure record of local sessions (T061)', () => {
     }).toThrow(none);
     writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 1 });
     recordSession(records, at, HEAD, 'id-1');
+    // The attempt is counted as it starts; under a newly installed factory the count starts again.
     expect(readFailureRecord(file)).toEqual({
       head: HEAD,
       factory: FACTORY,
-      count: 1,
+      count: 2,
       session: 'id-1',
     });
+    const installed = { home, factory: () => 'e'.repeat(64) };
+    recordSession(installed, at, HEAD, 'id-2');
+    expect(readFailureRecord(file)).toMatchObject({ factory: 'e'.repeat(64), count: 1 });
     expect(() => {
       recordSession(records, at, 'd'.repeat(40), 'id-2');
     }).toThrow(/does not name dddddddddddd/);
@@ -137,13 +141,13 @@ describe('the failure record of local sessions (T061)', () => {
     expect(state(HEAD)).toEqual({ state: 'spent', count: 2 });
     expect(state('d'.repeat(40))).toEqual({ state: 'new' });
     recordSession(records, at, HEAD, 'id-1');
-    expect(state(HEAD)).toEqual({ state: 'spent', count: 2 });
+    expect(state(HEAD)).toEqual({ state: 'spent', count: 3 });
     live.add('id-1');
-    expect(state(HEAD)).toEqual({ state: 'running', count: 2 });
+    expect(state(HEAD)).toEqual({ state: 'running', count: 3 });
     const installed = { home, factory: () => 'e'.repeat(64) };
     expect(tipState(installed, at, HEAD, () => false)).toEqual({ state: 'spent', count: 0 });
     // Read, never written.
-    expect(readFailureRecord(file)).toMatchObject({ factory: FACTORY, count: 2 });
+    expect(readFailureRecord(file)).toMatchObject({ factory: FACTORY, count: 3 });
   });
 
   it.each(['owner/..', 'owner/.', '../project', 'owner/project/x', 'owner', 'own er/project'])(

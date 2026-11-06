@@ -25,7 +25,7 @@ export interface FailureRecord {
   head: string;
   /** The installed factory's hash when the manifest was issued (`factoryHash`). */
   factory: string;
-  /** The attempts at `head`, each counted when it starts. */
+  /** The attempts at `head`, each counted when it starts, before claude spawns. */
   count: number;
   /** The last attempt's failure. */
   last?: string;
@@ -156,8 +156,10 @@ export function recordIssued(
 }
 
 /**
- * The session about to start at `head`, the record's: its id goes in the record before it can
- * run, so a record that cannot be read, names another head or cannot be written refuses it.
+ * The session about to start at `head`, the record's: the attempt is counted and its id goes in
+ * the record before it can run, so a factory stopped mid-session still has it counted, and a
+ * record that cannot be read, names another head or cannot be written refuses it. Under a newly
+ * installed factory the count starts again.
  */
 export function recordSession(
   records: FailureRecords,
@@ -171,7 +173,9 @@ export function recordSession(
     throw new EnvironmentError(
       `the failure record ${file} does not name ${head.slice(0, 12)}, the manifest this session starts on; run the factory again`,
     );
-  writeFailureRecord(file, { ...record, session });
+  const factory = records.factory();
+  const count = (record.factory === factory ? record.count : 0) + 1;
+  writeFailureRecord(file, { ...record, factory, count, session });
 }
 
 /**

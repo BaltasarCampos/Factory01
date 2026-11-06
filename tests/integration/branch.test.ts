@@ -1543,13 +1543,32 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     expect(t.local.launches).toHaveLength(1);
     const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
     // The session's id is in it before the session can run.
-    expect(record).toEqual({ head: tip(t), factory: HASH, count: 0, session: 'fake-local-1' });
+    expect(record).toEqual({ head: tip(t), factory: HASH, count: 1, session: 'fake-local-1' });
     expect(t.show(`${FEATURE}/.station.json`)).toMatch(/"station": 2/);
 
     const cloud = setup({ agents: 'cloud' });
     await dispatchOnce(cloud.ctx);
     expect(cloud.cloud.launches).toHaveLength(1);
     expect(readdirSync(cloud.home)).toEqual([]);
+  });
+
+  it('counts each attempt when it starts, before claude spawns: a factory stopped mid-session has it counted, a refusal before the start does not (T061)', async () => {
+    const stopped = setup();
+    stopped.local.failure = new Error('the factory was stopped');
+    await expect(dispatchOnce(stopped.ctx)).rejects.toThrow('the factory was stopped');
+    const record = readFailureRecord(failureFile(stopped.home, REPO, ISSUE, 2));
+    expect(record).toEqual({
+      head: tip(stopped),
+      factory: HASH,
+      count: 1,
+      session: 'fake-local-1',
+    });
+
+    const refused = setup();
+    refused.local.refusal = new LaunchRefused('no local session started: no gh token');
+    await dispatchOnce(refused.ctx);
+    const none = readFailureRecord(failureFile(refused.home, REPO, ISSUE, 2));
+    expect(none).toEqual({ head: tip(refused), factory: HASH, count: 0 });
   });
 
   it('pushes no manifest when its record cannot be written or the factory cannot be hashed (T061)', async () => {
@@ -1588,7 +1607,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     await dispatchOnce(t.ctx);
     expect(t.local.launches).toHaveLength(2);
     const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
-    expect(record).toEqual({ head: tip(t), factory: HASH, count: 0, session: 'fake-local-2' });
+    expect(record).toEqual({ head: tip(t), factory: HASH, count: 1, session: 'fake-local-2' });
 
     // A commit that only looks like the dispatcher's manifest is a new head in local mode, while
     // cloud mode's T059 rule waits on it.
@@ -1698,10 +1717,12 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       expect(t.local.asked).toHaveLength(1);
       expect(tip(t)).toBe(manifest);
       expect(second).toEqual({ moves: [], skipped: [] });
-      // A refusal before the start leaves no session in the record: still spent, until 3b-2.
-      const session = failure instanceof LaunchRefused ? {} : { session: 'fake-local-1' };
+      // A refusal before the start leaves no session in the record and no count: still spent,
+      // until 3b-2; the failed session was counted as it started.
+      const session =
+        failure instanceof LaunchRefused ? { count: 0 } : { count: 1, session: 'fake-local-1' };
       expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toEqual({
-        ...{ head: manifest, factory: HASH, count: 0 },
+        ...{ head: manifest, factory: HASH },
         ...session,
       });
     }
