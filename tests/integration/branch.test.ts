@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import { EnvironmentError } from '../../src/cli/env.js';
@@ -21,6 +21,8 @@ import {
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
 import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
+import { groupRecord } from '../../src/dispatcher/launcher/local.js';
+import { LaunchRefused, SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
 import { STATES, STATIONS, type ApprovalRecord, type Tier } from '../../src/model/types.js';
@@ -99,6 +101,8 @@ interface Setup {
   config?: string;
   /** Main's `agents:` setting; default local. */
   agents?: 'local' | 'cloud';
+  /** A second item, #3, approved and triaged, after this one. */
+  other?: boolean;
 }
 
 function setup(options: Setup = {}) {
@@ -136,6 +140,22 @@ function setup(options: Setup = {}) {
             events: [...states, 'owner:approved'].map(labeled),
             comments,
           },
+          ...(options.other === true
+            ? [
+                {
+                  number: 3,
+                  title: 'Another item',
+                  labels: ['state:triaged', ...INTAKE_LABELS, 'owner:approved'],
+                  events: ['state:triaged', 'owner:approved'].map(labeled),
+                  comments: [
+                    {
+                      ...{ id: 6000, author: 'owner', createdAt: BEFORE },
+                      body: approvalBody(2, { issue: 3, branch: 'claude/3-other' }),
+                    },
+                  ],
+                },
+              ]
+            : []),
         ],
       },
     },
@@ -1164,7 +1184,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       t.ctx.gatherEvidence = gatherEvidence({ ...t.evidence, factory: factory.path });
       openPr();
       await dispatchOnce(t.ctx);
-      return t;
+      return Object.assign(t, { factory });
     };
     /** `files` committed and pushed on origin's branch head, as the session does; the new head. */
     const work = (t: ReturnType<typeof setup>, files: Files = { 'tests/login.test.ts': 't\n' }) => {
@@ -1296,6 +1316,38 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(alerts(t, 'build-failed')).toEqual([
         `info #2: T001 is still open at ${head.slice(0, 12)} after 2 Build sessions with retry_limit 1; nothing sends it on before T096: close this item and file it again`,
       ]);
+    });
+
+    it('T061: a spent Build manifest whose record in the clone was deleted waits, pushing nothing', async () => {
+      const t = await issued();
+      const manifest = tipOf(t);
+      t.project.git(['update-ref', '-d', `refs/factory/build/${BRANCH}`]);
+      await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toHaveLength(1);
+      expect(tipOf(t)).toBe(manifest);
+      expect(t.inbox()).toEqual([]);
+    });
+
+    it("T061: holds Build, naming how to restore the clone's record, when the failure record names a tip the evidence reads as new", async () => {
+      const t = await issued();
+      const manifest = tipOf(t);
+      t.project.git(['update-ref', '-d', `refs/factory/build/${BRANCH}`]);
+      // Only the dispatcher's records name the tip as its own manifest.
+      const elsewhere = { home: tempDir(), factory: () => HASH };
+      t.ctx.gatherEvidence = gatherEvidence({
+        ...{ projectDir: t.project.path, failures: elsewhere, factory: t.factory.path },
+      });
+      const result = await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toHaveLength(1);
+      expect(tipOf(t)).toBe(manifest);
+      const file = failureFile(t.home, REPO, ISSUE, 4);
+      const reason = `no manifest is pushed on ${manifest.slice(0, 12)}: the failure record ${file} names it as the dispatcher's own manifest, which a new one never stacks on; delete it, by its path, to start its count again; the dispatcher's own record of that Build manifest is missing too: restore it with git -C ${t.project.path} update-ref refs/factory/build/${BRANCH} ${manifest}`;
+      expect(result.held).toEqual([{ issue: ISSUE, reason }]);
+      expect(alerts(t, 'manifest-held')).toEqual([`info #2 holds: ${reason}`]);
     });
 
     /** An item in Build with every task ticked and a current conflict report from Integrate. */
@@ -1535,6 +1587,47 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     }
   });
 
+  it('in local mode tells its own manifest running while its last session’s group lives and spent once it has ended, stopping on a group record it cannot read (T061)', async () => {
+    const t = setup();
+    await dispatchOnce(t.ctx); // the Specify manifest, its record naming fake-local-1
+    const seen: (string | undefined)[] = [];
+    const evidence = t.ctx.gatherEvidence;
+    t.ctx.gatherEvidence = async (...args) => {
+      const found = await evidence(...args);
+      seen.push(found.ownManifest);
+      return found;
+    };
+    // The group lives under the home the records are in, where the launcher keeps its sessions.
+    const dir = join(t.home, '.factory', 'sessions', 'fake-local-1');
+    mkdirSync(dir, { recursive: true });
+    const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    const pgid = child.pid ?? 0;
+    try {
+      writeFileSync(join(dir, 'group.json'), JSON.stringify(groupRecord(pgid)));
+      await dispatchOnce(t.ctx);
+    } finally {
+      process.kill(-pgid, 'SIGKILL');
+    }
+    await vi.waitFor(() => {
+      expect(() => process.kill(-pgid, 0)).toThrow();
+    });
+    await dispatchOnce(t.ctx);
+    expect(seen).toEqual(['running', 'spent']);
+    expect(t.local.launches).toHaveLength(1);
+
+    // Never read as spent: a group record that is not one, or one that cannot be read.
+    writeFileSync(join(dir, 'group.json'), '{}');
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow(
+      `${join(dir, 'group.json')} cannot be read: it is not a process group record`,
+    );
+    rmSync(dir, { recursive: true });
+    writeFileSync(dir, '');
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow(
+      new RegExp(`^${join(dir, 'group.json')} cannot be read: ENOTDIR`),
+    );
+    expect(t.local.launches).toHaveLength(1);
+  });
+
   it("never stacks a manifest on the dispatcher's own spent one, whose count it would wipe (T061)", () => {
     const t = setup({ branch: CREATED });
     const at = { projectDir: t.project.path, now: () => new Date('2026-10-01T11:00:00Z') };
@@ -1560,6 +1653,92 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
 
     expect(tip(t)).toBe(before);
     expect(readFailureRecord(file)).toMatchObject({ head: before, count: 2 });
+  });
+
+  const heldAlerts = (t: ReturnType<typeof setup>, kind: string) =>
+    t.inbox().flatMap((c) => {
+      const a = parseAlert({ ...c, id: String(c.id) });
+      return a?.kind === kind ? [`${a.urgency} ${a.text}`] : [];
+    });
+
+  it('in local mode a failed session, or a launch refused after the push, waits on its spent manifest with no throw (T061)', async () => {
+    const failures = [
+      new SessionFailed('claude exited 1', false),
+      new LaunchRefused('no local session started: claude is not on PATH'),
+    ];
+    for (const failure of failures) {
+      const t = setup();
+      if (failure instanceof LaunchRefused) t.local.refusal = failure;
+      else t.local.failure = failure;
+      const first = await dispatchOnce(t.ctx);
+      const manifest = tip(t);
+      const second = await dispatchOnce(t.ctx);
+
+      expect(first.failed ?? first.refused).toContain(failure.message);
+      expect(t.local.asked).toHaveLength(1);
+      expect(tip(t)).toBe(manifest);
+      expect(second).toEqual({ moves: [], skipped: [] });
+      // A refusal before the start leaves no session in the record: still spent, until 3b-2.
+      const session = failure instanceof LaunchRefused ? {} : { session: 'fake-local-1' };
+      expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toEqual({
+        ...{ head: manifest, factory: HASH, count: 0 },
+        ...session,
+      });
+    }
+  });
+
+  it('in local mode refuses, with one alert and no launch, a session whose record was replaced after its manifest (T061)', async () => {
+    const t = setup();
+    const file = failureFile(t.home, REPO, ISSUE, 2);
+    t.local.beforeStart = () => {
+      writeFailureRecord(file, { head: 'd'.repeat(40), factory: HASH, count: 0 });
+    };
+    const result = await dispatchOnce(t.ctx);
+    const manifest = tip(t);
+
+    expect(t.local.launches).toEqual([]);
+    const refused = `no local session started: the failure record ${file} does not name ${manifest.slice(0, 12)}, the manifest this session starts on; run the factory again`;
+    expect(result.refused).toBe(refused);
+    expect(heldAlerts(t, 'launcher-unavailable')).toEqual([
+      `info no session started for ${REPO}: ${refused}`,
+    ]);
+  });
+
+  it('starts no session, with one urgent alert and nothing recorded, when the launcher for agents: local runs another mode (T061)', async () => {
+    const t = setup();
+    t.ctx.launchers = { local: t.cloud };
+    const result = await dispatchOnce(t.ctx);
+    await dispatchOnce(t.ctx);
+
+    const refused = `no session started for ${REPO}: the launcher configured for agents: local runs cloud sessions; this is the factory's own error, so reinstall the pinned release`;
+    expect(result.refused).toBe(refused);
+    expect(heldAlerts(t, 'launcher-missing')).toEqual([`urgent ${refused}`]);
+    expect(t.cloud.launches).toEqual([]);
+    expect(readdirSync(t.home)).toEqual([]);
+  });
+
+  it("in local mode holds an item whose record names its tip while the evidence reads a new head, once per head, and starts the next item's session (T061)", async () => {
+    const t = setup({ branch: CREATED, states: ['state:triaged'], other: true });
+    const before = tip(t);
+    // The dispatcher's records are not the evidence's: only they name the tip as its own.
+    const records = { home: tempDir(), factory: () => HASH };
+    t.ctx.failures = records;
+    const file = failureFile(records.home, REPO, ISSUE, 2);
+    writeFailureRecord(file, { head: before, factory: HASH, count: 2 });
+
+    const first = await dispatchOnce(t.ctx);
+    const second = await dispatchOnce(t.ctx);
+
+    expect(tip(t)).toBe(before);
+    expect(readFailureRecord(file)).toMatchObject({ head: before, count: 2 });
+    const reason = `no manifest is pushed on ${before.slice(0, 12)}: the failure record ${file} names it as the dispatcher's own manifest, which a new one never stacks on; delete it, by its path, to start its count again`;
+    expect(first.held).toEqual([{ issue: ISSUE, reason }]);
+    expect(first.launched).toMatchObject({ issue: 3, station: 2, branch: 'claude/3-other' });
+    expect(t.local.launches.map((l) => l.item)).toEqual([3]);
+    expect(second.held?.[0]).toEqual({ issue: ISSUE, reason });
+    expect(heldAlerts(t, 'manifest-held').filter((a) => a.startsWith('info #2 '))).toEqual([
+      `info #2 holds: ${reason}`,
+    ]);
   });
 });
 

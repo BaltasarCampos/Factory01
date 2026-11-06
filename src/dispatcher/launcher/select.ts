@@ -41,5 +41,11 @@ export function selectLauncher(
   const launcher = launchers[mode];
   if (launcher === undefined)
     throw new RefusedError(`no ${mode} launcher is configured for ${config.repo}`);
+  // `agents:` is the one key: the failure record and the evidence go by it, so a launcher of
+  // another mode would run sessions no record counts (T061).
+  if (launcher.mode !== mode)
+    throw new RefusedError(
+      `no session started for ${config.repo}: the launcher configured for agents: ${mode} runs ${launcher.mode} sessions; this is the factory's own error, so reinstall the pinned release`,
+    );
   return launcher;
 }

@@ -58,7 +58,8 @@ import {
 import { homeDir, tempDir } from '../helpers/keys.js';
 
 const BRANCH = 'claude/42-add-login';
-const REQUEST = {
+/** A request with no failure record to count it in, as only Intake's may be (T061). */
+const UNCOUNTED = {
   role: 'spec',
   station: 2,
   item: 42,
@@ -67,6 +68,9 @@ const REQUEST = {
   files: [],
   prompt: `Station 2 (specify) for owner/project#42 on branch ${BRANCH}.`,
 } as const;
+/** Where the dispatcher writes the session's id into its failure record (T061). */
+const REQUEST = { ...UNCOUNTED, starting: () => undefined };
+const STATION_ROLE = { 2: 'spec', 4: 'builder', 6: 'integrator' } as const;
 const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: owner/project\ninbox_issue: 1\n`;
 /** The session id `claude` was launched with, which its JSON output reports back. */
 const launchedId = (args: readonly string[]) => args[args.indexOf('--session-id') + 1];
@@ -254,6 +258,21 @@ describe('LocalLauncher (research R8, R9)', () => {
       'no local session started: the failure record /r cannot be written: EROFS; check that /r',
     );
     expect(u.sessions()).toEqual([]);
+  });
+
+  it('refuses a session at stations 2–6 that has no failure record to count it in, spawning nothing (T061)', async () => {
+    const t = setup();
+    for (const station of [2, 4, 6] as const) {
+      const refused = t.launch({ ...UNCOUNTED, station, role: STATION_ROLE[station] });
+      await expect(refused).rejects.toThrow(LaunchRefused);
+      await expect(refused).rejects.toThrow(
+        `no local session started: the ${STATION_ROLE[station]} session at station ${String(station)} has no failure record to count it in, and a session the count cannot see never starts; it is the factory's own error, so reinstall the pinned release`,
+      );
+    }
+    expect(t.sessions()).toEqual([]);
+    // Intake writes no manifest, so nothing counts it yet (28-4c-4b-3c).
+    await t.launch({ ...UNCOUNTED, role: 'intake', station: 1, branch: 'main', feature: '' });
+    expect(t.sessions()).toHaveLength(1);
   });
 
   it('runs claude in a fresh clone of its own on the item branch, never in the Owner’s working copy', async () => {

@@ -209,6 +209,7 @@ function setup(items: ItemSeed[], options: Setup = {}) {
       Promise.resolve(options.evidence ?? { needsSession: true, intakeComplete: true }),
     launchers: { cloud, local },
     stationPrompt: testPrompts,
+    failures: { home: local.home, factory: () => 'f'.repeat(64) },
     logEvent: (n, event) => {
       logged.push([n, event]);
       return Promise.resolve();

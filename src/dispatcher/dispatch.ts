@@ -42,6 +42,7 @@ import {
   ensureDraftPr,
   featureOf,
   git as runGit,
+  gitAnswer,
   type BranchContext,
   type ItemRef,
 } from './branch.js';
@@ -53,9 +54,10 @@ import {
   SessionFailed,
   type Launchers,
   type Notice,
+  type SessionLauncher,
 } from './launcher/types.js';
-import { recordIssued, recordSession, type FailureRecords } from './failures.js';
-import { tickTask, writeStationManifest } from './manifest.js';
+import { recordIssued, recordSession, StackRefused, type FailureRecords } from './failures.js';
+import { issuedRef, tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
 import type { PromptFacts } from './prompts.js';
@@ -84,6 +86,8 @@ export type StationEvidence = Omit<Evidence, 'owner' | 'rotationPending' | 'hist
   buildFailure?: string;
   /** A commit that makes the branch's `answers.md` not the Owner's: its answers count as none (T182). */
   answersTampered?: { commit: string; reason: string };
+  /** In local mode, the tip is the dispatcher's own manifest, by its failure record (T061). */
+  ownManifest?: 'running' | 'spent';
 };
 
 export interface Candidate {
@@ -124,8 +128,8 @@ export interface DispatchContext {
   now?: () => Date;
   /** Hears a line about once a minute while a local session runs: `factory run`'s heartbeat. */
   heartbeat?: (line: string) => void;
-  /** Local sessions' failure records, under the Owner's home (T061); a local launch needs them. */
-  failures?: FailureRecords;
+  /** Local sessions' failure records, under the local launcher's home (T061). */
+  failures: FailureRecords;
   gh?: GhOptions;
 }
 
@@ -154,6 +158,33 @@ export interface PassResult {
   refused?: string;
   /** A session that ran and failed, which used the Owner's plan: never "no session started". */
   failed?: string;
+  /** Items held this pass instead of being issued a session, each with why. */
+  held?: { issue: number; reason: string }[];
+}
+
+/** An item with a session to start. */
+interface Target {
+  item: Candidate;
+  station: Station;
+  role: RoleName;
+  branch: string;
+  comments: PostedComment[];
+  failure?: string;
+}
+
+/** What a pass has read and decided before it starts a session. */
+interface Pass {
+  ctx: DispatchContext;
+  result: PassResult;
+  config: ProjectConfig;
+  git: BranchContext;
+  mainRef: string;
+  keys: ReleaseKeys;
+  history: MainMerges;
+  released: ReturnType<typeof releasedHeads>;
+  alertOnce: (input: NewAlert) => Promise<void>;
+  launcher: SessionLauncher;
+  refuse: (refused: string, urgent: boolean | undefined, kind?: string) => Promise<PassResult>;
 }
 
 /** The station whose session works on an item in each state; other states wait. */
@@ -316,15 +347,8 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
 
   const git = { projectDir: ctx.projectDir, now: ctx.now ?? (() => new Date()) };
   const mainRef = ctx.mainRef ?? 'origin/main';
-  type Target = {
-    item: Candidate;
-    station: Station;
-    role: RoleName;
-    branch: string;
-    comments: PostedComment[];
-    failure?: string;
-  };
-  let target: Target | undefined;
+  /** Every item with a session to start, in order: the first that is not held gets it. */
+  const targets: Target[] = [];
   for (const issue of await listOpenIssues(repo, options)) {
     if (issue.number === config.inbox_issue) continue;
     const comments: PostedComment[] = await listComments(repo, issue.number, options);
@@ -431,21 +455,20 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     }
 
     const at = WORK_STATION[item.state];
-    if (why !== undefined || target !== undefined || at === undefined) continue;
+    if (why !== undefined || at === undefined) continue;
     if (!found.needsSession || pause.stations.has(at)) continue;
     if (ownerBasisMissing(item.state, evidence()) !== undefined) continue;
     const branch = at === 1 ? 'main' : at === 7 ? 'claude/factory-log' : item.branch;
     // Verify runs the role its evidence names (T181); every other station has one role.
     const role = at === 5 ? found.verifyRole : ROLE_AT[at];
     if (branch !== undefined && role !== undefined)
-      target = {
+      targets.push({
         ...{ item, station: at, role, branch, comments },
         ...(found.buildFailure === undefined ? {} : { failure: found.buildFailure }),
-      };
+      });
   }
 
-  if (target === undefined) return result;
-  const { item, station, role, branch, comments, failure } = target;
+  if (targets.length === 0) return result;
   let launcher;
   try {
     launcher = selectLauncher(config, ctx.launchers);
@@ -476,6 +499,21 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       `the ${launcher.mode} launcher is unavailable: ${availability.reason}`,
       availability.urgent,
     );
+  const pass = { ctx, result, config, git, mainRef, keys, history, released, alertOnce };
+  for (const target of targets) {
+    const started = await startSession({ ...pass, launcher, refuse }, target);
+    if (started !== undefined) return started;
+  }
+  return result;
+}
+
+/** The session for `target`; undefined when the item holds instead, and the pass goes on. */
+async function startSession(pass: Pass, target: Target): Promise<PassResult | undefined> {
+  const { ctx, result, config, git, mainRef, keys, history, released, alertOnce } = pass;
+  const { launcher, refuse } = pass;
+  const { repo } = config;
+  const options = ctx.gh ?? {};
+  const { item, station, role, branch, comments, failure } = target;
   // The feature folder and the task's files, for the session's own settings (T061).
   let session = { feature: '', files: [] as readonly string[] };
   let starting: { starting: (id: string) => void } | undefined;
@@ -486,8 +524,9 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     // In local mode the dispatcher's own manifest commit is known from the failure record alone,
     // written before the push, so a record that cannot be written pushes nothing (T061).
     const at = { repo, item: ref.issue, station };
+    // `agents:` is the one key for local mode, as the evidence reads it (T061).
     const issued =
-      launcher.mode === 'local'
+      config.agents === 'local'
         ? (sha: string, parent: string) => {
             recordIssued(ctx.failures, at, sha, parent);
             starting = {
@@ -497,7 +536,14 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
             };
           }
         : undefined;
-    const manifest = writeStationManifest(git, ref, { station, role }, mainRef, issued);
+    let manifest;
+    try {
+      manifest = writeStationManifest(git, ref, { station, role }, mainRef, issued);
+    } catch (err) {
+      if (!(err instanceof StackRefused)) throw err;
+      await hold(pass, ref, station, err);
+      return undefined;
+    }
     session = { feature: `specs/${featureOf(ref)}`, files: manifest.files ?? [] };
   }
   const answersFor = (file: QuestionFile | undefined) => {
@@ -563,4 +609,23 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     ...result,
     launched: { issue: item.issue.number, station, role, branch, mode, sessionId },
   };
+}
+
+/**
+ * The record names the tip as the dispatcher's own spent manifest while the evidence read a new
+ * head: no manifest is stacked on it, and the item holds with one alert per head (T061). At Build,
+ * a missing record of that manifest in the dispatcher's clone is named with how to restore it.
+ */
+async function hold(pass: Pass, ref: ItemRef, station: Station, err: StackRefused) {
+  let restore = '';
+  if (station === 4) {
+    const name = issuedRef(ref.branch);
+    const issued = gitAnswer(pass.git, ['rev-parse', '--verify', '-q', `${name}^{commit}`]);
+    if (issued !== err.head)
+      restore = `; the dispatcher's own record of that Build manifest is ${issued === undefined ? 'missing too' : `at ${issued.slice(0, 12)} instead`}: restore it with git -C ${pass.ctx.projectDir} update-ref ${visible(name)} ${err.head}`;
+  }
+  const reason = `${err.message}${restore}`;
+  const text = `#${String(ref.issue)} holds: ${reason}`;
+  await pass.alertOnce({ urgency: 'info', kind: 'manifest-held', text });
+  (pass.result.held ??= []).push({ issue: ref.issue, reason });
 }

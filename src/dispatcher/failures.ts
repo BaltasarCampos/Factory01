@@ -39,6 +39,18 @@ export interface FailureRecords {
   factory: () => string;
 }
 
+/**
+ * `recordIssued` refusing a manifest on the dispatcher's own spent one, `head`: the item holds,
+ * with one alert per head, and the pass goes on with other items (T061).
+ */
+export class StackRefused extends EnvironmentError {
+  readonly head: string;
+  constructor(message: string, head: string) {
+    super(message);
+    this.head = head;
+  }
+}
+
 const why = (err: unknown) => visible(err instanceof Error ? err.message : String(err));
 const OUT = 'delete it, by its path, to start its count again';
 
@@ -129,17 +141,16 @@ export function writeFailureRecord(file: string, record: FailureRecord): void {
  * never stacks on, since that would wipe its count.
  */
 export function recordIssued(
-  records: FailureRecords | undefined,
+  records: FailureRecords,
   at: { repo: string; item: number; station: Station },
   head: string,
   parent: string,
 ): void {
-  if (records === undefined)
-    throw new EnvironmentError('no failure records are set up for local sessions');
   const file = failureFile(records.home, at.repo, at.item, at.station);
   if (readFailureRecord(file)?.head === parent)
-    throw new EnvironmentError(
+    throw new StackRefused(
       `no manifest is pushed on ${parent.slice(0, 12)}: the failure record ${file} names it as the dispatcher's own manifest, which a new one never stacks on; ${OUT}`,
+      parent,
     );
   writeFailureRecord(file, { head, factory: records.factory(), count: 0 });
 }
@@ -149,13 +160,11 @@ export function recordIssued(
  * run, so a record that cannot be read, names another head or cannot be written refuses it.
  */
 export function recordSession(
-  records: FailureRecords | undefined,
+  records: FailureRecords,
   at: { repo: string; item: number; station: Station },
   head: string,
   session: string,
 ): void {
-  if (records === undefined)
-    throw new EnvironmentError('no failure records are set up for local sessions');
   const file = failureFile(records.home, at.repo, at.item, at.station);
   const record = readFailureRecord(file);
   if (record?.head !== head)
@@ -171,17 +180,16 @@ export function recordSession(
  * or there is none. Under a newly installed factory its count reads as 0, with nothing written.
  */
 export function tipState(
-  records: FailureRecords | undefined,
+  records: FailureRecords,
   at: { repo: string; item: number; station: Station },
   tip: string,
-  running: (session: string) => boolean,
+  /** Whether the session with this id, its folder under this home, still runs. */
+  running: (home: string, session: string) => boolean,
 ): { state: 'new' } | { state: 'running' | 'spent'; count: number } {
-  if (records === undefined)
-    throw new EnvironmentError('no failure records are set up for local sessions');
   const record = readFailureRecord(failureFile(records.home, at.repo, at.item, at.station));
   if (record?.head !== tip) return { state: 'new' };
   const count = record.factory === records.factory() ? record.count : 0;
-  const live = record.session !== undefined && running(record.session);
+  const live = record.session !== undefined && running(records.home, record.session);
   return { state: live ? 'running' : 'spent', count };
 }
 

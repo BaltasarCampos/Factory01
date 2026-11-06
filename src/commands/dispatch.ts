@@ -35,7 +35,9 @@ export async function projectDispatch(
   const dir = mkdtempSync(join(tmpdir(), 'factory-keys-'));
   const keysFor = releaseKeysFor(ctx.env, dir);
   const out = ctx.io.stdout;
-  const failures = { home: project.home, factory: installedHash };
+  // The records are where the local launcher keeps its sessions, so the evidence, the dispatcher
+  // and the launcher read one home; without a local launcher no local session starts at all.
+  const failures = { home: ctx.launchers.local?.home ?? project.home, factory: installedHash };
   const context: DispatchContext = {
     projectDir: ctx.cwd,
     keysFor,

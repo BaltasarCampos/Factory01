@@ -48,7 +48,15 @@ export interface SessionLauncher {
   available(project: string): Promise<Availability>;
 }
 
-export type Launchers = Partial<Record<AgentsMode, SessionLauncher>>;
+/** A launcher on the laptop: its sessions' folders, and so their failure records, under `home`. */
+export interface LocalSessionLauncher extends SessionLauncher {
+  readonly home: string;
+}
+
+export interface Launchers {
+  local?: LocalSessionLauncher;
+  cloud?: SessionLauncher;
+}
 
 /**
  * A launch the launcher refused; `urgent` when the branch's guardrail files were tampered with,

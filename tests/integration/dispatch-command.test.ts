@@ -1,4 +1,11 @@
-import { copyFileSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -190,6 +197,22 @@ describe('factory dispatch and factory run (contracts/cli.md)', { timeout: 60_00
     expect(r.stdout).toContain('#2 new → triaged');
     expect(r.stdout).toContain(`started spec (station 2) for #2 on ${BRANCH}: local session`);
     expect(t.local.launches).toHaveLength(1);
+  });
+
+  it("factory dispatch keeps the failure records under the local launcher's home, where the evidence reads them too (T061)", async () => {
+    const t = setup();
+    const elsewhere = homeDir();
+    const local = new FakeLauncher('local', elsewhere);
+
+    await t.cli(['dispatch'], { launchers: { local } });
+    await t.cli(['dispatch'], { launchers: { local } });
+
+    // The second pass reads the first one's record there, so it waits on its own manifest.
+    expect(local.launches).toHaveLength(1);
+    expect(readdirSync(join(elsewhere, '.factory', 'failures', 'owner', 'project'))).toEqual([
+      '2-2.json',
+    ]);
+    expect(existsSync(join(t.home, '.factory', 'failures'))).toBe(false);
   });
 
   it('factory run passes until a pass starts nothing', async () => {

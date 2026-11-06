@@ -65,7 +65,7 @@ export interface EvidenceContext {
   /** The factory clone holding the pinned release, for its `required-checks.json`. */
   factory?: string;
   /** Local sessions' failure records, which alone tell the dispatcher's own manifest (T061). */
-  failures?: FailureRecords;
+  failures: FailureRecords;
 }
 
 /**
@@ -316,14 +316,16 @@ export function gatherEvidence(ctx: EvidenceContext) {
     // local mode the tip is its manifest only by the failure record, running or spent; a spent
     // one still waits, as T059's does in cloud mode.
     const station = STATION_OF[item.state];
-    const running = (id: string) => sessionRunning(ctx.failures?.home ?? '', id) !== undefined;
+    // A group record or failure record that cannot be read stops the pass, naming its file.
+    const running = (home: string, id: string) => sessionRunning(home, id) !== undefined;
+    const own =
+      config.agents === 'local' && tip !== undefined && station !== undefined
+        ? tipState(ctx.failures, { repo: config.repo, item: n, station }, tip, running).state
+        : undefined;
     const pending =
       tip !== undefined &&
       station !== undefined &&
-      (config.agents === 'local'
-        ? tipState(ctx.failures, { repo: config.repo, item: n, station }, tip, running).state !==
-          'new'
-        : pendingManifest(at, tip)?.station === station);
+      (own === undefined ? pendingManifest(at, tip)?.station === station : own !== 'new');
     // Every Verify session the tier needs has ended, so a failing result is the Owner's to hear.
     const verifyEnded =
       item.state === 'verifying' &&
@@ -383,6 +385,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(verifyRole === undefined ? {} : { verifyRole }),
       ...(verifyEnded ? { verifyEnded } : {}),
       ...('tampered' in signed ? { answersTampered: signed.tampered } : {}),
+      ...(own === undefined || own === 'new' ? {} : { ownManifest: own }),
       ...(rg === undefined ? {} : { redGreen: rg }),
       ...(review === undefined ? {} : { verifyReport: review.checksPass }),
       ...(review === undefined ? {} : { findingsResolved: review.findingsResolved }),
