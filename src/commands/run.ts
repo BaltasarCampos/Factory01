@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode } from '../cli/env.js';
 import { dispatchOnce, type PassResult } from '../dispatcher/dispatch.js';
+import { configOnMain } from '../model/config.js';
 import type { Alert } from '../model/types.js';
 import { alert, listAlerts, type InboxTarget, type NewAlert } from '../notify/inbox.js';
 import { visible } from '../notify/summary.js';
@@ -49,9 +50,14 @@ const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 export function thrownText(head: string, err: unknown): string {
   const kind = err instanceof Error ? err.constructor.name : typeof err;
   const [line = ''] = (err instanceof Error ? err.message : String(err)).split('\n');
-  const temp = new RegExp(`(?:${[tmpdir(), '/tmp'].map(escaped).join('|')})/\\S*`, 'g');
+  // Only mkdtemp's random suffix, in a path that starts the line or follows a non-path character.
+  const roots = [tmpdir(), '/tmp'].map(escaped).join('|');
+  const temp = new RegExp(
+    `(^|[\\s'"(=:])((?:${roots})/[^/\\s]*?)[A-Za-z0-9]{6}(?=[/\\s;:,'")]|$)`,
+    'g',
+  );
   const stable = line
-    .replace(temp, '<tmp>')
+    .replace(temp, '$1$2<random>')
     .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, '<id>')
     .replace(/\d{4}-\d\d-\d\dT[\d:.]+(?:Z|[+-]\d\d:\d\d)?/g, '<time>')
     .replace(/\b(pids?|process(?:es)?|group) \d+(?:, \d+)*/gi, '$1 <pid>')
@@ -105,7 +111,17 @@ export async function run(ctx: CommandContext): Promise<number> {
           ...{ env: ctx.env, encoding: 'utf8' },
         });
         const head = main.status === 0 ? main.stdout.trim().slice(0, 12) : 'an unknown commit';
-        await alertThrown(inbox, thrownText(head, err), ctx.io.stderr);
+        // Main's inbox, as fetched: the working copy may be stale or another branch.
+        let target = inbox;
+        try {
+          const config = configOnMain(ctx.cwd);
+          target = { ...inbox, repo: config.repo, inboxIssue: config.inbox_issue };
+        } catch (read) {
+          ctx.io.stderr.write(
+            `factory run: main's config cannot be read, so the alert goes to the working copy's inbox, ${inbox.repo}#${String(inbox.inboxIssue)}: ${why(read)}\n`,
+          );
+        }
+        await alertThrown(target, thrownText(head, err), ctx.io.stderr);
         throw err;
       }
     };

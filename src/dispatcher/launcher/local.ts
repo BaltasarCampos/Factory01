@@ -481,14 +481,51 @@ function groupMembers(pgid: number): number[] {
     });
 }
 
+/** Whether `done` holds within about a second, asked every 50 ms. */
+async function until(done: () => boolean): Promise<boolean> {
+  for (let tries = 0; tries < 20; tries++) {
+    if (done()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return done();
+}
+
+/** Whether `path` exists; anything but its absence throws, naming it. */
+function present(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch (err) {
+    if (errno(err) === 'ENOENT') return false;
+    throw new EnvironmentError(`${path} cannot be read: ${visible(String(errno(err)))}`);
+  }
+}
+
 /**
- * Why session `id` still runs, or undefined when it does not. Its group still runs if its recorded
- * leader does, the same process by its start time in this boot, or any process of the group does,
- * since Linux reuses no pid while it is a group's id; a leader with another start time means the
- * group ended and its pid was reused. A group record that cannot be read throws, naming it (T061).
+ * Why session `id` still runs, or undefined when it does not, read fail-closed from its folder
+ * (T061): `ended`, written once nothing of its group remained, or `not-spawned`, written when it
+ * failed before the spawn, reads as ended, as does no folder at all; `group.json` alone is checked
+ * in `/proc`; both markers' kinds together, or none of the three, as when a factory stopped between
+ * the spawn and the group's record, stop the pass, naming the way out.
  */
 export function sessionRunning(home: string, id: string): string | undefined {
-  const file = join(home, '.factory', 'sessions', id, 'group.json');
+  const dir = join(home, '.factory', 'sessions', id);
+  const file = join(dir, 'group.json');
+  const out = `remove ${dir} once ps -eo pid,pgid,args shows nothing of session ${visible(id)}`;
+  const grouped = present(file);
+  const unspawned = present(join(dir, 'not-spawned'));
+  if (grouped && unspawned)
+    throw new EnvironmentError(`${dir} records a process group and no spawn both; ${out}`);
+  if (unspawned || present(join(dir, 'ended')) || !present(dir)) return undefined;
+  if (!grouped)
+    throw new EnvironmentError(
+      `whether session ${visible(id)} still runs is unknown: ${dir} records no process group and no end, as when a factory stops between claude's spawn and its record; ${out}`,
+    );
+  return groupRunning(file, id);
+}
+
+/** Why the group recorded in `file` for session `id` still runs, or undefined when it does not. */
+function groupRunning(file: string, id: string): string | undefined {
   let text: string;
   try {
     text = readFileSync(file, 'utf8');
@@ -989,11 +1026,16 @@ interface Heads {
  * Runs a step of the checks; any failure but a refusal is an error, never tampering. Git's text
  * can quote a path from the branch, so it is shown through `visible()`.
  */
+const STOPPED = 'no local session started: ';
+
 function step<T>(what: string, run: () => T): T {
   try {
     return run();
   } catch (err) {
+    // A refusal, or an error that already says no session started, keeps its own words; any
+    // other text, git's included, is named by its step and shown through visible().
     if (err instanceof LaunchRefused) throw err;
+    if (err instanceof EnvironmentError && err.message.startsWith(STOPPED)) throw err;
     const why = err instanceof Error ? err.message : String(err);
     throw new EnvironmentError(`no local session started: ${what}: ${visible(why)}`);
   }
@@ -1345,6 +1387,9 @@ export class LocalLauncher implements LocalSessionLauncher {
     if (this.running) throw new LaunchRefused('a local session is already running');
     this.running = true;
     let at: string | undefined;
+    // Its folder, once made, says how it ended, so a later launch never reads a crash as ended.
+    let folder: string | undefined;
+    const ran = { spawned: false, started: false };
     try {
       step('looking for a session still running', () => {
         this.stillRunning();
@@ -1363,6 +1408,7 @@ export class LocalLauncher implements LocalSessionLauncher {
         ? step("reading the project's gh token", () => this.ghToken(request.role, repo))
         : undefined;
       const files = step("making the session's folder", () => this.sessionFolder());
+      folder = dirname(files.record);
       const cwd = step("making the session's clone", () =>
         this.clone(request.project, repo, request.branch, heads, files.id),
       );
@@ -1470,7 +1516,6 @@ export class LocalLauncher implements LocalSessionLauncher {
         // In a process group of its own, so stopping it stops what it started; its leader is kept,
         // so a later launch sees one the factory could not stop, such as after a SIGKILL.
         const group = join(dirname(files.record), 'group.json');
-        const ran = { spawned: false };
         // The installed factory's caps, never the clone's (T061).
         const { caps } = factoryPolicy().roles[request.role];
         const silence = this.options.silence ?? SILENCE;
@@ -1497,6 +1542,7 @@ export class LocalLauncher implements LocalSessionLauncher {
               ...{ timeout: caps.minutes * (this.options.minute ?? 60_000), silence },
               started: (pgid) => {
                 ran.spawned = true;
+                ran.started = true;
                 writeWhole(group, `${JSON.stringify(groupRecord(pgid))}\n`);
               },
             });
@@ -1566,6 +1612,16 @@ export class LocalLauncher implements LocalSessionLauncher {
         } finally {
           clearInterval(beat);
         }
+        // Ended only once nothing of its group remains, by the check a later launch makes; not
+        // written, the folder reads by its group in /proc, or as unknown, never as ended.
+        try {
+          // A runner that never reported a group, as the tests' fake one, has returned: ended.
+          const gone = () =>
+            !ran.started || (existsSync(group) && groupRunning(group, files.id) === undefined);
+          if (await until(gone)) writeWhole(join(folder, 'ended'), '');
+        } catch {
+          // Its group cannot be read now: a later launch reads it, and stops if it still cannot.
+        }
         // A blocked compaction: the item is too big for one session, which no retry changes.
         live.full = contextFull(this.options.home, files.id);
         if (failure !== undefined && live.full) {
@@ -1593,6 +1649,12 @@ export class LocalLauncher implements LocalSessionLauncher {
     } catch (err) {
       // A refusal that repeats on every pass alerts once per branch head (T061).
       if (err instanceof LaunchRefused && at !== undefined) err.head ??= at;
+      if (folder !== undefined && !ran.spawned)
+        try {
+          writeWhole(join(folder, 'not-spawned'), '');
+        } catch {
+          // Unwritten, the folder reads as unknown, which stops the next pass naming it.
+        }
       throw err;
     } finally {
       this.running = false;

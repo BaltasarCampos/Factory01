@@ -1332,6 +1332,26 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(t.inbox()).toEqual([]);
     });
 
+    it('T061: with a stale record in the clone and the failure record deleted, CI green at a later Build manifest ticks nothing', async () => {
+      const t = await issued();
+      const first = tipOf(t);
+      buildTest(work(t), 'failure');
+      // A later pass: its manifest's issued_at differs, so it changes .station.json.
+      t.ctx.now = () => new Date('2026-10-01T12:00:00Z');
+      await dispatchOnce(t.ctx);
+      const second = tipOf(t);
+      expect(t.local.launches).toHaveLength(2);
+      // As when update-ref failed after the second manifest's push.
+      t.project.git(['update-ref', `refs/factory/build/${BRANCH}`, first]);
+      rmSync(failureFile(t.home, REPO, ISSUE, 4));
+      buildTest(second, 'success');
+      await dispatchOnce(t.ctx);
+
+      expect(t.show(TASKS_MD)).toBe(TASKS);
+      expect(t.local.launches).toHaveLength(3);
+      expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(second);
+    });
+
     it('T061: with its failure record deleted, CI green at the manifest itself ticks nothing, and the task is issued again', async () => {
       const t = await issued();
       const manifest = tipOf(t);
