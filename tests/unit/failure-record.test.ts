@@ -18,6 +18,7 @@ import {
   failureFile,
   readFailureRecord,
   recordIssued,
+  recordOutcome,
   recordSession,
   tipState,
   writeFailureRecord,
@@ -96,6 +97,52 @@ describe('the failure record of local sessions (T061)', () => {
       writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: -1 });
     }).toThrow(/is malformed$/);
     expect(readFailureRecord(file)).toBeUndefined();
+  });
+
+  it("records how a session ended: a failure's text through visible() once, its full context or null, and an end that keeps the last failure (T061)", () => {
+    const home = tempDir();
+    const records = { home, factory: () => FACTORY };
+    const at = { repo: 'owner/project', item: 42, station: 4 } as const;
+    const file = failureFile(home, 'owner/project', 42, 4);
+    writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 0 });
+    recordSession(records, at, HEAD, 'id-1');
+    recordOutcome(records, at, HEAD, 'id-1', { failure: 'claude exited 1: \u001b[2J' });
+    const failed = { head: HEAD, factory: FACTORY, count: 1, session: 'id-1', outcome: 'failed' };
+    const last = 'claude exited 1: \\u{1b}[2J';
+    expect(readFailureRecord(file)).toEqual({ ...failed, last, context_full: null });
+    recordOutcome(records, at, HEAD, 'id-1', { failure: last, contextFull: true });
+    expect(readFailureRecord(file)).toEqual({ ...failed, last, context_full: true });
+
+    // The next attempt has no outcome until it settles; one that ended well keeps the last failure.
+    recordSession(records, at, HEAD, 'id-2');
+    expect(readFailureRecord(file)).toEqual({
+      head: HEAD,
+      factory: FACTORY,
+      count: 2,
+      session: 'id-2',
+      last,
+    });
+    recordOutcome(records, at, HEAD, 'id-2', 'ended');
+    expect(readFailureRecord(file)).toMatchObject({ outcome: 'ended', last, count: 2 });
+
+    // Another session or head: the record no longer names it, and nothing is written.
+    expect(() => {
+      recordOutcome(records, at, HEAD, 'id-1', 'ended');
+    }).toThrow(`the failure record ${file} no longer names session id-1 at ${HEAD.slice(0, 12)}`);
+    expect(() => {
+      recordOutcome(records, at, 'd'.repeat(40), 'id-2', 'ended');
+    }).toThrow(/no longer names session id-2 at dddddddddddd/);
+    expect(readFailureRecord(file)).toMatchObject({ outcome: 'ended', session: 'id-2' });
+  });
+
+  it.each([
+    ['an outcome that is neither', { outcome: 'passed' }],
+    ['a context_full that is not a boolean or null', { context_full: 'yes' }],
+  ])('refuses a record with %s (T061)', (_name, change) => {
+    const file = join(tempDir(), 'r.json');
+    expect(() => {
+      writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 0, ...change } as never);
+    }).toThrow(/is malformed/);
   });
 
   it('records the session about to start at its head, and refuses one it cannot record', () => {

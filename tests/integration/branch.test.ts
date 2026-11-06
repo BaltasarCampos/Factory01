@@ -1563,7 +1563,10 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     expect(t.local.launches).toHaveLength(1);
     const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
     // The session's id is in it before the session can run.
-    expect(record).toEqual({ head: tip(t), factory: HASH, count: 1, session: 'fake-local-1' });
+    expect(record).toEqual({
+      ...{ head: tip(t), factory: HASH, count: 1, session: 'fake-local-1' },
+      outcome: 'ended',
+    });
     expect(t.show(`${FEATURE}/.station.json`)).toMatch(/"station": 2/);
 
     const cloud = setup({ agents: 'cloud' });
@@ -1589,6 +1592,19 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     await dispatchOnce(refused.ctx);
     const none = readFailureRecord(failureFile(refused.home, REPO, ISSUE, 2));
     expect(none).toEqual({ head: tip(refused), factory: HASH, count: 0 });
+  });
+
+  it('in local mode records how a failed session ended after it: its text through visible() and its full context (T061)', async () => {
+    const t = setup();
+    const failure = new SessionFailed('claude exited 1: \u0007', false);
+    failure.contextFull = true;
+    t.local.failure = failure;
+    await dispatchOnce(t.ctx);
+
+    expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toMatchObject({
+      ...{ count: 1, session: 'fake-local-1', outcome: 'failed' },
+      ...{ last: 'claude exited 1: \\u{7}', context_full: true },
+    });
   });
 
   it('pushes no manifest when its record cannot be written or the factory cannot be hashed (T061)', async () => {
@@ -1627,7 +1643,10 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     await dispatchOnce(t.ctx);
     expect(t.local.launches).toHaveLength(2);
     const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
-    expect(record).toEqual({ head: tip(t), factory: HASH, count: 1, session: 'fake-local-2' });
+    expect(record).toEqual({
+      ...{ head: tip(t), factory: HASH, count: 1, session: 'fake-local-2' },
+      outcome: 'ended',
+    });
 
     // A commit that only looks like the dispatcher's manifest is a new head in local mode, while
     // cloud mode's T059 rule waits on it.
@@ -1740,10 +1759,14 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       // A refusal before the start leaves no session in the record and no count: still spent,
       // until 3b-2; the failed session was counted as it started.
       const session =
-        failure instanceof LaunchRefused ? { count: 0 } : { count: 1, session: 'fake-local-1' };
+        failure instanceof LaunchRefused
+          ? { count: 0 }
+          : { count: 1, session: 'fake-local-1', outcome: 'failed', last: failure.message };
+      const full = failure instanceof LaunchRefused ? {} : { context_full: null };
       expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toEqual({
         ...{ head: manifest, factory: HASH },
         ...session,
+        ...full,
       });
     }
   });
