@@ -165,6 +165,8 @@ export interface StationManifest {
   branch: string;
   task?: string;
   files?: string[];
+  /** The failure line the dispatcher put in the prompt, never a session's text (T061). */
+  failure?: string;
   issued_at: string;
 }
 

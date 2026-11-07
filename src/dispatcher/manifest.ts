@@ -162,7 +162,7 @@ export function testEnded(ctx: BranchContext, tip: string, mainRef = 'origin/mai
 export function writeStationManifest(
   ctx: BranchContext,
   item: ItemRef,
-  session: { station: Station; role: RoleName },
+  session: { station: Station; role: RoleName; failure?: string },
   mainRef = 'origin/main',
   issued?: (sha: string, parent: string) => void,
 ): StationManifest {
@@ -186,6 +186,7 @@ export function writeStationManifest(
     branch: item.branch,
     ...(task === undefined ? {} : task),
     ...(conflicts === undefined ? {} : { files: conflicts }),
+    ...(session.failure === undefined ? {} : { failure: session.failure }),
     issued_at: ctx.now().toISOString(),
   };
   const path = `specs/${feature}/.station.json`;

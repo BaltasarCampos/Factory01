@@ -1237,15 +1237,20 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       ]);
     });
 
-    it('T174: a red head gives the Builder the same task again with the failure, at most retry_limit times', async () => {
+    it('T174: a red head gives the Builder the same task again with the failure, in its prompt and its manifest, at most retry_limit times', async () => {
       const t = await issued('retry_limit: 1\n');
       const first = work(t);
       buildTest(first, 'failure');
       await dispatchOnce(t.ctx);
       expect(task(t)).toBe('T001');
-      expect(t.local.launches[1]?.prompt).toContain(
-        `Your last attempt at T001 left CI red at ${first.slice(0, 12)}: build-test (failure).`,
-      );
+      const line = `Your last attempt at T001 left CI red at ${first.slice(0, 12)}: build-test (failure).`;
+      expect(t.local.launches[1]?.prompt).toContain(line);
+      // The manifest keeps the line, so a relaunch on it gets the same prompt (T061); the first
+      // manifest, with no failure, has none.
+      const station = `${FEATURE}/.station.json`;
+      expect(JSON.parse(t.show(station))).toMatchObject({ task: 'T001', failure: line });
+      const issuedFirst = t.project.git(['show', `${first}~1:${station}`]);
+      expect(JSON.parse(issuedFirst)).not.toHaveProperty('failure');
 
       const second = work(t, { 'tests/login.test.ts': 't2\n' });
       buildTest(second, 'failure');
@@ -1498,6 +1503,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(manifest).toMatchObject({ station: 4, role: 'builder', files: ['src/login.ts'] });
       expect(manifest).not.toHaveProperty('task');
       expect(t.local.launches[0]?.prompt).toContain('Integrate sent this item back');
+      expect(manifest.failure).toMatch(/^Integrate sent this item back/);
       // Any commit but a clean merge of main makes the report stale.
       work(t, { 'src/login.ts': 'resolved\n' });
       await dispatchOnce(t.ctx);

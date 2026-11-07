@@ -550,7 +550,9 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
         : undefined;
     let manifest;
     try {
-      manifest = writeStationManifest(git, ref, { station, role }, mainRef, issued);
+      // The prompt's failure line goes in the manifest too, so a relaunch can rebuild it (T061).
+      const line = failure === undefined ? {} : { failure };
+      manifest = writeStationManifest(git, ref, { station, role, ...line }, mainRef, issued);
     } catch (err) {
       if (!(err instanceof StackRefused)) throw err;
       await hold(pass, ref, station, err);
