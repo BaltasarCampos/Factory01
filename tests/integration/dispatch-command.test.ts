@@ -3,6 +3,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   realpathSync,
   writeFileSync,
 } from 'node:fs';
@@ -240,21 +241,48 @@ describe('factory dispatch and factory run (contracts/cli.md)', { timeout: 60_00
     const t = setup();
     let n = 0;
     t.local.available = () =>
-      Promise.reject(new Error(`no answer from ${join(tmpdir(), `factory-${String(++n)}`)}`));
+      Promise.reject(new Error(`no answer from ${join(tmpdir(), `factory-ab12C${String(++n)}`)}`));
 
     const first = await t.cli(['run']);
     await t.cli(['run']);
 
     expect(first.code).not.toBe(0);
-    expect(first.stderr).toContain(`no answer from ${join(tmpdir(), 'factory-1')}`);
+    expect(first.stderr).toContain(`no answer from ${join(tmpdir(), 'factory-ab12C1')}`);
     const head = t.project.git(['rev-parse', 'origin/main']).slice(0, 12);
     const alerts = t.inbox().flatMap((c) => parseAlert({ ...c, id: String(c.id) }) ?? []);
     expect(alerts.filter((a) => a.kind === 'pass-threw')).toEqual([
       expect.objectContaining({
         urgency: 'urgent',
-        text: `factory run stopped: a pass threw Error: no answer from <tmp>; main is at ${head}`,
+        text: `factory run stopped: a pass threw Error: no answer from ${join(tmpdir(), 'factory-<random>')}; main is at ${head}`,
       }),
     ]);
+  });
+
+  it("factory run posts a thrown pass's alert to main's inbox, the working copy's only when main's config cannot be read (T061)", async () => {
+    const t = setup();
+    t.local.available = () => Promise.reject(new Error('no answer'));
+    const config = join(t.project.path, '.factory', 'config');
+    const text = readFileSync(config, 'utf8');
+    writeFileSync(config, text.replace('inbox_issue: 1', 'inbox_issue: 2'));
+    const thrown = (issue: number) =>
+      (readState().repos[REPO]?.issues.find((i) => i.number === issue)?.comments ?? [])
+        .flatMap((c) => parseAlert({ ...c, id: String(c.id) }) ?? [])
+        .filter((a) => a.kind === 'pass-threw');
+
+    await t.cli(['run']);
+    expect(thrown(1)).toHaveLength(1);
+    expect(thrown(2)).toEqual([]);
+
+    writeFileSync(config, text);
+    t.project.git(['rm', '-q', '.factory/config']);
+    t.project.git(['commit', '-q', '-m', 'no config on main']);
+    t.project.push('main');
+    writeFileSync(config, text);
+    const r = await t.cli(['run']);
+    expect(r.stderr).toContain(
+      `factory run: main's config cannot be read, so the alert goes to the working copy's inbox, ${REPO}#1: `,
+    );
+    expect(thrown(1)).toHaveLength(2);
   });
 
   it('without launchers from the caller, an agents: cloud project starts no session and the Owner gets one info alert (T125)', async () => {

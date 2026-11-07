@@ -202,8 +202,10 @@ async function buildRound(
     return { hold: { urgency: 'urgent', kind: 'tampering', text } };
   }
   if (!new RegExp(`^\\s*- \\[ \\] ${task}\\b`, 'm').test(tasks)) return issue();
-  // The manifest itself is the tip: no Builder work to judge, and CI there is the manifest's own.
-  if (issued === tip) return issue();
+  // A Build manifest is the tip, the one recorded or a later one, as when update-ref failed after
+  // its push: no Builder work to judge, and CI there is the manifest's own. A forged subject only
+  // issues the task again, within the cap.
+  if (issued === tip || pendingManifest(at, tip)?.station === 4) return issue();
   const state = await buildTestAt(ctx, config, tip);
   if (state === 'success') return { tick: task, head: tip };
   if (['pending', 'missing'].includes(state)) return { hold: `build-test ${state}` };

@@ -56,7 +56,13 @@ import {
   type Notice,
   type SessionLauncher,
 } from './launcher/types.js';
-import { recordIssued, recordSession, StackRefused, type FailureRecords } from './failures.js';
+import {
+  recordIssued,
+  recordOutcome,
+  recordSession,
+  StackRefused,
+  type FailureRecords,
+} from './failures.js';
 import { issuedRef, tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
@@ -483,13 +489,13 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   const refuse = async (
     refused: string,
     urgent: boolean | undefined,
-    kind = 'launcher-unavailable',
+    kind?: string,
   ): Promise<PassResult> => {
     const text = `no session started for ${repo}: ${refused}`;
     await alertOnce(
       urgent === true
-        ? { urgency: 'urgent', kind: 'tampering', text }
-        : { urgency: 'info', kind, text },
+        ? { urgency: 'urgent', kind: kind ?? 'tampering', text }
+        : { urgency: 'info', kind: kind ?? 'launcher-unavailable', text },
     );
     return { ...result, refused };
   };
@@ -498,6 +504,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     return refuse(
       `the ${launcher.mode} launcher is unavailable: ${availability.reason}`,
       availability.urgent,
+      availability.kind,
     );
   const pass = { ctx, result, config, git, mainRef, keys, history, released, alertOnce };
   for (const target of targets) {
@@ -517,6 +524,8 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
   // The feature folder and the task's files, for the session's own settings (T061).
   let session = { feature: '', files: [] as readonly string[] };
   let starting: { starting: (id: string) => void } | undefined;
+  /** How the session that started ended, in its failure record, in local mode (T061). */
+  let settled: ((outcome: Parameters<typeof recordOutcome>[4]) => void) | undefined;
   if (station >= 2 && station <= 6) {
     const ref: ItemRef = { issue: item.issue.number, branch };
     createItemBranch(git, ref, comments, mainRef);
@@ -532,6 +541,9 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
             starting = {
               starting: (id) => {
                 recordSession(ctx.failures, at, sha, id);
+                settled = (outcome) => {
+                  recordOutcome(ctx.failures, at, sha, id, outcome);
+                };
               },
             };
           }
@@ -591,6 +603,10 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
       const urgency = err.urgent ? 'urgent' : 'info';
       const kind = err instanceof SessionCapped ? 'session-capped' : 'session-failed';
       await alertOnce({ urgency, kind, text });
+      settled?.({
+        failure: err.message,
+        ...(err.contextFull === undefined ? {} : { contextFull: err.contextFull }),
+      });
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;
@@ -604,6 +620,7 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     return refuse(refused, err.urgent);
   }
   for (const { kind, text } of notices) await alertOnce({ urgency: 'info', kind, text });
+  settled?.('ended');
   const mode = launcher.mode;
   return {
     ...result,

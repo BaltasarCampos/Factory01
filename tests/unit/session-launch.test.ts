@@ -1,4 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import {
   chmodSync,
   existsSync,
@@ -367,6 +368,8 @@ describe('LocalLauncher (research R8, R9)', () => {
     const folder = dirname(sessionFiles(t.home).settings);
     mkdirSync(folder, { recursive: true });
     writeFileSync(join(folder, 'passed.json'), '{}');
+    // An earlier session that ended, so the check for one still running lets the launch go on.
+    writeFileSync(join(folder, 'ended'), '');
 
     const refused = t.launch(REQUEST);
 
@@ -1772,13 +1775,14 @@ describe('LocalLauncher (research R8, R9)', () => {
         expect(read).not.toThrow(/\u001b/);
       });
 
-      it('writes group.json whole or not at all: a crash leaves only a temporary file beside it, read as no group (T061)', () => {
+      it('writes group.json whole or not at all: a crash leaves only a temporary file beside it, read as unknown (T061)', () => {
         const home = homeDir();
         const dir = join(home, '.factory', 'sessions', OLD);
         mkdirSync(dir, { recursive: true });
         const file = join(dir, 'group.json');
         writeFileSync(`${file}.left.tmp`, '');
-        expect(sessionRunning(home, OLD)).toBeUndefined();
+        // No group.json and no marker beside it: whether it runs is unknown, never ended.
+        expect(() => sessionRunning(home, OLD)).toThrow(/still runs is unknown/);
         writeWhole(file, 'first\n');
         expect(() => {
           writeWhole(file, 'second\n');
@@ -1797,10 +1801,105 @@ describe('LocalLauncher (research R8, R9)', () => {
         try {
           const refused = t.launch(REQUEST);
           await expect(refused).rejects.toThrow(EnvironmentError);
-          await expect(refused).rejects.toThrow(
-            `no local session started: ${join(sessions, 'linked')} is not a session's folder; remove it, then run the factory again`,
-          );
+          // Said once, never prefixed again by the step that looked (T061).
+          await expect(refused).rejects.toMatchObject({
+            message: `no local session started: ${join(sessions, 'linked')} is not a session's folder; remove it, then run the factory again`,
+          });
           expect(t.sessions()).toEqual([]);
+        } finally {
+          stop(pgid);
+        }
+      });
+
+      it('is unavailable, urgent, while a session runs, and stops on a stray entry, before any manifest is pushed (T061)', async () => {
+        const t = setup();
+        const { pgid } = recorded(t.home, 'sleep 30');
+        try {
+          const busy = await t.available();
+          expect(busy).toMatchObject({ ok: false, urgent: true, kind: 'session-running' });
+          expect('reason' in busy ? busy.reason : '').toMatch(`session ${OLD} is still running`);
+        } finally {
+          stop(pgid);
+        }
+        symlinkSync(homeDir(), join(t.home, '.factory', 'sessions', 'linked'));
+        await expect(t.available()).rejects.toThrow(/linked is not a session's folder/);
+      });
+
+      it('reads a session folder by its markers, and fails closed when it has none (T061)', () => {
+        const home = homeDir();
+        const { dir, pgid } = recorded(home, 'sleep 30');
+        const mark = (name: string) => {
+          writeFileSync(join(dir, name), '');
+        };
+        const out = `remove ${dir} once ps -eo pid,pgid,args shows nothing of session ${OLD}`;
+        try {
+          // group.json alone: the /proc scan; with ended, no scan.
+          expect(sessionRunning(home, OLD)).toMatch(/is still running/);
+          mark('ended');
+          expect(sessionRunning(home, OLD)).toBeUndefined();
+          rmSync(join(dir, 'ended'));
+          mark('not-spawned');
+          expect(() => sessionRunning(home, OLD)).toThrow(
+            `${dir} records a process group and no spawn both; ${out}`,
+          );
+          // not-spawned alone, or ended alone: ended.
+          rmSync(join(dir, 'group.json'));
+          expect(sessionRunning(home, OLD)).toBeUndefined();
+          rmSync(join(dir, 'not-spawned'));
+          mark('ended');
+          expect(sessionRunning(home, OLD)).toBeUndefined();
+          // None of the three, as a crash between the spawn and its record leaves: unknown.
+          rmSync(join(dir, 'ended'));
+          mark('session.json');
+          const read = () => sessionRunning(home, OLD);
+          expect(read).toThrow(EnvironmentError);
+          expect(read).toThrow(
+            `whether session ${OLD} still runs is unknown: ${dir} records no process group and no end, as when a factory stops between claude's spawn and its record; ${out}`,
+          );
+          rmSync(dir, { recursive: true });
+          expect(sessionRunning(home, OLD)).toBeUndefined();
+        } finally {
+          stop(pgid);
+        }
+      });
+
+      it('stops the next launch over a crash after the spawn, and reads a refusal before it, or a run that returned, as ended (T061)', async () => {
+        const t = setup();
+        const folder = (id: string) => join(t.home, '.factory', 'sessions', id);
+        const starting = () => {
+          throw new Error('no record');
+        };
+        await expect(t.launch({ ...REQUEST, starting })).rejects.toThrow(LaunchRefused);
+        expect(readdirSync(folder(FIRST))).toContain('not-spawned');
+        const { sessionId } = await t.launch(REQUEST);
+        expect(readdirSync(folder(sessionId))).toContain('ended');
+        expect(readdirSync(folder(sessionId))).not.toContain('group.json');
+
+        mkdirSync(folder(OLD));
+        writeFileSync(join(folder(OLD), 'session.json'), '{}');
+        await expect(t.launch(REQUEST)).rejects.toThrow(
+          new RegExp(`^no local session started: .*whether session ${OLD} still runs is unknown`),
+        );
+      });
+
+      it('writes no ended marker while a process of the group still runs when the launcher settles (T061)', async () => {
+        const other = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+        await once(other, 'spawn');
+        const pgid = other.pid;
+        if (pgid === undefined) throw new Error('sleep has no pid');
+        // A group the launcher does not stop, reported as the session's.
+        const base = fakeRunner();
+        const run: Runner = (program, args, options) => {
+          if (args[0] === '-p') options.started?.(pgid);
+          return base.run(program, args, options);
+        };
+        const t = setup({ run });
+        try {
+          await t.launch(REQUEST);
+          const dir = join(t.home, '.factory', 'sessions', FIRST);
+          expect(readdirSync(dir)).toContain('group.json');
+          expect(readdirSync(dir)).not.toContain('ended');
+          expect(sessionRunning(t.home, FIRST)).toMatch(/is still running/);
         } finally {
           stop(pgid);
         }
@@ -1823,11 +1922,11 @@ describe('factory run: the alert for a pass that throws (T061)', () => {
   it('alerts once per main head and message, compared with no temporary path, session id, pid or time', async () => {
     const thrown = (n: string) =>
       new EnvironmentError(
-        `${join(tmpdir(), `factory-keys-${n}`, 'x')} at 2026-11-06T10:0${n}:00Z: session 0b6c7f3e-2a4d-4c1e-9f00-00000000000${n} as process group 12${n}; kill -TERM -12${n}\nsecond line`,
+        `${join(tmpdir(), `factory-keys-ab12C${n}`, 'x')} at 2026-11-06T10:0${n}:00Z: session 0b6c7f3e-2a4d-4c1e-9f00-00000000000${n} as process group 12${n}; kill -TERM -12${n}\nsecond line`,
       );
     const text = thrownText('96ca65d33f7c', thrown('1'));
     expect(text).toBe(
-      'factory run stopped: a pass threw EnvironmentError: <tmp> at <time>: session <id> as process group <pid>; kill -TERM -<pid>; main is at 96ca65d33f7c',
+      `factory run stopped: a pass threw EnvironmentError: ${join(tmpdir(), 'factory-keys-<random>', 'x')} at <time>: session <id> as process group <pid>; kill -TERM -<pid>; main is at 96ca65d33f7c`,
     );
     expect(thrownText('96ca65d33f7c', thrown('2'))).toBe(text);
     expect(thrownText('0123456789ab', thrown('2'))).not.toBe(text);
@@ -1836,6 +1935,18 @@ describe('factory run: the alert for a pass that throws (T061)', () => {
     await alertThrown(inbox, text, sink(), { read, post: into(posted) });
     await alertThrown(inbox, text, sink(), { read, post: into(posted) });
     expect(posted).toEqual([{ urgency: 'urgent', kind: 'pass-threw', text }]);
+  });
+
+  it("keeps a temporary path's file name, replacing only mkdtemp's suffix, and only in a path that starts at /tmp (T061)", () => {
+    const at = (path: string) => thrownText('96ca65d33f7c', new Error(`cannot read ${path}`));
+    expect(at('/tmp/factory-keys-ab12Cd/keys.json')).toBe(at('/tmp/factory-keys-Zz9Yx8/keys.json'));
+    expect(at('/tmp/factory-keys-ab12Cd/keys.json')).toContain(
+      '/tmp/factory-keys-<random>/keys.json',
+    );
+    expect(at('/tmp/factory-keys-ab12Cd/keys.json')).not.toBe(
+      at('/tmp/factory-keys-ab12Cd/anchor.pem'),
+    );
+    expect(at('/home/u/tmp/factory-ab12Cd')).toContain('/home/u/tmp/factory-ab12Cd');
   });
 
   it('shows the message through visible(), posts when the alerts cannot be read, and writes both errors to stderr when the post fails', async () => {

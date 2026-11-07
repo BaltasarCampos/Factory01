@@ -27,8 +27,12 @@ export interface FailureRecord {
   factory: string;
   /** The attempts at `head`, each counted when it starts, before claude spawns. */
   count: number;
-  /** The last attempt's failure. */
+  /** The last failure at `head`, session text through `visible()` once. */
   last?: string;
+  /** How the last attempt that settled ended; none while one runs. */
+  outcome?: 'failed' | 'ended';
+  /** Whether that failed attempt's context was full; null when unknown. */
+  context_full?: boolean | null;
   /** The id of the last session started at `head`, whose group tells whether it still runs. */
   session?: string;
 }
@@ -71,7 +75,7 @@ export function failureFile(home: string, repo: string, item: number, station: S
 /** Whether `value` is a record: what is read, and what may be written. */
 function isRecord(value: unknown): value is FailureRecord {
   const record = (value ?? {}) as Record<string, unknown>;
-  const fields = ['head', 'factory', 'count', 'last', 'session'];
+  const fields = ['head', 'factory', 'count', 'last', 'session', 'outcome', 'context_full'];
   return (
     typeof value === 'object' &&
     !Array.isArray(value) &&
@@ -83,6 +87,10 @@ function isRecord(value: unknown): value is FailureRecord {
     Number.isSafeInteger(record.count) &&
     (record.count as number) >= 0 &&
     (record.last === undefined || typeof record.last === 'string') &&
+    (record.outcome === undefined || record.outcome === 'failed' || record.outcome === 'ended') &&
+    (record.context_full === undefined ||
+      record.context_full === null ||
+      typeof record.context_full === 'boolean') &&
     (record.session === undefined ||
       (typeof record.session === 'string' && /^[0-9A-Za-z-]{1,64}$/.test(record.session)))
   );
@@ -175,7 +183,43 @@ export function recordSession(
     );
   const factory = records.factory();
   const count = (record.factory === factory ? record.count : 0) + 1;
-  writeFailureRecord(file, { ...record, factory, count, session });
+  // A new attempt has no outcome yet.
+  writeFailureRecord(file, { ...lastOf(record), head, factory, count, session });
+}
+
+/** The record's last failure, the one field an attempt carries over from the one before it. */
+const lastOf = (record: FailureRecord) => (record.last === undefined ? {} : { last: record.last });
+
+/**
+ * How session `session` at `head` ended, once it has (T061): a failure keeps its text, through
+ * `visible()` once, and whether its context was full, null when unknown; a session that ended well
+ * keeps the last failure before it. A record that no longer names that head and session refuses.
+ */
+export function recordOutcome(
+  records: FailureRecords,
+  at: { repo: string; item: number; station: Station },
+  head: string,
+  session: string,
+  outcome: { failure: string; contextFull?: boolean } | 'ended',
+): void {
+  const file = failureFile(records.home, at.repo, at.item, at.station);
+  const record = readFailureRecord(file);
+  if (record?.head !== head || record.session !== session)
+    throw new EnvironmentError(
+      `the failure record ${file} no longer names session ${visible(session)} at ${head.slice(0, 12)}, so its outcome is not recorded; run the factory again`,
+    );
+  const rest = { ...lastOf(record), head, factory: record.factory, count: record.count, session };
+  writeFailureRecord(
+    file,
+    outcome === 'ended'
+      ? { ...rest, outcome: 'ended' }
+      : {
+          ...rest,
+          outcome: 'failed',
+          last: visible(outcome.failure),
+          context_full: outcome.contextFull ?? null,
+        },
+  );
 }
 
 /**
