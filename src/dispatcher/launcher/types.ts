@@ -1,6 +1,6 @@
 // How the dispatcher starts a station session (research R8): a cloud session for the project's
 // repo and item branch, or `claude -p` on the laptop (T061). Tests use a fake.
-import { RefusedError } from '../../cli/env.js';
+import { EnvironmentError, RefusedError } from '../../cli/env.js';
 import type { AgentsMode, RoleName, Station } from '../../model/types.js';
 
 export interface LaunchRequest {
@@ -101,3 +101,10 @@ export class SessionCapped extends SessionFailed {
     super(message, false);
   }
 }
+
+/**
+ * Whether a session runs cannot be read from its folder (T061): it stops the pass, and the alert
+ * for a pass that throws keeps its session id, so two such sessions at one main head alert once
+ * each.
+ */
+export class SessionUnknown extends EnvironmentError {}

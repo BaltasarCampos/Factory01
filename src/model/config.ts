@@ -152,9 +152,13 @@ export async function loadConfig(path: string, release?: ReleaseLimits): Promise
 }
 
 /** `.factory/config` as committed on main, never the work tree. */
-export function configOnMain(projectDir: string, mainRef = 'origin/main'): ProjectConfig {
+export function configOnMain(
+  projectDir: string,
+  mainRef = 'origin/main',
+  env: NodeJS.ProcessEnv = process.env,
+): ProjectConfig {
   const object = `${mainRef}:.factory/config`;
-  const result = spawnSync('git', ['-C', projectDir, 'show', object], { encoding: 'utf8' });
+  const result = spawnSync('git', ['-C', projectDir, 'show', object], { encoding: 'utf8', env });
   if (result.error !== undefined || result.status !== 0)
     throw new RefusedError(`cannot read ${object} in ${projectDir}`);
   return parseConfig(result.stdout);
