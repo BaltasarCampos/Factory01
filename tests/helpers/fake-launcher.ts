@@ -35,6 +35,8 @@ export class FakeLauncher {
   refusal?: LaunchRefused;
   /** Runs before `starting`, as anything else may between the manifest's issue and the start. */
   beforeStart?: () => void;
+  /** Runs once `starting` has passed, as anything may while the session runs. */
+  afterStart?: () => void;
   /** The heartbeats every launch gives while its session runs. */
   beats: { elapsed: number; turns: number }[] = [];
 
@@ -73,6 +75,7 @@ export class FakeLauncher {
       return Promise.reject(new LaunchRefused(`no local session started: ${visible(why)}`));
     }
     this.launches.push({ ...request, mode: this.mode, sessionId });
+    this.afterStart?.();
     for (const beat of this.beats) request.heartbeat?.(beat);
     return this.failure === undefined
       ? Promise.resolve({ sessionId })

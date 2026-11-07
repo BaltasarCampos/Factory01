@@ -50,10 +50,12 @@ export function featureOf(item: ItemRef): string {
 }
 
 function run(ctx: BranchContext, args: readonly string[], input?: string) {
+  // Past spawnSync's 1 MiB, git's output from a session's commit would end every pass (T061).
   return spawnSync('git', args, {
     cwd: ctx.projectDir,
     env: ctx.env ?? process.env,
     encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
     ...(input === undefined ? {} : { input }),
   });
 }

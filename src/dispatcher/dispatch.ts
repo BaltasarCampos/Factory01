@@ -599,16 +599,26 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     }));
   } catch (err) {
     if (err instanceof SessionFailed) {
-      // The outcome first: a local file, which fails closed by itself, never skipped by a failed
-      // post of the alert.
-      settled?.({
-        failure: err.message,
-        ...(err.contextFull === undefined ? {} : { contextFull: err.contextFull }),
-      });
-      const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed`;
+      // The outcome first: a local file, never skipped by a failed post of the alert. One that
+      // cannot be recorded is named in the alert, which still goes out, and then stops the pass.
+      let unrecorded: Error | undefined;
+      try {
+        settled?.({
+          failure: err.message,
+          ...(err.contextFull === undefined ? {} : { contextFull: err.contextFull }),
+        });
+      } catch (thrown) {
+        unrecorded = thrown instanceof Error ? thrown : new Error(String(thrown));
+      }
+      const lost =
+        unrecorded === undefined
+          ? ''
+          : `; its outcome could not be recorded: ${visible(unrecorded.message)}`;
+      const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed${lost}`;
       const urgency = err.urgent ? 'urgent' : 'info';
       const kind = err instanceof SessionCapped ? 'session-capped' : 'session-failed';
       await alertOnce({ urgency, kind, text });
+      if (unrecorded !== undefined) throw unrecorded;
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;

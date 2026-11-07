@@ -7,7 +7,7 @@
 // session can neither see nor rewrite; it ticks a task only on history that holds it (T174).
 import { EnvironmentError } from '../cli/env.js';
 import { fileAt } from '../git/answers.js';
-import type { RoleName, Station, StationManifest } from '../model/types.js';
+import { ROLES, type RoleName, type Station, type StationManifest } from '../model/types.js';
 import { taskFiles } from '../stations/checks/plan.js';
 import {
   commitAndPush,
@@ -21,6 +21,8 @@ import {
 } from './branch.js';
 
 const BUILD_SUBJECT = 'Dispatcher: station 4 (builder) manifest';
+/** The largest `.station.json` read at a tip: the dispatcher's are far smaller (T061). */
+const MAX_MANIFEST = 64 * 1024;
 
 /** Where the dispatcher's clone records the Build manifest commit it last pushed to `branch`. */
 export const issuedRef = (branch: string) => `refs/factory/build/${branch}`;
@@ -96,18 +98,26 @@ export function nextTask(tasks: string): { task: string; files: string[] } | und
 
 /**
  * The manifest on the branch tip, if the tip is the dispatcher's manifest commit by its subject;
- * `unreadable` when its `.station.json` is not a JSON object, which a session may have forged
- * (T061). A git failure throws.
+ * `unreadable` when its `.station.json` is not a plain file, is over 64 KiB, is not a JSON object, or names no station
+ * from 1 to 7 or no role, which a session may have forged (T061). At Build such a tip only issues
+ * the task again: it counts toward Build's cap only with Build's exact subject, and the cap holds
+ * all the same, since each issue pushes the dispatcher's own manifest. A git failure throws.
  */
 export function pendingManifest(
   ctx: BranchContext,
   tip: string,
 ): StationManifest | 'unreadable' | undefined {
-  const message = git(ctx, ['log', '-1', '--format=%B', tip]);
-  if (!/^Dispatcher: station \d/.test(message)) return undefined;
+  const subject = git(ctx, ['log', '-1', '--format=%s', tip]);
+  if (!/^Dispatcher: station \d/.test(subject)) return undefined;
   const changed = git(ctx, ['diff-tree', '--no-commit-id', '--name-only', '-r', tip]);
   const [path] = changed.split('\n');
   if (path === undefined || !path.endsWith('/.station.json')) return undefined;
+  // Its mode and size first: anything but a plain file within the limit is not the dispatcher's,
+  // and reading it could stop every pass.
+  const entry = /^100644 blob [0-9a-f]+ +(\d+)\t/.exec(
+    git(ctx, ['ls-tree', '-l', tip, '--', path]),
+  );
+  if (entry === null || Number(entry[1]) > MAX_MANIFEST) return 'unreadable';
   const text = git(ctx, ['show', `${tip}:${path}`]);
   let value: unknown;
   try {
@@ -115,8 +125,14 @@ export function pendingManifest(
   } catch {
     return 'unreadable';
   }
-  const object = typeof value === 'object' && value !== null && !Array.isArray(value);
-  return object ? (value as StationManifest) : 'unreadable';
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return 'unreadable';
+  const { station, role } = value as Record<string, unknown>;
+  const named =
+    Number.isInteger(station) &&
+    (station as number) >= 1 &&
+    (station as number) <= 7 &&
+    (ROLES as readonly unknown[]).includes(role);
+  return named ? (value as StationManifest) : 'unreadable';
 }
 
 /** The station of the manifest at the tip; undefined for none, or for one that cannot be read. */

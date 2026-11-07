@@ -22,7 +22,12 @@ import {
   recordIssued,
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
-import { nextTask, writeStationManifest } from '../../src/dispatcher/manifest.js';
+import {
+  nextTask,
+  pendingManifest,
+  pendingStation,
+  writeStationManifest,
+} from '../../src/dispatcher/manifest.js';
 import { groupRecord } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { configOnMain } from '../../src/model/config.js';
@@ -32,6 +37,7 @@ import { FakeClock } from '../helpers/fake-clock.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeComment, type FakeIssue } from '../helpers/fake-gh.js';
 import {
+  gitEnv,
   makeRepo,
   mergeBrief,
   mergeIntoMain,
@@ -1175,6 +1181,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       '- [ ] T002 Login form · Files: src/login.ts',
     ].join('\n');
     const TASKS_MD = `${FEATURE}/tasks.md`;
+    const BUILD_MANIFEST = 'Dispatcher: station 4 (builder) manifest';
     /** An item in Build at tier 1 whose first task the dispatcher has issued. */
     const issued = async (config?: string) => {
       const factory = factoryClone();
@@ -1320,21 +1327,27 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       ]);
     });
 
-    it("T061: a session's forged Build manifest whose .station.json does not parse issues the task again, within the cap, and never throws", async () => {
-      const t = await issued();
-      t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
-      const files = { [`${FEATURE}/.station.json`]: '{' };
-      t.project.commit(files, 'Dispatcher: station 4 (builder) manifest');
-      t.project.push(BRANCH);
-      t.project.checkout('main');
-      const tip = tipOf(t);
-      buildTest(tip, 'success');
-      await dispatchOnce(t.ctx);
+    it("T061: a session's forged Build manifest whose .station.json does not parse, or is 2 MiB, issues the task again and never throws", async () => {
+      // A manifest the dispatcher could have written but for its size, past spawnSync's 1 MiB.
+      const big = { item: ISSUE, station: 4, role: 'builder', branch: BRANCH, task: 'T001' };
+      const huge = `${JSON.stringify({ ...big, pad: 'x'.repeat(2 * 1024 * 1024) })}\n`;
+      for (const text of ['{', huge]) {
+        const t = await issued();
+        t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+        t.project.commit({ [`${FEATURE}/.station.json`]: text }, BUILD_MANIFEST);
+        t.project.push(BRANCH);
+        t.project.checkout('main');
+        const tip = tipOf(t);
+        buildTest(tip, 'success');
+        const at = { projectDir: t.project.path, now: () => new Date() };
+        expect(pendingManifest(at, tip)).toBe('unreadable');
+        await dispatchOnce(t.ctx);
 
-      expect(t.show(TASKS_MD)).toBe(TASKS);
-      expect(t.local.launches).toHaveLength(2);
-      expect(task(t)).toBe('T001');
-      expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(tip);
+        expect(t.show(TASKS_MD)).toBe(TASKS);
+        expect(t.local.launches).toHaveLength(2);
+        expect(task(t)).toBe('T001');
+        expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(tip);
+      }
     });
 
     it('T061: a spent Build manifest whose record in the clone was deleted waits, pushing nothing', async () => {
@@ -1655,6 +1668,29 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     });
   });
 
+  it('in local mode posts the failed-session alert when its outcome cannot be recorded, naming why, and then stops the pass (T061)', async () => {
+    const t = setup();
+    t.local.failure = new SessionFailed('claude exited 1', false);
+    const file = failureFile(t.home, REPO, ISSUE, 2);
+    // The record is replaced while the session runs, so its outcome no longer has one to go in.
+    t.local.afterStart = () => {
+      const record = readFailureRecord(file);
+      if (record === undefined) throw new Error('no record');
+      writeFailureRecord(file, { ...record, session: 'another-session' });
+    };
+    const lost = `the failure record ${file} no longer names session fake-local-1 at`;
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow(lost);
+
+    const [alert, ...more] = heldAlerts(t, 'session-failed');
+    expect(more).toEqual([]);
+    expect(alert).toMatch(
+      new RegExp(
+        `^info a spec session for ${REPO}#${String(ISSUE)} failed: claude exited 1; nothing of it is pushed; its outcome could not be recorded: ${lost.replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')}`,
+      ),
+    );
+    expect(readFailureRecord(file)).not.toHaveProperty('outcome');
+  });
+
   it('pushes no manifest when its record cannot be written or the factory cannot be hashed (T061)', async () => {
     const unhashable = () => {
       throw new EnvironmentError('the installed factory cannot be hashed: x: EACCES');
@@ -1702,11 +1738,62 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       const u = setup({ agents });
       await dispatchOnce(u.ctx);
       u.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
-      const forged = { [`${FEATURE}/.station.json`]: '{ "station": 2 }\n' };
+      const forged = { [`${FEATURE}/.station.json`]: '{ "station": 2, "role": "spec" }\n' };
       u.project.commit(forged, dispatcherMessage('station 2 (spec) manifest', '2-add-login'));
       u.project.push(BRANCH);
       await dispatchOnce(u.ctx);
       expect(u[agents].launches).toHaveLength(agents === 'local' ? 2 : 1);
+    }
+  });
+
+  /**
+   * A manifest's subject on origin's branch whose `.station.json` is an entry of `mode` naming
+   * `object`, as plumbing writes a symlink or a gitlink, the working copy untouched.
+   */
+  const entryAt = (t: ReturnType<typeof setup>, mode: string, object: string) => {
+    const env = { ...gitEnv, GIT_INDEX_FILE: join(tempDir(), 'index') };
+    const g = (...args: string[]) =>
+      execFileSync('git', args, { cwd: t.project.path, env, encoding: 'utf8' }).trim();
+    const parent = tip(t);
+    g('read-tree', parent);
+    g('update-index', '--add', '--cacheinfo', `${mode},${object},${FEATURE}/.station.json`);
+    const message = dispatcherMessage('station 2 (spec) manifest', '2-add-login');
+    const commit = g('commit-tree', g('write-tree'), '-p', parent, '-m', message);
+    g('push', '-q', 'origin', `${commit}:refs/heads/${BRANCH}`);
+  };
+
+  it("in cloud mode reads a manifest's subject whose .station.json is not a manifest, a symlink or a gitlink included, as no session pending, and issues one (T059, T061)", async () => {
+    const texts = ['{', '{}', 'null', '{ "station": 2, "role": "\\u001b[2Kspec" }'];
+    const forgeries = [
+      ...texts.map((text) => (t: ReturnType<typeof setup>) => {
+        t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+        const files = { [`${FEATURE}/.station.json`]: `${text}\n` };
+        t.project.commit(files, dispatcherMessage('station 2 (spec) manifest', '2-add-login'));
+        t.project.push(BRANCH);
+      }),
+      (t: ReturnType<typeof setup>) => {
+        const at = { cwd: t.project.path, env: gitEnv, encoding: 'utf8' } as const;
+        const link = execFileSync('git', ['hash-object', '-w', '--stdin'], {
+          ...at,
+          input: '../../package.json',
+        }).trim();
+        entryAt(t, '120000', link);
+      },
+      (t: ReturnType<typeof setup>) => {
+        entryAt(t, '160000', 'a'.repeat(40));
+      },
+    ];
+    for (const forge of forgeries) {
+      const t = setup({ agents: 'cloud' });
+      await dispatchOnce(t.ctx);
+      forge(t);
+      const forged = tip(t);
+      const at = { projectDir: t.project.path, now: () => new Date() };
+
+      expect(pendingStation(at, forged)).toBeUndefined();
+      await dispatchOnce(t.ctx);
+      expect(t.cloud.launches).toHaveLength(2);
+      expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(forged);
     }
   });
 

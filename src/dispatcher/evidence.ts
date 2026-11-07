@@ -205,7 +205,9 @@ async function buildRound(
   if (!new RegExp(`^\\s*- \\[ \\] ${task}\\b`, 'm').test(tasks)) return issue();
   // A Build manifest is the tip, the one recorded or a later one, as when update-ref failed after
   // its push: no Builder work to judge, and CI there is the manifest's own. A forged subject, its
-  // `.station.json` unreadable included, only issues the task again, within the cap (T061).
+  // `.station.json` unreadable included, only issues the task again: it counts toward the cap only
+  // with Build's exact subject, and each issue pushes the dispatcher's own manifest, which does
+  // (T061).
   const manifest = issued === tip ? undefined : pendingManifest(at, tip);
   if (issued === tip || manifest === 'unreadable' || manifest?.station === 4) return issue();
   const state = await buildTestAt(ctx, config, tip);
