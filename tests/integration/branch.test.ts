@@ -1320,6 +1320,23 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       ]);
     });
 
+    it("T061: a session's forged Build manifest whose .station.json does not parse issues the task again, within the cap, and never throws", async () => {
+      const t = await issued();
+      t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+      const files = { [`${FEATURE}/.station.json`]: '{' };
+      t.project.commit(files, 'Dispatcher: station 4 (builder) manifest');
+      t.project.push(BRANCH);
+      t.project.checkout('main');
+      const tip = tipOf(t);
+      buildTest(tip, 'success');
+      await dispatchOnce(t.ctx);
+
+      expect(t.show(TASKS_MD)).toBe(TASKS);
+      expect(t.local.launches).toHaveLength(2);
+      expect(task(t)).toBe('T001');
+      expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(tip);
+    });
+
     it('T061: a spent Build manifest whose record in the clone was deleted waits, pushing nothing', async () => {
       const t = await issued();
       const manifest = tipOf(t);
@@ -1619,6 +1636,22 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toMatchObject({
       ...{ count: 1, session: 'fake-local-1', outcome: 'failed' },
       ...{ last: 'claude exited 1: \\u{7}', context_full: true },
+    });
+  });
+
+  it('in local mode records the outcome before the alert, so a failed post never skips it (T061)', async () => {
+    const t = setup();
+    t.local.failure = new SessionFailed('claude exited 1', false);
+    // The inbox is gone by the time the session ends: its alert cannot be posted.
+    t.local.beforeStart = () => {
+      editState((repo) => {
+        repo.issues = repo.issues.filter((i) => i.number !== INBOX);
+      });
+    };
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow();
+
+    expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toMatchObject({
+      ...{ count: 1, session: 'fake-local-1', outcome: 'failed', last: 'claude exited 1' },
     });
   });
 

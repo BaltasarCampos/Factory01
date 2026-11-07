@@ -52,6 +52,7 @@ import {
   manifestTask,
   nextTask,
   pendingManifest,
+  pendingStation,
   testEnded,
 } from './manifest.js';
 import { tipState, type FailureRecords } from './failures.js';
@@ -203,9 +204,10 @@ async function buildRound(
   }
   if (!new RegExp(`^\\s*- \\[ \\] ${task}\\b`, 'm').test(tasks)) return issue();
   // A Build manifest is the tip, the one recorded or a later one, as when update-ref failed after
-  // its push: no Builder work to judge, and CI there is the manifest's own. A forged subject only
-  // issues the task again, within the cap.
-  if (issued === tip || pendingManifest(at, tip)?.station === 4) return issue();
+  // its push: no Builder work to judge, and CI there is the manifest's own. A forged subject, its
+  // `.station.json` unreadable included, only issues the task again, within the cap (T061).
+  const manifest = issued === tip ? undefined : pendingManifest(at, tip);
+  if (issued === tip || manifest === 'unreadable' || manifest?.station === 4) return issue();
   const state = await buildTestAt(ctx, config, tip);
   if (state === 'success') return { tick: task, head: tip };
   if (['pending', 'missing'].includes(state)) return { hold: `build-test ${state}` };
@@ -329,7 +331,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const pending =
       tip !== undefined &&
       station !== undefined &&
-      (own === undefined ? pendingManifest(at, tip)?.station === station : own !== 'new');
+      (own === undefined ? pendingStation(at, tip) === station : own !== 'new');
     // Every Verify session the tier needs has ended, so a failing result is the Owner's to hear.
     const verifyEnded =
       item.state === 'verifying' &&

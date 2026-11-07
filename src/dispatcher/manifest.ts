@@ -94,15 +94,36 @@ export function nextTask(tasks: string): { task: string; files: string[] } | und
   return { task: m[1] ?? '', files: taskFiles(m[2] ?? '') };
 }
 
-/** The manifest on the branch tip, if the tip is the dispatcher's manifest commit. */
-export function pendingManifest(ctx: BranchContext, tip: string): StationManifest | undefined {
+/**
+ * The manifest on the branch tip, if the tip is the dispatcher's manifest commit by its subject;
+ * `unreadable` when its `.station.json` is not a JSON object, which a session may have forged
+ * (T061). A git failure throws.
+ */
+export function pendingManifest(
+  ctx: BranchContext,
+  tip: string,
+): StationManifest | 'unreadable' | undefined {
   const message = git(ctx, ['log', '-1', '--format=%B', tip]);
   if (!/^Dispatcher: station \d/.test(message)) return undefined;
   const changed = git(ctx, ['diff-tree', '--no-commit-id', '--name-only', '-r', tip]);
   const [path] = changed.split('\n');
   if (path === undefined || !path.endsWith('/.station.json')) return undefined;
-  return JSON.parse(git(ctx, ['show', `${tip}:${path}`])) as StationManifest;
+  const text = git(ctx, ['show', `${tip}:${path}`]);
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    return 'unreadable';
+  }
+  const object = typeof value === 'object' && value !== null && !Array.isArray(value);
+  return object ? (value as StationManifest) : 'unreadable';
 }
+
+/** The station of the manifest at the tip; undefined for none, or for one that cannot be read. */
+export const pendingStation = (ctx: BranchContext, tip: string) => {
+  const manifest = pendingManifest(ctx, tip);
+  return manifest === 'unreadable' ? undefined : manifest?.station;
+};
 
 /**
  * Whether Verify's Test session has ended since the last Build round (T181): on the branch's

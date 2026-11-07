@@ -599,14 +599,16 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     }));
   } catch (err) {
     if (err instanceof SessionFailed) {
-      const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed`;
-      const urgency = err.urgent ? 'urgent' : 'info';
-      const kind = err instanceof SessionCapped ? 'session-capped' : 'session-failed';
-      await alertOnce({ urgency, kind, text });
+      // The outcome first: a local file, which fails closed by itself, never skipped by a failed
+      // post of the alert.
       settled?.({
         failure: err.message,
         ...(err.contextFull === undefined ? {} : { contextFull: err.contextFull }),
       });
+      const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed`;
+      const urgency = err.urgent ? 'urgent' : 'info';
+      const kind = err instanceof SessionCapped ? 'session-capped' : 'session-failed';
+      await alertOnce({ urgency, kind, text });
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;
@@ -619,8 +621,8 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     }
     return refuse(refused, err.urgent);
   }
-  for (const { kind, text } of notices) await alertOnce({ urgency: 'info', kind, text });
   settled?.('ended');
+  for (const { kind, text } of notices) await alertOnce({ urgency: 'info', kind, text });
   const mode = launcher.mode;
   return {
     ...result,

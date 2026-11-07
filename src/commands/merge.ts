@@ -44,12 +44,12 @@ const NOTHING = 'nothing was merged';
 async function confirmSession(ctx: CommandContext, c: MergeContext): Promise<void> {
   const manifest = pendingManifest({ projectDir: c.cwd, now: ctx.now, env: c.env }, c.head);
   if (manifest === undefined) return;
-  await confirm(
-    ctx,
-    `the dispatcher shows a session running on ${c.branch} (station ${String(manifest.station)}, ${manifest.role}), which may still push`,
-    'Merge anyway?',
-    NOTHING,
-  );
+  // A manifest's subject with a `.station.json` that does not parse: a session may have forged it.
+  const shown =
+    manifest === 'unreadable'
+      ? `the tip of ${c.branch} has a dispatcher manifest's subject, but its .station.json cannot be read, so a session may have forged it; a session may still be running and push`
+      : `the dispatcher shows a session running on ${c.branch} (station ${String(manifest.station)}, ${manifest.role}), which may still push`;
+  await confirm(ctx, shown, 'Merge anyway?', NOTHING);
 }
 
 /**

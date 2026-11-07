@@ -84,6 +84,7 @@ import {
   LaunchRefused,
   SessionCapped,
   SessionFailed,
+  SessionUnknown,
   type Availability,
   type LaunchRequest,
   type LaunchResult,
@@ -504,23 +505,28 @@ function present(path: string): boolean {
 /**
  * Why session `id` still runs, or undefined when it does not, read fail-closed from its folder
  * (T061): `ended`, written once nothing of its group remained, or `not-spawned`, written when it
- * failed before the spawn, reads as ended, as does no folder at all; `group.json` alone is checked
- * in `/proc`; both markers' kinds together, or none of the three, as when a factory stopped between
- * the spawn and the group's record, stop the pass, naming the way out.
+ * failed before the spawn, reads as ended, as does no folder at all, or a folder with no
+ * `session.json`, written once before the attempt is counted and claude spawns; `group.json` alone
+ * is checked in `/proc`; both markers' kinds together, or `session.json` with none of the three, as
+ * when a factory stopped between the spawn and the group's record, stop the pass, naming the way
+ * out.
  */
 export function sessionRunning(home: string, id: string): string | undefined {
   const dir = join(home, '.factory', 'sessions', id);
   const file = join(dir, 'group.json');
-  const out = `remove ${dir} once ps -eo pid,pgid,args shows nothing of session ${visible(id)}`;
+  const out = `remove ${visible(dir)} once ps -eo pid,pgid,args shows nothing of session ${visible(id)}`;
   const grouped = present(file);
   const unspawned = present(join(dir, 'not-spawned'));
   if (grouped && unspawned)
-    throw new EnvironmentError(`${dir} records a process group and no spawn both; ${out}`);
+    throw new EnvironmentError(`${visible(dir)} records a process group and no spawn both; ${out}`);
   if (unspawned || present(join(dir, 'ended')) || !present(dir)) return undefined;
-  if (!grouped)
-    throw new EnvironmentError(
-      `whether session ${visible(id)} still runs is unknown: ${dir} records no process group and no end, as when a factory stops between claude's spawn and its record; ${out}`,
+  if (!grouped) {
+    // Never counted and never spawned: its folder was made before the checks, its record after.
+    if (!present(join(dir, 'session.json'))) return undefined;
+    throw new SessionUnknown(
+      `whether session ${visible(id)} still runs is unknown: ${visible(dir)} records no process group and no end, as when a factory stops between claude's spawn and its record; ${out}`,
     );
+  }
   return groupRunning(file, id);
 }
 
@@ -1034,7 +1040,7 @@ function step<T>(what: string, run: () => T): T {
   } catch (err) {
     // A refusal, or an error that already says no session started, keeps its own words; any
     // other text, git's included, is named by its step and shown through visible().
-    if (err instanceof LaunchRefused) throw err;
+    if (err instanceof LaunchRefused || err instanceof SessionUnknown) throw err;
     if (err instanceof EnvironmentError && err.message.startsWith(STOPPED)) throw err;
     const why = err instanceof Error ? err.message : String(err);
     throw new EnvironmentError(`no local session started: ${what}: ${visible(why)}`);

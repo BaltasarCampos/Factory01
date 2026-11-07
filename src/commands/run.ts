@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import type { CommandContext } from '../cli/commands.js';
 import { ExitCode } from '../cli/env.js';
 import { dispatchOnce, type PassResult } from '../dispatcher/dispatch.js';
+import { SessionUnknown } from '../dispatcher/launcher/types.js';
 import { configOnMain } from '../model/config.js';
 import type { Alert } from '../model/types.js';
 import { alert, listAlerts, type InboxTarget, type NewAlert } from '../notify/inbox.js';
@@ -45,20 +46,20 @@ const escaped = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 /**
  * The alert for a pass that threw, the same from pass to pass for the same failure: main's head,
- * the error's kind and its first line, with no temporary path, session id, pid or time in it.
+ * the error's kind and its first line, with no temporary path, session id, pid or time in it. A
+ * session whose state is unknown keeps its id: each such session is its own problem (T061).
  */
 export function thrownText(head: string, err: unknown): string {
   const kind = err instanceof Error ? err.constructor.name : typeof err;
   const [line = ''] = (err instanceof Error ? err.message : String(err)).split('\n');
-  // Only mkdtemp's random suffix, in a path that starts the line or follows a non-path character.
+  // Only mkdtemp's random suffix, in a path that starts the line or follows a non-path character,
+  // at the end of its name: whatever comes after it but a letter, a digit, `_` or `-`.
   const roots = [tmpdir(), '/tmp'].map(escaped).join('|');
-  const temp = new RegExp(
-    `(^|[\\s'"(=:])((?:${roots})/[^/\\s]*?)[A-Za-z0-9]{6}(?=[/\\s;:,'")]|$)`,
-    'g',
-  );
+  const temp = new RegExp(`(^|[^\\w/.~-])((?:${roots})/[^/\\s]*?)[A-Za-z0-9]{6}(?![\\w-])`, 'g');
+  const id = /\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi;
   const stable = line
     .replace(temp, '$1$2<random>')
-    .replace(/\b[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\b/gi, '<id>')
+    .replace(id, (found) => (err instanceof SessionUnknown ? found : '<id>'))
     .replace(/\d{4}-\d\d-\d\dT[\d:.]+(?:Z|[+-]\d\d:\d\d)?/g, '<time>')
     .replace(/\b(pids?|process(?:es)?|group) \d+(?:, \d+)*/gi, '$1 <pid>')
     .replace(/ -\d+\b/g, ' -<pid>');
@@ -114,7 +115,7 @@ export async function run(ctx: CommandContext): Promise<number> {
         // Main's inbox, as fetched: the working copy may be stale or another branch.
         let target = inbox;
         try {
-          const config = configOnMain(ctx.cwd);
+          const config = configOnMain(ctx.cwd, 'origin/main', ctx.env);
           target = { ...inbox, repo: config.repo, inboxIssue: config.inbox_issue };
         } catch (read) {
           ctx.io.stderr.write(

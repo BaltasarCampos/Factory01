@@ -39,6 +39,7 @@ import {
   LaunchRefused,
   SessionCapped,
   SessionFailed,
+  SessionUnknown,
   type LaunchRequest,
 } from '../../src/dispatcher/launcher/types.js';
 import { roleVersion } from '../../src/events/schema.js';
@@ -1781,6 +1782,7 @@ describe('LocalLauncher (research R8, R9)', () => {
         mkdirSync(dir, { recursive: true });
         const file = join(dir, 'group.json');
         writeFileSync(`${file}.left.tmp`, '');
+        writeFileSync(join(dir, 'session.json'), '{}');
         // No group.json and no marker beside it: whether it runs is unknown, never ended.
         expect(() => sessionRunning(home, OLD)).toThrow(/still runs is unknown/);
         writeWhole(file, 'first\n');
@@ -1789,7 +1791,11 @@ describe('LocalLauncher (research R8, R9)', () => {
         }).toThrow(/EEXIST/);
         expect(readFileSync(file, 'utf8')).toBe('first\n');
         expect(statSync(file).mode & 0o777).toBe(0o600);
-        expect(readdirSync(dir).sort()).toEqual(['group.json', 'group.json.left.tmp']);
+        expect(readdirSync(dir).sort()).toEqual([
+          'group.json',
+          'group.json.left.tmp',
+          'session.json',
+        ]);
       });
 
       it("refuses a launch over anything under sessions/ that is not a plain folder, a symlink to a live session's included, naming it (T061)", async () => {
@@ -1848,11 +1854,14 @@ describe('LocalLauncher (research R8, R9)', () => {
           rmSync(join(dir, 'not-spawned'));
           mark('ended');
           expect(sessionRunning(home, OLD)).toBeUndefined();
-          // None of the three, as a crash between the spawn and its record leaves: unknown.
+          // None of the three and no session.json, as a stop before the record leaves: never
+          // counted or spawned, so ended.
           rmSync(join(dir, 'ended'));
+          expect(sessionRunning(home, OLD)).toBeUndefined();
+          // With session.json, as a crash between the spawn and the group's record leaves: unknown.
           mark('session.json');
           const read = () => sessionRunning(home, OLD);
-          expect(read).toThrow(EnvironmentError);
+          expect(read).toThrow(SessionUnknown);
           expect(read).toThrow(
             `whether session ${OLD} still runs is unknown: ${dir} records no process group and no end, as when a factory stops between claude's spawn and its record; ${out}`,
           );
@@ -1877,8 +1886,11 @@ describe('LocalLauncher (research R8, R9)', () => {
 
         mkdirSync(folder(OLD));
         writeFileSync(join(folder(OLD), 'session.json'), '{}');
-        await expect(t.launch(REQUEST)).rejects.toThrow(
-          new RegExp(`^no local session started: .*whether session ${OLD} still runs is unknown`),
+        // Its own kind, unprefixed, so the alert for the pass keeps its session id.
+        const unknown = t.launch(REQUEST);
+        await expect(unknown).rejects.toThrow(SessionUnknown);
+        await expect(unknown).rejects.toThrow(
+          new RegExp(`^whether session ${OLD} still runs is unknown`),
         );
       });
 
@@ -1900,6 +1912,63 @@ describe('LocalLauncher (research R8, R9)', () => {
           expect(readdirSync(dir)).toContain('group.json');
           expect(readdirSync(dir)).not.toContain('ended');
           expect(sessionRunning(t.home, FIRST)).toMatch(/is still running/);
+        } finally {
+          stop(pgid);
+        }
+      });
+
+      /** A runner that runs claude as `session` says, and everything else as the fake one. */
+      const claudeRun = (session: Runner): Runner => {
+        const base = fakeRunner();
+        return (program, args, options) =>
+          args[0] === '-p' ? session(program, args, options) : base.run(program, args, options);
+      };
+      const markers = (home: string) =>
+        readdirSync(join(home, '.factory', 'sessions', FIRST)).filter((name) =>
+          ['group.json', 'not-spawned', 'ended'].includes(name),
+        );
+
+      it('writes not-spawned when claude fails to spawn, after it was counted (T061)', async () => {
+        const counted: string[] = [];
+        const run = claudeRun(() => Promise.reject(new Error('spawn claude ENOENT')));
+        const t = setup({ run });
+        const launched = t.launch({ ...REQUEST, starting: (id) => void counted.push(id) });
+        await expect(launched).rejects.toThrow(EnvironmentError);
+        await expect(launched).rejects.toThrow(/^no local session started: claude: spawn claude/);
+        expect(counted).toEqual([FIRST]);
+        expect(markers(t.home)).toEqual(['not-spawned']);
+        expect(sessionRunning(t.home, FIRST)).toBeUndefined();
+      });
+
+      it('leaves neither marker when group.json cannot be written, so the folder reads by its session.json as unknown (T061)', async () => {
+        // A group with no process: its record cannot be written, after claude was spawned.
+        const run = claudeRun((program, args, options) => {
+          options.started?.(2 ** 31 - 2);
+          return fakeRunner().run(program, args, options);
+        });
+        const t = setup({ run });
+        await expect(t.launch(REQUEST)).rejects.toThrow(SessionFailed);
+        expect(markers(t.home)).toEqual([]);
+        expect(() => sessionRunning(t.home, FIRST)).toThrow(SessionUnknown);
+      }, 15_000);
+
+      it('writes no ended marker when its group cannot be read as it settles (T061)', async () => {
+        const other = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+        await once(other, 'spawn');
+        const pgid = other.pid;
+        if (pgid === undefined) throw new Error('sleep has no pid');
+        const run = claudeRun((program, args, options) => {
+          options.started?.(pgid);
+          // Its record spoilt once written: the clone is four folders below the home.
+          const home = join(options.cwd, '..', '..', '..', '..');
+          writeFileSync(join(home, '.factory', 'sessions', FIRST, 'group.json'), '{');
+          return fakeRunner().run(program, args, options);
+        });
+        const t = setup({ run });
+        try {
+          await t.launch(REQUEST);
+          expect(markers(t.home)).toEqual(['group.json']);
+          expect(() => sessionRunning(t.home, FIRST)).toThrow(/group\.json cannot be read/);
         } finally {
           stop(pgid);
         }
@@ -1947,6 +2016,40 @@ describe('factory run: the alert for a pass that throws (T061)', () => {
       at('/tmp/factory-keys-ab12Cd/anchor.pem'),
     );
     expect(at('/home/u/tmp/factory-ab12Cd')).toContain('/home/u/tmp/factory-ab12Cd');
+  });
+
+  it.each([
+    ['followed by a full stop', (p: string) => `${p}.`],
+    ['in backticks', (p: string) => `\`${p}\``],
+    ['in square brackets', (p: string) => `[${p}]`],
+  ])("replaces mkdtemp's suffix of a temporary path %s (T061)", (_, form) => {
+    const at = (path: string) => thrownText('96ca65d33f7c', new Error(`cannot read ${form(path)}`));
+    expect(at('/tmp/factory-ab12Cd')).toBe(at('/tmp/factory-Zz9Yx8'));
+    expect(at('/tmp/factory-ab12Cd')).toContain(form('/tmp/factory-<random>'));
+  });
+
+  it('keeps the session id of a session whose state is unknown, so two at one main head alert once each (T061)', async () => {
+    const home = homeDir();
+    const ids = ['0b6c7f3e-2a4d-4c1e-9f00-0000000000a1', '0b6c7f3e-2a4d-4c1e-9f00-0000000000a2'];
+    const texts = ids.map((id) => {
+      const dir = join(home, '.factory', 'sessions', id);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, 'session.json'), '{}');
+      let thrown: unknown;
+      try {
+        sessionRunning(home, id);
+      } catch (err) {
+        thrown = err;
+      }
+      expect(thrown).toBeInstanceOf(SessionUnknown);
+      return thrownText('96ca65d33f7c', thrown);
+    });
+    expect(texts[0]).toContain(`whether session ${ids[0] ?? ''} still runs is unknown`);
+    const posted: NewAlert[] = [];
+    const read = () => Promise.resolve(posted.map((a, i) => ({ ...a, id: String(i) })));
+    for (const text of [...texts, ...texts])
+      await alertThrown(inbox, text, sink(), { read, post: into(posted) });
+    expect(posted.map((a) => a.text)).toEqual(texts);
   });
 
   it('shows the message through visible(), posts when the alerts cannot be read, and writes both errors to stderr when the post fails', async () => {
