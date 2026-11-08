@@ -523,7 +523,7 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
   const { item, station, role, branch, comments, failure } = target;
   // The feature folder and the task's files, for the session's own settings (T061).
   let session = { feature: '', files: [] as readonly string[] };
-  let starting: { starting: (id: string) => void } | undefined;
+  let starting: { starting: (id: string, launched: string) => void } | undefined;
   /** How the session that started ended, in its failure record, in local mode (T061). */
   let settled: ((outcome: Parameters<typeof recordOutcome>[4]) => void) | undefined;
   if (station >= 2 && station <= 6) {
@@ -539,8 +539,8 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
         ? (sha: string, parent: string) => {
             recordIssued(ctx.failures, at, sha, parent);
             starting = {
-              starting: (id) => {
-                recordSession(ctx.failures, at, sha, id);
+              starting: (id, launched) => {
+                recordSession(ctx.failures, at, sha, id, launched);
                 settled = (outcome) => {
                   recordOutcome(ctx.failures, at, sha, id, outcome);
                 };

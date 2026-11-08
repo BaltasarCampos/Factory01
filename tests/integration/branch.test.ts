@@ -1929,6 +1929,32 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     ]);
   });
 
+  it('in local mode refuses, uncounted and with no launch, a session whose branch moved after its manifest, and issues a new one on the new head (T061)', async () => {
+    const t = setup();
+    const file = failureFile(t.home, REPO, ISSUE, 2);
+    // A push between the evidence and the launch, which clones the branch as origin has it.
+    t.local.beforeStart = () => {
+      t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+      t.project.commit({ [`${FEATURE}/notes.md`]: 'late\n' }, 'a late push');
+      t.project.push(BRANCH);
+      t.project.checkout('main');
+    };
+    const result = await dispatchOnce(t.ctx);
+    const late = tip(t);
+    const manifest = t.project.git(['rev-parse', `${late}~1`]);
+
+    expect(t.local.launches).toEqual([]);
+    expect(result.refused).toBe(
+      `no local session started: the session's clone is at ${late.slice(0, 12)}, not ${manifest.slice(0, 12)}, which ${file} names: the branch moved after its manifest was issued; run the factory again`,
+    );
+    expect(readFailureRecord(file)).toEqual({ head: manifest, factory: HASH, count: 0 });
+
+    delete t.local.beforeStart;
+    await dispatchOnce(t.ctx);
+    expect(t.local.launches).toHaveLength(1);
+    expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(late);
+  });
+
   it('starts no session, with one urgent alert and nothing recorded, when the launcher for agents: local runs another mode (T061)', async () => {
     const t = setup();
     t.ctx.launchers = { local: t.cloud };

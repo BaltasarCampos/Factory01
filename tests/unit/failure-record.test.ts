@@ -105,7 +105,7 @@ describe('the failure record of local sessions (T061)', () => {
     const at = { repo: 'owner/project', item: 42, station: 4 } as const;
     const file = failureFile(home, 'owner/project', 42, 4);
     writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 0 });
-    recordSession(records, at, HEAD, 'id-1');
+    recordSession(records, at, HEAD, 'id-1', HEAD);
     recordOutcome(records, at, HEAD, 'id-1', { failure: 'claude exited 1: \u001b[2J' });
     const failed = { head: HEAD, factory: FACTORY, count: 1, session: 'id-1', outcome: 'failed' };
     const last = 'claude exited 1: \\u{1b}[2J';
@@ -114,7 +114,7 @@ describe('the failure record of local sessions (T061)', () => {
     expect(readFailureRecord(file)).toEqual({ ...failed, last, context_full: true });
 
     // The next attempt has no outcome until it settles; one that ended well keeps the last failure.
-    recordSession(records, at, HEAD, 'id-2');
+    recordSession(records, at, HEAD, 'id-2', HEAD);
     expect(readFailureRecord(file)).toEqual({
       head: HEAD,
       factory: FACTORY,
@@ -152,10 +152,10 @@ describe('the failure record of local sessions (T061)', () => {
     const file = failureFile(home, 'owner/project', 42, 4);
     const none = `the failure record ${file} does not name ${HEAD.slice(0, 12)}, the manifest`;
     expect(() => {
-      recordSession(records, at, HEAD, 'id-1');
+      recordSession(records, at, HEAD, 'id-1', HEAD);
     }).toThrow(none);
     writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 1 });
-    recordSession(records, at, HEAD, 'id-1');
+    recordSession(records, at, HEAD, 'id-1', HEAD);
     // The attempt is counted as it starts; under a newly installed factory the count starts again.
     expect(readFailureRecord(file)).toEqual({
       head: HEAD,
@@ -164,14 +164,22 @@ describe('the failure record of local sessions (T061)', () => {
       session: 'id-1',
     });
     const installed = { home, factory: () => 'e'.repeat(64) };
-    recordSession(installed, at, HEAD, 'id-2');
+    recordSession(installed, at, HEAD, 'id-2', HEAD);
     expect(readFailureRecord(file)).toMatchObject({ factory: 'e'.repeat(64), count: 1 });
     expect(() => {
-      recordSession(records, at, 'd'.repeat(40), 'id-2');
+      recordSession(records, at, 'd'.repeat(40), 'id-2', 'd'.repeat(40));
     }).toThrow(/does not name dddddddddddd/);
     expect(() => {
-      recordSession(records, at, HEAD, '../x');
+      recordSession(records, at, HEAD, '../x', HEAD);
     }).toThrow(/is not written/);
+    // A clone the launcher checked at another head: the branch moved, and nothing is counted.
+    const before = readFailureRecord(file);
+    expect(() => {
+      recordSession(records, at, HEAD, 'id-3', 'e'.repeat(40));
+    }).toThrow(
+      `the session's clone is at eeeeeeeeeeee, not ${HEAD.slice(0, 12)}, which ${file} names: the branch moved after its manifest was issued; run the factory again`,
+    );
+    expect(readFailureRecord(file)).toEqual(before);
   });
 
   it('tells running, spent and a new head by the record alone, a new factory reading as count 0', () => {
@@ -187,7 +195,7 @@ describe('the failure record of local sessions (T061)', () => {
     writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 2 });
     expect(state(HEAD)).toEqual({ state: 'spent', count: 2 });
     expect(state('d'.repeat(40))).toEqual({ state: 'new' });
-    recordSession(records, at, HEAD, 'id-1');
+    recordSession(records, at, HEAD, 'id-1', HEAD);
     expect(state(HEAD)).toEqual({ state: 'spent', count: 3 });
     live.add('id-1');
     expect(state(HEAD)).toEqual({ state: 'running', count: 3 });

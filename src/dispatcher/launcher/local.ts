@@ -1541,7 +1541,7 @@ export class LocalLauncher implements LocalSessionLauncher {
           let result: Awaited<ReturnType<Runner>>;
           // Its id in its failure record first: a session the count cannot see never starts.
           try {
-            request.starting?.(files.id);
+            request.starting?.(files.id, heads.head);
           } catch (err) {
             const why = err instanceof Error ? err.message : String(err);
             throw new LaunchRefused(`no local session started: ${visible(why)}`);

@@ -19,8 +19,11 @@ export interface LaunchRequest {
   prompt: string;
   /** Called about once a minute while a local session runs, for `factory run`'s heartbeat. */
   heartbeat?: (progress: { elapsed: number; turns: number }) => void;
-  /** Called with the session's id just before claude spawns; if it throws, claude never does. */
-  starting?: (session: string) => void;
+  /**
+   * Called with the session's id and the head the launcher checked in its clone just before
+   * claude spawns; if it throws, claude never does.
+   */
+  starting?: (session: string, head: string) => void;
 }
 
 /** Whether a session can start now; if not, why, and whether it is tampering (urgent). */

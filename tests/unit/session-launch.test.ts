@@ -247,11 +247,14 @@ const sessionFiles = (home: string, id = FIRST) => {
 };
 
 describe('LocalLauncher (research R8, R9)', () => {
-  it("gives its caller the session's id just before claude spawns, and spawns none when that throws (T061)", async () => {
+  it("gives its caller the session's id and the head it checked just before claude spawns, and spawns none when that throws (T061)", async () => {
     const t = setup();
-    const heard: { id: string; ran: number }[] = [];
-    await t.launch({ ...REQUEST, starting: (id) => heard.push({ id, ran: t.sessions().length }) });
-    expect(heard).toEqual([{ id: FIRST, ran: 0 }]);
+    const heard: { id: string; head: string; ran: number }[] = [];
+    const starting = (id: string, head: string) =>
+      heard.push({ id, head, ran: t.sessions().length });
+    await t.launch({ ...REQUEST, starting });
+    const head = t.repo.revParse(`origin/${BRANCH}`);
+    expect(heard).toEqual([{ id: FIRST, head, ran: 0 }]);
     expect(t.sessions()).toHaveLength(1);
 
     const u = setup();

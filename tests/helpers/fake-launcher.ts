@@ -1,6 +1,7 @@
 // Fake session launcher: records every launch instead of starting a Claude Code session.
 // Mirrors the `SessionLauncher` interface of src/dispatcher/launcher/types.ts (T037), and refuses
 // as the local launcher does when `starting` throws: a `LaunchRefused`, with nothing launched.
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,7 @@ export interface LaunchRequest {
   files: readonly string[];
   prompt: string;
   heartbeat?: (progress: { elapsed: number; turns: number }) => void;
-  starting?: (session: string) => void;
+  starting?: (session: string, head: string) => void;
 }
 
 export interface LaunchRecord extends LaunchRequest {
@@ -69,7 +70,11 @@ export class FakeLauncher {
     const sessionId = `fake-${this.mode}-${String(this.launches.length + 1)}`;
     this.beforeStart?.();
     try {
-      request.starting?.(sessionId);
+      // The branch's head on origin now, as the local launcher fetches and checks it.
+      const listed = (args: string[]) => execFileSync('git', args, { cwd: request.project });
+      const ref = `refs/heads/${request.branch}`;
+      const head = listed(['ls-remote', 'origin', ref]).toString().split('\t')[0] ?? '';
+      request.starting?.(sessionId, head);
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       return Promise.reject(new LaunchRefused(`no local session started: ${visible(why)}`));
