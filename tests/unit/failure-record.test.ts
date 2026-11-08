@@ -193,14 +193,17 @@ describe('the failure record of local sessions (T061)', () => {
       tipState(records, at, tip, (where, id) => where === home && live.has(id));
     expect(state(HEAD)).toEqual({ state: 'new' });
     writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 2 });
-    expect(state(HEAD)).toEqual({ state: 'spent', count: 2 });
+    expect(state(HEAD)).toEqual({
+      ...{ state: 'spent', count: 2, file },
+      record: { head: HEAD, factory: FACTORY, count: 2 },
+    });
     expect(state('d'.repeat(40))).toEqual({ state: 'new' });
     recordSession(records, at, HEAD, 'id-1', HEAD);
-    expect(state(HEAD)).toEqual({ state: 'spent', count: 3 });
+    expect(state(HEAD)).toMatchObject({ state: 'spent', count: 3 });
     live.add('id-1');
-    expect(state(HEAD)).toEqual({ state: 'running', count: 3 });
+    expect(state(HEAD)).toMatchObject({ state: 'running', count: 3, file });
     const installed = { home, factory: () => 'e'.repeat(64) };
-    expect(tipState(installed, at, HEAD, () => false)).toEqual({ state: 'spent', count: 0 });
+    expect(tipState(installed, at, HEAD, () => false)).toMatchObject({ state: 'spent', count: 0 });
     // Read, never written.
     expect(readFailureRecord(file)).toMatchObject({ factory: FACTORY, count: 3 });
   });

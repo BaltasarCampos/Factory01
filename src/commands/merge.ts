@@ -22,6 +22,7 @@ import { reportAt, type Git } from '../dispatcher/currency.js';
 import { pendingManifest } from '../dispatcher/manifest.js';
 import { mergeBase, safeDiff, safeGit, type FileChange } from '../git/diff.js';
 import { checkedHead, checkedMain, type MergeContext } from '../merge/context.js';
+import { branchFeatureDir } from '../model/naming.js';
 import { verifyChain, type Chain } from '../merge/chain.js';
 import {
   ciAt,
@@ -42,7 +43,8 @@ import { coveredAt, signHeadBoundWaiver, viewAt, viewIssue } from './approve.js'
 const NOTHING = 'nothing was merged';
 
 async function confirmSession(ctx: CommandContext, c: MergeContext): Promise<void> {
-  const manifest = pendingManifest({ projectDir: c.cwd, now: ctx.now, env: c.env }, c.head);
+  const at = { projectDir: c.cwd, now: ctx.now, env: c.env };
+  const manifest = pendingManifest(at, c.head, branchFeatureDir(c.branch));
   if (manifest === undefined) return;
   // A manifest's subject with a `.station.json` that is not one: a session may have forged it.
   const shown =

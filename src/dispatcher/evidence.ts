@@ -26,7 +26,7 @@ import { GhError, gh, repoArg, type GhOptions } from '../github/gh.js';
 import { listPrs } from '../github/prs.js';
 import { ciAt, requiredChecksAt, requiredJobs } from '../merge/ci.js';
 import type { MainMerges } from '../git/merges.js';
-import type { ProjectConfig, RoleName, State, Tier } from '../model/types.js';
+import type { ProjectConfig, RoleName, State, StationManifest, Tier } from '../model/types.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
 import type { ReleaseKeys } from '../approvals/keys.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
@@ -55,7 +55,7 @@ import {
   pendingStation,
   testEnded,
 } from './manifest.js';
-import { tipState, type FailureRecords } from './failures.js';
+import { tipState, type FailureRecords, type OwnTip } from './failures.js';
 import { sessionRunning } from './launcher/local.js';
 import { STATION_OF, type DecisionAlert, type Evidence } from './transitions.js';
 
@@ -208,7 +208,7 @@ async function buildRound(
   // `.station.json` unreadable included, only issues the task again: it counts toward the cap only
   // with Build's exact subject, and each issue pushes the dispatcher's own manifest, which does
   // (T061).
-  const manifest = issued === tip ? undefined : pendingManifest(at, tip);
+  const manifest = issued === tip ? undefined : pendingManifest(at, tip, dir);
   if (issued === tip || manifest === 'unreadable' || manifest?.station === 4) return issue();
   const state = await buildTestAt(ctx, config, tip);
   if (state === 'success') return { tick: task, head: tip };
@@ -222,6 +222,50 @@ async function buildRound(
   if (issues <= config.retry_limit) return { failure: `Your last attempt at ${red}.` };
   const text = `${red}, after ${String(issues)} Build sessions with retry_limit ${String(config.retry_limit)}; nothing sends it on before T096: close this item and file it again`;
   return { hold: { urgency: 'info', kind: 'build-failed', text } };
+}
+
+/** What the dispatcher's own spent manifest gets in local mode (T061). */
+export type SpentTip =
+  { relaunch: { head: string; manifest: StationManifest } } | { hold: DecisionAlert };
+
+/**
+ * The dispatcher's own manifest `tip`, spent, for the item at `where`: an attempt that ended well waits for
+ * 28-6's push; a full context holds at once and a count past `retry_limit` holds, each with one
+ * alert per head; anything else, a failure or no outcome at all, relaunches on that same commit
+ * with what its manifest names. That manifest is the factory's own commit, so one that cannot be
+ * read is a factory bug or local corruption: the item holds and the pass goes on; a git failure
+ * reading it stops the pass.
+ */
+function spentTip(
+  at: BranchContext,
+  config: ProjectConfig,
+  where: { item: number; station: number; branch: string; dir: string },
+  tip: string,
+  own: OwnTip,
+): SpentTip | undefined {
+  const { record, file, count } = own;
+  if (record.outcome === 'ended') return undefined;
+  const head = tip.slice(0, 12);
+  const last = `the last failure: ${record.last ?? 'none recorded'}`;
+  const out = `the failure record is ${file}; delete it to start its count again`;
+  if (record.outcome === 'failed' && record.context_full === true) {
+    const text = `the session at ${head} filled its context, so the item is too big for one session: split it; ${last}; ${out}`;
+    return { hold: { urgency: 'info', kind: 'context-full', text } };
+  }
+  if (count > config.retry_limit) {
+    const text = `${String(count)} sessions started at ${head} with retry_limit ${String(config.retry_limit)}, so no more start there; ${last}; ${out}, or push a new head or install a new factory release`;
+    return { hold: { urgency: 'info', kind: 'retry-limit', text } };
+  }
+  const manifest = pendingManifest(at, tip, where.dir);
+  if (
+    typeof manifest === 'object' &&
+    manifest.item === where.item &&
+    manifest.station === where.station &&
+    manifest.branch === where.branch
+  )
+    return { relaunch: { head: tip, manifest } };
+  const text = `the dispatcher's own manifest at ${tip}, which the failure record ${file} names, cannot be read as one, so no session starts on it: reinstall the pinned release, or delete ${file}`;
+  return { hold: { urgency: 'urgent', kind: 'manifest-unreadable', text } };
 }
 
 /** The Verify role that works next, or undefined once the tier's last one has ended. */
@@ -320,20 +364,26 @@ export function gatherEvidence(ctx: EvidenceContext) {
             reviewed: verify !== undefined,
             secured: security !== undefined,
           });
-    // The session the dispatcher last issued has pushed nothing yet: do not start another. In
-    // local mode the tip is its manifest only by the failure record, running or spent; a spent
-    // one still waits, as T059's does in cloud mode.
+    // The session the dispatcher last issued has pushed nothing yet: no new manifest. In local
+    // mode the tip is its manifest only by the failure record, running or spent; Build's round,
+    // tick and conflict wait on both, as on T059's in cloud mode.
     const station = STATION_OF[item.state];
     // A group record or failure record that cannot be read stops the pass, naming its file.
     const running = (home: string, id: string) => sessionRunning(home, id) !== undefined;
-    const own =
+    const state =
       config.agents === 'local' && tip !== undefined && station !== undefined
-        ? tipState(ctx.failures, { repo: config.repo, item: n, station }, tip, running).state
+        ? tipState(ctx.failures, { repo: config.repo, item: n, station }, tip, running)
         : undefined;
+    const own = state?.state;
     const pending =
       tip !== undefined &&
       station !== undefined &&
-      (own === undefined ? pendingStation(at, tip) === station : own !== 'new');
+      (own === undefined ? pendingStation(at, tip, dir) === station : own !== 'new');
+    // A spent one relaunches on the same commit, holds, or waits for 28-6's push (T061).
+    const spent =
+      state?.state === 'spent' && tip !== undefined && station !== undefined
+        ? spentTip(at, config, { item: n, station, branch: item.branch, dir }, tip, state)
+        : undefined;
     // Every Verify session the tier needs has ended, so a failing result is the Owner's to hear.
     const verifyEnded =
       item.state === 'verifying' &&
@@ -394,6 +444,11 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(verifyEnded ? { verifyEnded } : {}),
       ...('tampered' in signed ? { answersTampered: signed.tampered } : {}),
       ...(own === undefined || own === 'new' ? {} : { ownManifest: own }),
+      ...(spent === undefined
+        ? {}
+        : 'hold' in spent
+          ? { ownHold: spent.hold }
+          : { relaunch: spent.relaunch }),
       ...(rg === undefined ? {} : { redGreen: rg }),
       ...(review === undefined ? {} : { verifyReport: review.checksPass }),
       ...(review === undefined ? {} : { findingsResolved: review.findingsResolved }),
@@ -406,7 +461,8 @@ export function gatherEvidence(ctx: EvidenceContext) {
       ...(round !== undefined && 'failure' in round ? { buildFailure: round.failure } : {}),
       ...(issueConflict ? { buildFailure: CONFLICT } : {}),
       ...(held === undefined || typeof held === 'string' ? {} : { buildAlert: held }),
-      needsSession: (work[item.state] ?? false) && !pending,
+      needsSession:
+        ((work[item.state] ?? false) && !pending) || (spent !== undefined && 'relaunch' in spent),
     };
   };
 }

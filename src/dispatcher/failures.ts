@@ -228,6 +228,14 @@ export function recordOutcome(
   );
 }
 
+/** The dispatcher's own manifest at a tip, by its record, read from `file`. */
+export interface OwnTip {
+  state: 'running' | 'spent';
+  count: number;
+  record: FailureRecord;
+  file: string;
+}
+
 /**
  * What the record says of `tip` in local mode: running while the group of the session it last
  * started there runs, spent when nothing of it runs, and a new head when it names another commit
@@ -239,12 +247,13 @@ export function tipState(
   tip: string,
   /** Whether the session with this id, its folder under this home, still runs. */
   running: (home: string, session: string) => boolean,
-): { state: 'new' } | { state: 'running' | 'spent'; count: number } {
-  const record = readFailureRecord(failureFile(records.home, at.repo, at.item, at.station));
+): { state: 'new' } | OwnTip {
+  const file = failureFile(records.home, at.repo, at.item, at.station);
+  const record = readFailureRecord(file);
   if (record?.head !== tip) return { state: 'new' };
   const count = record.factory === records.factory() ? record.count : 0;
   const live = record.session !== undefined && running(records.home, record.session);
-  return { state: live ? 'running' : 'spent', count };
+  return { state: live ? 'running' : 'spent', count, record, file };
 }
 
 /**

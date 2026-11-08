@@ -561,18 +561,21 @@ describe(
       expect(confirmed.stderr).toContain(DECLINED);
     });
 
-    it("asks too when the tip's manifest subject has a .station.json that is not a manifest, saying a session may have forged it, and never prints its text (T061)", async () => {
+    it("asks too when the tip's manifest subject has a .station.json that is not a manifest, or not the item's, saying a session may have forged it, and never prints its text (T061)", async () => {
       const t = mergeSetup();
       // One that does not parse, one with no station or role, and one whose role would rewrite
       // the warning's line.
       const role = '\u001b[2Kbuilder';
-      const forgeries = ['{', '{}', 'null', JSON.stringify({ item: ITEM, station: 4, role })];
-      for (const text of forgeries) {
+      const texts = ['{', '{}', 'null', JSON.stringify({ item: ITEM, station: 4, role })];
+      const path = 'specs/7-add-login/.station.json';
+      // A path with pathspec magic, which sorts first and once made git ls-tree exit 128.
+      const forgeries = [
+        ...texts.map((text) => ({ [path]: text })),
+        { ':(glob)x/.station.json': '{}' },
+      ];
+      for (const files of forgeries) {
         t.repo.checkout(ITEM_BRANCH);
-        const tip = t.repo.commit(
-          { 'specs/7-add-login/.station.json': text },
-          'Dispatcher: station 4 (builder) manifest',
-        );
+        const tip = t.repo.commit(files, 'Dispatcher: station 4 (builder) manifest');
         t.repo.push(ITEM_BRANCH);
         t.repo.checkout('main');
         actionsAt(tip);

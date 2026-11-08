@@ -30,6 +30,7 @@ import {
   type RoleName,
   type State,
   type Station,
+  type StationManifest,
   type Tier,
 } from '../model/types.js';
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
@@ -73,6 +74,7 @@ import {
   nextTransition,
   ownerBasisMissing,
   STATION_OF,
+  type DecisionAlert,
   type Evidence,
   type ItemStatus,
   type OwnerGate,
@@ -94,6 +96,10 @@ export type StationEvidence = Omit<Evidence, 'owner' | 'rotationPending' | 'hist
   answersTampered?: { commit: string; reason: string };
   /** In local mode, the tip is the dispatcher's own manifest, by its failure record (T061). */
   ownManifest?: 'running' | 'spent';
+  /** That manifest, spent: its session starts again on it, with no new manifest (T061). */
+  relaunch?: { head: string; manifest: StationManifest };
+  /** That manifest, spent, holds the item: past `retry_limit`, a full context, unreadable. */
+  ownHold?: DecisionAlert;
 };
 
 export interface Candidate {
@@ -176,6 +182,8 @@ interface Target {
   branch: string;
   comments: PostedComment[];
   failure?: string;
+  /** The dispatcher's own spent manifest at the branch's head, started again (T061). */
+  relaunch?: { head: string; manifest: StationManifest };
 }
 
 /** What a pass has read and decided before it starts a session. */
@@ -462,15 +470,27 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
 
     const at = WORK_STATION[item.state];
     if (why !== undefined || at === undefined) continue;
+    if (found.ownHold !== undefined) {
+      // The dispatcher's own spent manifest holds the item, once per head; the pass goes on.
+      const text = `#${String(issue.number)} holds: ${found.ownHold.text}`;
+      await alertOnce({ ...found.ownHold, text });
+      (result.held ??= []).push({ issue: issue.number, reason: found.ownHold.text });
+      continue;
+    }
     if (!found.needsSession || pause.stations.has(at)) continue;
     if (ownerBasisMissing(item.state, evidence()) !== undefined) continue;
     const branch = at === 1 ? 'main' : at === 7 ? 'claude/factory-log' : item.branch;
-    // Verify runs the role its evidence names (T181); every other station has one role.
-    const role = at === 5 ? found.verifyRole : ROLE_AT[at];
+    // A relaunch takes from its manifest only what is no longer at the tip: the role, the task,
+    // the files and the failure line (T061). Verify otherwise runs the role its evidence names
+    // (T181); every other station has one role.
+    const { relaunch } = found;
+    const role = relaunch?.manifest.role ?? (at === 5 ? found.verifyRole : ROLE_AT[at]);
+    const failure = relaunch === undefined ? found.buildFailure : relaunch.manifest.failure;
     if (branch !== undefined && role !== undefined)
       targets.push({
         ...{ item, station: at, role, branch, comments },
-        ...(found.buildFailure === undefined ? {} : { failure: found.buildFailure }),
+        ...(failure === undefined ? {} : { failure }),
+        ...(relaunch === undefined ? {} : { relaunch }),
       });
   }
 
@@ -520,7 +540,7 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
   const { launcher, refuse } = pass;
   const { repo } = config;
   const options = ctx.gh ?? {};
-  const { item, station, role, branch, comments, failure } = target;
+  const { item, station, role, branch, comments, failure, relaunch } = target;
   // The feature folder and the task's files, for the session's own settings (T061).
   let session = { feature: '', files: [] as readonly string[] };
   let starting: { starting: (id: string, launched: string) => void } | undefined;
@@ -533,31 +553,40 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     // In local mode the dispatcher's own manifest commit is known from the failure record alone,
     // written before the push, so a record that cannot be written pushes nothing (T061).
     const at = { repo, item: ref.issue, station };
+    /** Each attempt on manifest `sha` counted as it starts, and its outcome after. */
+    const attempt = (sha: string) => {
+      starting = {
+        starting: (id, launched) => {
+          recordSession(ctx.failures, at, sha, id, launched);
+          settled = (outcome) => {
+            recordOutcome(ctx.failures, at, sha, id, outcome);
+          };
+        },
+      };
+    };
     // `agents:` is the one key for local mode, as the evidence reads it (T061).
     const issued =
       config.agents === 'local'
         ? (sha: string, parent: string) => {
             recordIssued(ctx.failures, at, sha, parent);
-            starting = {
-              starting: (id, launched) => {
-                recordSession(ctx.failures, at, sha, id, launched);
-                settled = (outcome) => {
-                  recordOutcome(ctx.failures, at, sha, id, outcome);
-                };
-              },
-            };
+            attempt(sha);
           }
         : undefined;
-    let manifest;
-    try {
-      // The prompt's failure line goes in the manifest too, so a relaunch can rebuild it (T061).
-      const line = failure === undefined ? {} : { failure };
-      manifest = writeStationManifest(git, ref, { station, role, ...line }, mainRef, issued);
-    } catch (err) {
-      if (!(err instanceof StackRefused)) throw err;
-      await hold(pass, ref, station, err);
-      return undefined;
-    }
+    let manifest: StationManifest;
+    if (relaunch !== undefined) {
+      // The same commit again, with no new manifest: the head stays one sha for the count.
+      attempt(relaunch.head);
+      manifest = relaunch.manifest;
+    } else
+      try {
+        // The prompt's failure line goes in the manifest too, so a relaunch can rebuild it (T061).
+        const line = failure === undefined ? {} : { failure };
+        manifest = writeStationManifest(git, ref, { station, role, ...line }, mainRef, issued);
+      } catch (err) {
+        if (!(err instanceof StackRefused)) throw err;
+        await hold(pass, ref, station, err);
+        return undefined;
+      }
     session = { feature: `specs/${featureOf(ref)}`, files: manifest.files ?? [] };
   }
   const answersFor = (file: QuestionFile | undefined) => {

@@ -34,7 +34,7 @@ import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
 import { STATES, STATIONS, type ApprovalRecord, type Tier } from '../../src/model/types.js';
 import { FakeClock } from '../helpers/fake-clock.js';
-import { FakeLauncher } from '../helpers/fake-launcher.js';
+import { FakeLauncher, type LaunchRecord } from '../helpers/fake-launcher.js';
 import { readState, seedState, type FakeComment, type FakeIssue } from '../helpers/fake-gh.js';
 import {
   gitEnv,
@@ -824,7 +824,12 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
   it('T181: at tier 2, Test, then the Reviewer once Test has ended, then Security once the review is written', async () => {
     const t = setup({ branch: CREATED });
     manifest(t, 5, 'test');
-    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: false });
+    // Issued but never started, with no session of it live: started again on it (T061).
+    expect(await gather(t, 'verifying')).toMatchObject({
+      verifyRole: 'test',
+      needsSession: true,
+      relaunch: { manifest: { station: 5, role: 'test' } },
+    });
 
     later(t, { 'tests/login.test.ts': "it('AC-001: signs in', () => {});\n" });
     expect(await gather(t, 'verifying')).toMatchObject({
@@ -1183,7 +1188,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
     const TASKS_MD = `${FEATURE}/tasks.md`;
     const BUILD_MANIFEST = 'Dispatcher: station 4 (builder) manifest';
     /** An item in Build at tier 1 whose first task the dispatcher has issued. */
-    const issued = async (config?: string) => {
+    const issued = async (config?: string, failure?: Error) => {
       const factory = factoryClone();
       const t = setup({
         ...{ tier: 1, pin: `v1.0.0@${factory.sha}`, states: ['state:building'] },
@@ -1191,6 +1196,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
         branch: { ...SPECIFIED, [TASKS_MD]: TASKS },
       });
       t.ctx.gatherEvidence = gatherEvidence({ ...t.evidence, factory: factory.path });
+      if (failure !== undefined) t.local.failure = failure;
       openPr();
       await dispatchOnce(t.ctx);
       return Object.assign(t, { factory });
@@ -1332,20 +1338,28 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       ]);
     });
 
-    it("T061: a session's forged Build manifest whose .station.json does not parse, or is 2 MiB, issues the task again and never throws", async () => {
+    it("T061: a session's forged Build manifest whose .station.json does not parse, is 2 MiB, or sits at a path with pathspec magic issues the task again and never throws", async () => {
       // A manifest the dispatcher could have written but for its size, past spawnSync's 1 MiB.
       const big = { item: ISSUE, station: 4, role: 'builder', branch: BRANCH, task: 'T001' };
       const huge = `${JSON.stringify({ ...big, pad: 'x'.repeat(2 * 1024 * 1024) })}\n`;
-      for (const text of ['{', huge]) {
+      // Each sorts first in diff-tree's list: `:(glob)` made ls-tree exit 128, and `:/` made it
+      // size the item's real manifest while git show read the forged one.
+      const forgeries = [
+        { [`${FEATURE}/.station.json`]: '{' },
+        { [`${FEATURE}/.station.json`]: huge },
+        { [`:/${FEATURE}/.station.json`]: huge },
+        { ':(glob)x/.station.json': '{}\n' },
+      ];
+      for (const files of forgeries) {
         const t = await issued();
         t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
-        t.project.commit({ [`${FEATURE}/.station.json`]: text }, BUILD_MANIFEST);
+        t.project.commit(files, BUILD_MANIFEST);
         t.project.push(BRANCH);
         t.project.checkout('main');
         const tip = tipOf(t);
         buildTest(tip, 'success');
         const at = { projectDir: t.project.path, now: () => new Date() };
-        expect(pendingManifest(at, tip)).toBe('unreadable');
+        expect(pendingManifest(at, tip, FEATURE)).toBe('unreadable');
         await dispatchOnce(t.ctx);
 
         expect(t.show(TASKS_MD)).toBe(TASKS);
@@ -1552,6 +1566,209 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(alerts(t, 'tampering')).toEqual([
         `urgent #2: the Build manifest the dispatcher pushed, ${pushed.slice(0, 12)}, is not in the history of ${BRANCH} at ${head.slice(0, 12)}: the branch was rewritten, so nothing more is ticked or issued for this item; close it and file it again`,
       ]);
+    });
+
+    /** What a launch was given, its callbacks and session id aside. */
+    const given = (l?: LaunchRecord) =>
+      l === undefined
+        ? undefined
+        : { ...l, starting: undefined, heartbeat: undefined, sessionId: undefined };
+    /** The failure record of the item at `station`. */
+    const recordAt = (t: ReturnType<typeof setup>, station: 2 | 4 | 5) =>
+      readFailureRecord(failureFile(t.home, REPO, ISSUE, station));
+    const passes = async (t: ReturnType<typeof setup>, n: number) => {
+      const results = [];
+      for (let i = 0; i < n; i++) results.push(await dispatchOnce(t.ctx));
+      return results;
+    };
+
+    it('T061: a failing session is started again on its spent manifest retry_limit times, then holds with one alert and no branch commit, at Specify and at Build', async () => {
+      const failure = new SessionFailed('claude exited 1: \u0007', false);
+      // One at a time: each setup seeds the fake GitHub anew.
+      const cases = [
+        [
+          async () => {
+            const spec = setup({ config: 'retry_limit: 2\n' });
+            spec.local.failure = failure;
+            await dispatchOnce(spec.ctx); // the manifest and its first attempt, as issued() does
+            return spec;
+          },
+          2,
+        ],
+        [() => issued('retry_limit: 2\n', failure), 4],
+      ] as const;
+      for (const [make, station] of cases) {
+        const t = await make();
+        const manifest = tipOf(t);
+        const results = await passes(t, 3);
+
+        // retry_limit + 1 attempts, each on the one manifest commit, and nothing pushed after it.
+        expect(t.local.launches).toHaveLength(3);
+        expect(tipOf(t)).toBe(manifest);
+        expect(recordAt(t, station)).toMatchObject({ head: manifest, count: 3, outcome: 'failed' });
+        const file = failureFile(t.home, REPO, ISSUE, station);
+        const reason = `3 sessions started at ${manifest.slice(0, 12)} with retry_limit 2, so no more start there; the last failure: claude exited 1: \\u{7}; the failure record is ${file}; delete it to start its count again, or push a new head or install a new factory release`;
+        expect(results.at(-1)?.held).toEqual([{ issue: ISSUE, reason }]);
+        expect(alerts(t, 'retry-limit')).toEqual([`info #2 holds: ${reason}`]);
+      }
+    });
+
+    it('T061: a full context holds at once with one alert; an unknown one is an ordinary failure, started again with the same prompt', async () => {
+      const t = setup();
+      const full = new SessionFailed('claude exited 1', false);
+      full.contextFull = true;
+      t.local.failure = full;
+      await passes(t, 3);
+      expect(t.local.launches).toHaveLength(1);
+      const manifest = tipOf(t);
+      const file = failureFile(t.home, REPO, ISSUE, 2);
+      expect(alerts(t, 'context-full')).toEqual([
+        `info #2 holds: the session at ${manifest.slice(0, 12)} filled its context, so the item is too big for one session: split it; the last failure: claude exited 1; the failure record is ${file}; delete it to start its count again`,
+      ]);
+
+      const u = setup();
+      u.local.failure = new SessionFailed('claude exited 1', false);
+      await passes(u, 2);
+      expect(recordAt(u, 2)).toMatchObject({ count: 2, context_full: null });
+      const [first, again] = u.local.launches;
+      // Nothing else changed, so the relaunch's prompt and settings are the first attempt's.
+      expect(given(again)).toEqual(given(first));
+      expect(again?.sessionId).toBe('fake-local-2');
+      expect(u.project.git(['log', '-1', '--format=%s', `origin/${BRANCH}`])).toBe(
+        'Dispatcher: station 2 (spec) manifest',
+      );
+    });
+
+    it('T061: a refusal is not counted and is tried again each pass with one alert; once fixed the session starts on the same manifest, and so does a stale head check', async () => {
+      const t = setup();
+      t.local.refusal = new LaunchRefused('no local session started: claude is not on PATH');
+      await passes(t, 3);
+      const manifest = tipOf(t);
+      expect(t.local.asked).toHaveLength(3);
+      expect(recordAt(t, 2)).toEqual({ head: manifest, factory: HASH, count: 0 });
+      expect(alerts(t, 'launcher-unavailable')).toHaveLength(1);
+      delete t.local.refusal;
+      await dispatchOnce(t.ctx);
+      expect(t.local.launches).toHaveLength(1);
+      expect(tipOf(t)).toBe(manifest);
+
+      // The head check saw a push the branch then lost: refused uncounted, at a tip that reads
+      // as unmoved, and the session starts there on the next pass.
+      const u = setup();
+      u.local.beforeStart = () => {
+        u.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
+        u.project.commit({ [`${FEATURE}/notes.md`]: 'late\n' }, 'a late push');
+        u.project.push(BRANCH);
+        u.project.checkout('main');
+      };
+      expect((await dispatchOnce(u.ctx)).refused).toMatch(/the branch moved after its manifest/);
+      delete u.local.beforeStart;
+      const issuedAt = u.project.git(['rev-parse', `origin/${BRANCH}~1`]);
+      u.project.git(['push', '-q', '-f', 'origin', `${issuedAt}:refs/heads/${BRANCH}`]);
+      await dispatchOnce(u.ctx);
+      expect(u.local.launches).toHaveLength(1);
+      expect(recordAt(u, 2)).toMatchObject({ head: issuedAt, count: 1, outcome: 'ended' });
+    });
+
+    it('T061: an attempt with no outcome is started again once no group of it lives, read by sessionRunning alone', async () => {
+      const t = setup();
+      t.local.failure = new Error('the factory was stopped');
+      await expect(dispatchOnce(t.ctx)).rejects.toThrow('the factory was stopped');
+      expect(recordAt(t, 2)).not.toHaveProperty('outcome');
+      delete t.local.failure;
+      const dir = join(t.home, '.factory', 'sessions', 'fake-local-1');
+      mkdirSync(dir, { recursive: true });
+      const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+      await once(child, 'spawn');
+      const pgid = child.pid;
+      if (pgid === undefined) throw new Error('sleep has no pid');
+      try {
+        writeFileSync(join(dir, 'group.json'), JSON.stringify(groupRecord(pgid)));
+        await dispatchOnce(t.ctx);
+        expect(t.local.launches).toHaveLength(1);
+      } finally {
+        process.kill(-pgid, 'SIGKILL');
+      }
+      await vi.waitFor(() => {
+        expect(() => process.kill(-pgid, 0)).toThrow();
+      });
+      await dispatchOnce(t.ctx);
+      expect(t.local.launches).toHaveLength(2);
+      expect(recordAt(t, 2)).toMatchObject({ count: 2, session: 'fake-local-2', outcome: 'ended' });
+    });
+
+    it('T061: after a red CI round, a session failing on the re-issued manifest is started again with its failure line, and CI green at that manifest ticks nothing', async () => {
+      const t = await issued();
+      const head = work(t);
+      buildTest(head, 'failure');
+      t.local.failure = new SessionFailed('claude exited 1', false);
+      await dispatchOnce(t.ctx); // the re-issued manifest, whose session fails
+      const manifest = tipOf(t);
+      buildTest(manifest, 'success');
+      await dispatchOnce(t.ctx);
+
+      const line = `Your last attempt at T001 left CI red at ${head.slice(0, 12)}: build-test (failure).`;
+      const [, reissued, relaunched] = t.local.launches;
+      expect(reissued?.prompt).toContain(line);
+      expect(given(relaunched)).toEqual(given(reissued));
+      expect(tipOf(t)).toBe(manifest);
+      expect(t.show(TASKS_MD)).toBe(TASKS);
+      expect(recordAt(t, 4)).toMatchObject({ head: manifest, count: 2 });
+    });
+
+    it("T061: a Verify relaunch keeps its manifest's role, whatever the evidence would name", async () => {
+      const t = setup({ tier: 1, states: ['state:verifying'], branch: { ...SPECIFIED } });
+      const at = { projectDir: t.project.path, now: () => new Date() };
+      const records = t.ctx.failures;
+      const where = { repo: REPO, item: ISSUE, station: 5 } as const;
+      // The dispatcher's own Security manifest, failed, where the evidence at tier 1 names the
+      // Reviewer.
+      writeStationManifest(
+        at,
+        { issue: ISSUE, branch: BRANCH },
+        { station: 5, role: 'security' },
+        'origin/main',
+        (sha, parent) => {
+          recordIssued(records, where, sha, parent);
+        },
+      );
+      const manifest = tipOf(t);
+      const file = failureFile(t.home, REPO, ISSUE, 5);
+      writeFailureRecord(file, {
+        head: manifest,
+        factory: HASH,
+        count: 1,
+        outcome: 'failed',
+        last: 'x',
+      });
+
+      await dispatchOnce(t.ctx);
+
+      expect(t.local.launches).toMatchObject([{ station: 5, role: 'security' }]);
+      expect(tipOf(t)).toBe(manifest);
+    });
+
+    it("T061: the dispatcher's own manifest that cannot be read holds its item with one urgent alert and the pass goes on; a git failure reading it stops the pass", async () => {
+      const t = setup({ branch: CREATED, states: ['state:triaged'], other: true });
+      const tip = tipOf(t);
+      // A record naming a commit that is no manifest: the factory's bug or local corruption.
+      const file = failureFile(t.home, REPO, ISSUE, 2);
+      writeFailureRecord(file, { head: tip, factory: HASH, count: 1, outcome: 'failed' });
+      await passes(t, 2);
+
+      expect(tipOf(t)).toBe(tip);
+      expect(t.local.launches.map((l) => l.item)).toEqual([3]);
+      expect(alerts(t, 'manifest-unreadable')).toEqual([
+        `urgent #2 holds: the dispatcher's own manifest at ${tip}, which the failure record ${file} names, cannot be read as one, so no session starts on it: reinstall the pinned release, or delete ${file}`,
+      ]);
+      // Reading the dispatcher's own failed manifest, git fails: the pass stops.
+      const u = setup();
+      u.local.failure = new SessionFailed('claude exited 1', false);
+      await dispatchOnce(u.ctx);
+      await failingGit('--literal-pathspecs', async () => {
+        await expect(dispatchOnce(u.ctx)).rejects.toThrow('git ls-tree failed: fatal: injected');
+      });
+      expect(u.local.launches).toHaveLength(1);
     });
   });
 });
@@ -1796,7 +2013,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       const forged = tip(t);
       const at = { projectDir: t.project.path, now: () => new Date() };
 
-      expect(pendingStation(at, forged)).toBeUndefined();
+      expect(pendingStation(at, forged, FEATURE)).toBeUndefined();
       await dispatchOnce(t.ctx);
       expect(t.cloud.launches).toHaveLength(2);
       expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(forged);
@@ -1880,7 +2097,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       return a?.kind === kind ? [`${a.urgency} ${a.text}`] : [];
     });
 
-  it('in local mode a failed session, or a launch refused after the push, waits on its spent manifest with no throw (T061)', async () => {
+  it('in local mode a failed session, or a launch refused after the push, is started again on its spent manifest with no new one and no throw (T061)', async () => {
     const failures = [
       new SessionFailed('claude exited 1', false),
       new LaunchRefused('no local session started: claude is not on PATH'),
@@ -1893,16 +2110,16 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       const manifest = tip(t);
       const second = await dispatchOnce(t.ctx);
 
-      expect(first.failed ?? first.refused).toContain(failure.message);
-      expect(t.local.asked).toHaveLength(1);
+      for (const pass of [first, second])
+        expect(pass.failed ?? pass.refused).toContain(failure.message);
+      expect(t.local.asked).toHaveLength(2);
       expect(tip(t)).toBe(manifest);
-      expect(second).toEqual({ moves: [], skipped: [] });
-      // A refusal before the start leaves no session in the record and no count: still spent,
-      // until 3b-2; the failed session was counted as it started.
+      // A refusal before the start leaves no session in the record and no count; each failed
+      // session was counted as it started.
       const session =
         failure instanceof LaunchRefused
           ? { count: 0 }
-          : { count: 1, session: 'fake-local-1', outcome: 'failed', last: failure.message };
+          : { count: 2, session: 'fake-local-2', outcome: 'failed', last: failure.message };
       const full = failure instanceof LaunchRefused ? {} : { context_full: null };
       expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toEqual({
         ...{ head: manifest, factory: HASH },
