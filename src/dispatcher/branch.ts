@@ -62,7 +62,8 @@ function run(ctx: BranchContext, args: readonly string[], input?: string) {
 
 const failed = (args: readonly string[], result: ReturnType<typeof run>) =>
   new EnvironmentError(
-    `git ${args[0] ?? ''} failed: ${result.error?.message ?? result.stderr.trim()}`,
+    // Named by its command, past git's own options such as `--literal-pathspecs`.
+    `git ${args.find((a) => !a.startsWith('-')) ?? ''} failed: ${result.error?.message ?? result.stderr.trim()}`,
   );
 
 export function git(ctx: BranchContext, args: readonly string[], input?: string): string {
