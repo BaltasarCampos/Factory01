@@ -98,10 +98,11 @@ export function nextTask(tasks: string): { task: string; files: string[] } | und
 
 /**
  * The manifest on the branch tip, if the tip is the dispatcher's manifest commit by its subject;
- * `unreadable` when its `.station.json` is not a plain file, is over 64 KiB, is not a JSON object, or names no station
- * from 1 to 7 or no role, which a session may have forged (T061). At Build such a tip only issues
- * the task again: it counts toward Build's cap only with Build's exact subject, and the cap holds
- * all the same, since each issue pushes the dispatcher's own manifest. A git failure throws.
+ * `unreadable` when its `.station.json` is not a plain file, is over 64 KiB, is not a JSON
+ * object, or names no station from 1 to 7 or no role, which a session may have forged (T061). At
+ * Build such a tip only issues the task again: it counts toward Build's cap only with Build's
+ * exact subject, and the cap holds all the same, since each issue pushes the dispatcher's own
+ * manifest. A git failure throws.
  */
 export function pendingManifest(
   ctx: BranchContext,

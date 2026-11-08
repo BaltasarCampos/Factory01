@@ -70,11 +70,12 @@ export class FakeLauncher {
     const sessionId = `fake-${this.mode}-${String(this.launches.length + 1)}`;
     this.beforeStart?.();
     try {
-      // The branch's head on origin now, as the local launcher fetches and checks it.
-      const listed = (args: string[]) => execFileSync('git', args, { cwd: request.project });
-      const ref = `refs/heads/${request.branch}`;
-      const head = listed(['ls-remote', 'origin', ref]).toString().split('\t')[0] ?? '';
-      request.starting?.(sessionId, head);
+      if (request.starting !== undefined) {
+        // The branch's head on origin now, as the local launcher fetches and checks it.
+        const ref = `refs/heads/${request.branch}`;
+        const listed = execFileSync('git', ['ls-remote', 'origin', ref], { cwd: request.project });
+        request.starting(sessionId, listed.toString().split('\t')[0] ?? '');
+      }
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       return Promise.reject(new LaunchRefused(`no local session started: ${visible(why)}`));
