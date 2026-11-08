@@ -98,28 +98,31 @@ export function nextTask(tasks: string): { task: string; files: string[] } | und
 
 /**
  * The manifest on the branch tip, if the tip is the dispatcher's manifest commit by its subject;
- * `unreadable` when its `.station.json` is not a plain file, is over 64 KiB, is not a JSON
- * object, or names no station from 1 to 7 or no role, which a session may have forged (T061). At
- * Build such a tip only issues the task again: it counts toward Build's cap only with Build's
- * exact subject, and the cap holds all the same, since each issue pushes the dispatcher's own
- * manifest. A git failure throws.
+ * `unreadable` when its `.station.json` is not `dir`'s, the item's feature folder, is not a plain
+ * file, is over 64 KiB, is not a JSON object, or names no station from 1 to 7 or no role, which a
+ * session may have forged (T061). At Build such a tip only issues the task again: it counts toward
+ * Build's cap only with Build's exact subject, and the cap holds all the same, since each issue
+ * pushes the dispatcher's own manifest. A git failure throws.
  */
 export function pendingManifest(
   ctx: BranchContext,
   tip: string,
+  dir: string | undefined,
 ): StationManifest | 'unreadable' | undefined {
   const subject = git(ctx, ['log', '-1', '--format=%s', tip]);
   if (!/^Dispatcher: station \d/.test(subject)) return undefined;
-  const changed = git(ctx, ['diff-tree', '--no-commit-id', '--name-only', '-r', tip]);
-  const [path] = changed.split('\n');
+  const changed = git(ctx, ['diff-tree', '--no-commit-id', '--name-only', '-z', '-r', tip]);
+  const [path] = changed.split('\0');
   if (path === undefined || !path.endsWith('/.station.json')) return undefined;
+  // A session wrote that path: only the item's own is read, and as a literal path, since pathspec
+  // magic such as `:(glob)` or `:/` could fail every pass or reach another file.
+  if (dir === undefined || path !== `${dir}/.station.json`) return 'unreadable';
   // Its mode and size first: anything but a plain file within the limit is not the dispatcher's,
-  // and reading it could stop every pass.
-  const entry = /^100644 blob [0-9a-f]+ +(\d+)\t/.exec(
-    git(ctx, ['ls-tree', '-l', tip, '--', path]),
-  );
-  if (entry === null || Number(entry[1]) > MAX_MANIFEST) return 'unreadable';
-  const text = git(ctx, ['show', `${tip}:${path}`]);
+  // and reading it could stop every pass. The blob read is the one whose size was checked.
+  const listed = git(ctx, ['--literal-pathspecs', 'ls-tree', '-l', '-z', tip, '--', path]);
+  const entry = /^100644 blob ([0-9a-f]+) +(\d+)\t/.exec(listed);
+  if (entry?.[1] === undefined || Number(entry[2]) > MAX_MANIFEST) return 'unreadable';
+  const text = git(ctx, ['cat-file', 'blob', entry[1]]);
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -137,8 +140,8 @@ export function pendingManifest(
 }
 
 /** The station of the manifest at the tip; undefined for none, or for one that cannot be read. */
-export const pendingStation = (ctx: BranchContext, tip: string) => {
-  const manifest = pendingManifest(ctx, tip);
+export const pendingStation = (ctx: BranchContext, tip: string, dir: string | undefined) => {
+  const manifest = pendingManifest(ctx, tip, dir);
   return manifest === 'unreadable' ? undefined : manifest?.station;
 };
 

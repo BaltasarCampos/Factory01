@@ -208,7 +208,7 @@ async function buildRound(
   // `.station.json` unreadable included, only issues the task again: it counts toward the cap only
   // with Build's exact subject, and each issue pushes the dispatcher's own manifest, which does
   // (T061).
-  const manifest = issued === tip ? undefined : pendingManifest(at, tip);
+  const manifest = issued === tip ? undefined : pendingManifest(at, tip, dir);
   if (issued === tip || manifest === 'unreadable' || manifest?.station === 4) return issue();
   const state = await buildTestAt(ctx, config, tip);
   if (state === 'success') return { tick: task, head: tip };
@@ -333,7 +333,7 @@ export function gatherEvidence(ctx: EvidenceContext) {
     const pending =
       tip !== undefined &&
       station !== undefined &&
-      (own === undefined ? pendingStation(at, tip) === station : own !== 'new');
+      (own === undefined ? pendingStation(at, tip, dir) === station : own !== 'new');
     // Every Verify session the tier needs has ended, so a failing result is the Owner's to hear.
     const verifyEnded =
       item.state === 'verifying' &&

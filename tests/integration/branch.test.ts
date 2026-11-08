@@ -1332,20 +1332,28 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       ]);
     });
 
-    it("T061: a session's forged Build manifest whose .station.json does not parse, or is 2 MiB, issues the task again and never throws", async () => {
+    it("T061: a session's forged Build manifest whose .station.json does not parse, is 2 MiB, or sits at a path with pathspec magic issues the task again and never throws", async () => {
       // A manifest the dispatcher could have written but for its size, past spawnSync's 1 MiB.
       const big = { item: ISSUE, station: 4, role: 'builder', branch: BRANCH, task: 'T001' };
       const huge = `${JSON.stringify({ ...big, pad: 'x'.repeat(2 * 1024 * 1024) })}\n`;
-      for (const text of ['{', huge]) {
+      // Each sorts first in diff-tree's list: `:(glob)` made ls-tree exit 128, and `:/` made it
+      // size the item's real manifest while git show read the forged one.
+      const forgeries = [
+        { [`${FEATURE}/.station.json`]: '{' },
+        { [`${FEATURE}/.station.json`]: huge },
+        { [`:/${FEATURE}/.station.json`]: huge },
+        { ':(glob)x/.station.json': '{}\n' },
+      ];
+      for (const files of forgeries) {
         const t = await issued();
         t.project.git(['checkout', '-q', '-B', BRANCH, `origin/${BRANCH}`]);
-        t.project.commit({ [`${FEATURE}/.station.json`]: text }, BUILD_MANIFEST);
+        t.project.commit(files, BUILD_MANIFEST);
         t.project.push(BRANCH);
         t.project.checkout('main');
         const tip = tipOf(t);
         buildTest(tip, 'success');
         const at = { projectDir: t.project.path, now: () => new Date() };
-        expect(pendingManifest(at, tip)).toBe('unreadable');
+        expect(pendingManifest(at, tip, FEATURE)).toBe('unreadable');
         await dispatchOnce(t.ctx);
 
         expect(t.show(TASKS_MD)).toBe(TASKS);
@@ -1796,7 +1804,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       const forged = tip(t);
       const at = { projectDir: t.project.path, now: () => new Date() };
 
-      expect(pendingStation(at, forged)).toBeUndefined();
+      expect(pendingStation(at, forged, FEATURE)).toBeUndefined();
       await dispatchOnce(t.ctx);
       expect(t.cloud.launches).toHaveLength(2);
       expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(forged);
