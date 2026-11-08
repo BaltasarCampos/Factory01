@@ -523,7 +523,7 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
   const { item, station, role, branch, comments, failure } = target;
   // The feature folder and the task's files, for the session's own settings (T061).
   let session = { feature: '', files: [] as readonly string[] };
-  let starting: { starting: (id: string) => void } | undefined;
+  let starting: { starting: (id: string, launched: string) => void } | undefined;
   /** How the session that started ended, in its failure record, in local mode (T061). */
   let settled: ((outcome: Parameters<typeof recordOutcome>[4]) => void) | undefined;
   if (station >= 2 && station <= 6) {
@@ -539,8 +539,8 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
         ? (sha: string, parent: string) => {
             recordIssued(ctx.failures, at, sha, parent);
             starting = {
-              starting: (id) => {
-                recordSession(ctx.failures, at, sha, id);
+              starting: (id, launched) => {
+                recordSession(ctx.failures, at, sha, id, launched);
                 settled = (outcome) => {
                   recordOutcome(ctx.failures, at, sha, id, outcome);
                 };
@@ -550,7 +550,9 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
         : undefined;
     let manifest;
     try {
-      manifest = writeStationManifest(git, ref, { station, role }, mainRef, issued);
+      // The prompt's failure line goes in the manifest too, so a relaunch can rebuild it (T061).
+      const line = failure === undefined ? {} : { failure };
+      manifest = writeStationManifest(git, ref, { station, role, ...line }, mainRef, issued);
     } catch (err) {
       if (!(err instanceof StackRefused)) throw err;
       await hold(pass, ref, station, err);
@@ -599,16 +601,26 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     }));
   } catch (err) {
     if (err instanceof SessionFailed) {
-      // The outcome first: a local file, which fails closed by itself, never skipped by a failed
-      // post of the alert.
-      settled?.({
-        failure: err.message,
-        ...(err.contextFull === undefined ? {} : { contextFull: err.contextFull }),
-      });
-      const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed`;
+      // The outcome first: a local file, never skipped by a failed post of the alert. One that
+      // cannot be recorded is named in the alert, which still goes out, and then stops the pass.
+      let unrecorded: Error | undefined;
+      try {
+        settled?.({
+          failure: err.message,
+          ...(err.contextFull === undefined ? {} : { contextFull: err.contextFull }),
+        });
+      } catch (thrown) {
+        unrecorded = thrown instanceof Error ? thrown : new Error(String(thrown));
+      }
+      const lost =
+        unrecorded === undefined
+          ? ''
+          : `; its outcome could not be recorded: ${visible(unrecorded.message)}`;
+      const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed${lost}`;
       const urgency = err.urgent ? 'urgent' : 'info';
       const kind = err instanceof SessionCapped ? 'session-capped' : 'session-failed';
       await alertOnce({ urgency, kind, text });
+      if (unrecorded !== undefined) throw unrecorded;
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;

@@ -166,20 +166,26 @@ export function recordIssued(
 /**
  * The session about to start at `head`, the record's: the attempt is counted and its id goes in
  * the record before it can run, so a factory stopped mid-session still has it counted, and a
- * record that cannot be read, names another head or cannot be written refuses it. Under a newly
- * installed factory the count starts again.
+ * record that cannot be read, names another head or cannot be written refuses it, as does a
+ * clone the launcher checked at another head, `launched`, uncounted. Under a newly installed
+ * factory the count starts again.
  */
 export function recordSession(
   records: FailureRecords,
   at: { repo: string; item: number; station: Station },
   head: string,
   session: string,
+  launched: string,
 ): void {
   const file = failureFile(records.home, at.repo, at.item, at.station);
   const record = readFailureRecord(file);
   if (record?.head !== head)
     throw new EnvironmentError(
       `the failure record ${file} does not name ${head.slice(0, 12)}, the manifest this session starts on; run the factory again`,
+    );
+  if (launched !== head)
+    throw new EnvironmentError(
+      `the session's clone is at ${visible(launched.slice(0, 12))}, not ${head.slice(0, 12)}, which ${file} names: the branch moved after its manifest was issued; run the factory again`,
     );
   const factory = records.factory();
   const count = (record.factory === factory ? record.count : 0) + 1;

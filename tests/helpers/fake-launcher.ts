@@ -1,6 +1,7 @@
 // Fake session launcher: records every launch instead of starting a Claude Code session.
 // Mirrors the `SessionLauncher` interface of src/dispatcher/launcher/types.ts (T037), and refuses
 // as the local launcher does when `starting` throws: a `LaunchRefused`, with nothing launched.
+import { execFileSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,7 +18,7 @@ export interface LaunchRequest {
   files: readonly string[];
   prompt: string;
   heartbeat?: (progress: { elapsed: number; turns: number }) => void;
-  starting?: (session: string) => void;
+  starting?: (session: string, head: string) => void;
 }
 
 export interface LaunchRecord extends LaunchRequest {
@@ -35,6 +36,8 @@ export class FakeLauncher {
   refusal?: LaunchRefused;
   /** Runs before `starting`, as anything else may between the manifest's issue and the start. */
   beforeStart?: () => void;
+  /** Runs once `starting` has passed, as anything may while the session runs. */
+  afterStart?: () => void;
   /** The heartbeats every launch gives while its session runs. */
   beats: { elapsed: number; turns: number }[] = [];
 
@@ -67,12 +70,18 @@ export class FakeLauncher {
     const sessionId = `fake-${this.mode}-${String(this.launches.length + 1)}`;
     this.beforeStart?.();
     try {
-      request.starting?.(sessionId);
+      if (request.starting !== undefined) {
+        // The branch's head on origin now, as the local launcher fetches and checks it.
+        const ref = `refs/heads/${request.branch}`;
+        const listed = execFileSync('git', ['ls-remote', 'origin', ref], { cwd: request.project });
+        request.starting(sessionId, listed.toString().split('\t')[0] ?? '');
+      }
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
       return Promise.reject(new LaunchRefused(`no local session started: ${visible(why)}`));
     }
     this.launches.push({ ...request, mode: this.mode, sessionId });
+    this.afterStart?.();
     for (const beat of this.beats) request.heartbeat?.(beat);
     return this.failure === undefined
       ? Promise.resolve({ sessionId })

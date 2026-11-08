@@ -561,24 +561,31 @@ describe(
       expect(confirmed.stderr).toContain(DECLINED);
     });
 
-    it("asks too when the tip's manifest subject has a .station.json that cannot be read, saying a session may have forged it (T061)", async () => {
+    it("asks too when the tip's manifest subject has a .station.json that is not a manifest, saying a session may have forged it, and never prints its text (T061)", async () => {
       const t = mergeSetup();
-      t.repo.checkout(ITEM_BRANCH);
-      const tip = t.repo.commit(
-        { 'specs/7-add-login/.station.json': '{' },
-        'Dispatcher: station 4 (builder) manifest',
-      );
-      t.repo.push(ITEM_BRANCH);
-      t.repo.checkout('main');
-      actionsAt(tip);
+      // One that does not parse, one with no station or role, and one whose role would rewrite
+      // the warning's line.
+      const role = '\u001b[2Kbuilder';
+      const forgeries = ['{', '{}', 'null', JSON.stringify({ item: ITEM, station: 4, role })];
+      for (const text of forgeries) {
+        t.repo.checkout(ITEM_BRANCH);
+        const tip = t.repo.commit(
+          { 'specs/7-add-login/.station.json': text },
+          'Dispatcher: station 4 (builder) manifest',
+        );
+        t.repo.push(ITEM_BRANCH);
+        t.repo.checkout('main');
+        actionsAt(tip);
 
-      const declined = await t.cli(['merge', String(ITEM_PR)], { answers: [''] });
+        const declined = await t.cli(['merge', String(ITEM_PR)], { answers: [''] });
 
-      expect(declined.code).toBe(1);
-      expect(declined.stderr).toMatch(
-        /warning: .*\.station\.json cannot be read, so a session may have forged it/,
-      );
-      expect(declined.stderr).not.toContain(DECLINED);
+        expect(declined.code).toBe(1);
+        expect(declined.stderr).toMatch(
+          /warning: .*\.station\.json cannot be read as a manifest, so a session may have forged it/,
+        );
+        expect(declined.stderr).not.toMatch(/undefined|\u001b/);
+        expect(declined.stderr).not.toContain(DECLINED);
+      }
     });
 
     it('refuses an item main already has an Owner-signed Factory-Merge: #<issue> for (AC-088)', async () => {

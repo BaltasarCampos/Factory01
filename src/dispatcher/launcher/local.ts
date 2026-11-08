@@ -1038,8 +1038,9 @@ function step<T>(what: string, run: () => T): T {
   try {
     return run();
   } catch (err) {
-    // A refusal, or an error that already says no session started, keeps its own words; any
-    // other text, git's included, is named by its step and shown through visible().
+    // A refusal, an error that already says no session started, or a `SessionUnknown`, whose id
+    // the unknown-session alert keeps, keeps its own words; any other text, git's included, is
+    // named by its step and shown through visible().
     if (err instanceof LaunchRefused || err instanceof SessionUnknown) throw err;
     if (err instanceof EnvironmentError && err.message.startsWith(STOPPED)) throw err;
     const why = err instanceof Error ? err.message : String(err);
@@ -1540,7 +1541,7 @@ export class LocalLauncher implements LocalSessionLauncher {
           let result: Awaited<ReturnType<Runner>>;
           // Its id in its failure record first: a session the count cannot see never starts.
           try {
-            request.starting?.(files.id);
+            request.starting?.(files.id, heads.head);
           } catch (err) {
             const why = err instanceof Error ? err.message : String(err);
             throw new LaunchRefused(`no local session started: ${visible(why)}`);
