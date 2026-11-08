@@ -433,6 +433,11 @@ write it.
   "issued_at": "2026-10-01T09:00:00Z" }
 ```
 
+`failure`, when the prompt carries one, is the failure line the dispatcher put in it, a red CI
+round's or the conflict's, never a session's text, so a relaunch on the same manifest gets the
+same prompt (T061). A tip whose `.station.json` is not a plain file of at most 64 KiB naming a
+station from 1 to 7 and a role reads as no manifest the dispatcher wrote.
+
 ## Guardrail manifest
 
 `guardrails.manifest.json` in each factory release, built and signed into the tag by
