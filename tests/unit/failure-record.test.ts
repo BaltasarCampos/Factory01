@@ -13,6 +13,7 @@ import {
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  clearIntake,
   factoryHash,
   hashOnce,
   failureFile,
@@ -180,6 +181,37 @@ describe('the failure record of local sessions (T061)', () => {
       `the session's clone is at eeeeeeeeeeee, not ${HEAD.slice(0, 12)}, which ${file} names: the branch moved after its manifest was issued; run the factory again`,
     );
     expect(readFailureRecord(file)).toEqual(before);
+  });
+
+  it("keeps Intake's record with no head, counted from none and never by its clone, and deletes it when told, naming a failure (T061)", () => {
+    const home = tempDir();
+    const records = { home, factory: () => FACTORY };
+    const at = { repo: 'owner/project', item: 42, station: 1 } as const;
+    const file = failureFile(home, 'owner/project', 42, 1);
+    recordSession(records, at, undefined, 'id-1', HEAD);
+    recordOutcome(records, at, undefined, 'id-1', { failure: 'claude exited 1' });
+    // Every launch counts, its clone wherever main is; a new attempt has no outcome yet.
+    recordSession(records, at, undefined, 'id-2', 'd'.repeat(40));
+    const last = 'claude exited 1';
+    expect(readFailureRecord(file)).toEqual({ factory: FACTORY, count: 2, session: 'id-2', last });
+    recordSession({ home, factory: () => 'e'.repeat(64) }, at, undefined, 'id-3', HEAD);
+    expect(readFailureRecord(file)).toMatchObject({ count: 1, session: 'id-3' });
+    // A head on Intake's record, or none on another station's, is malformed.
+    expect(() => {
+      writeFailureRecord(file, { head: HEAD, factory: FACTORY, count: 0 });
+    }).toThrow(/is malformed/);
+    expect(() => {
+      writeFailureRecord(failureFile(home, 'owner/project', 42, 4), { factory: FACTORY, count: 0 });
+    }).toThrow(/is malformed/);
+    writeFileSync(file, JSON.stringify({ head: HEAD, factory: FACTORY, count: 0 }));
+    expect(() => readFailureRecord(file)).toThrow(`the failure record ${file} is malformed`);
+    clearIntake(records, 'owner/project', 42);
+    clearIntake(records, 'owner/project', 42);
+    expect(readFailureRecord(file)).toBeUndefined();
+    mkdirSync(join(file, 'x'), { recursive: true });
+    expect(() => {
+      clearIntake(records, 'owner/project', 42);
+    }).toThrow(`the failure record ${file} cannot be deleted as #42 leaves new`);
   });
 
   it('tells running, spent and a new head by the record alone, a new factory reading as count 0', () => {

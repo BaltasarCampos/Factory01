@@ -4,7 +4,9 @@
 // a branch tip is the dispatcher's comes from this record alone, never from `.station.json`, its
 // trailers or its time. Written to a temporary file and renamed into place, so a reader sees the
 // old record or the new one, never half of one; a missing file is no record, and any other
-// failure to read one stops the pass, naming the file, never counting as none.
+// failure to read one stops the pass, naming the file, never counting as none. Intake writes no
+// manifest, so its record, `<item>-1.json`, has no head: main moving never resets it, and the
+// dispatcher deletes it when the item leaves `new`.
 import { createHash, randomUUID } from 'node:crypto';
 import {
   mkdirSync,
@@ -15,14 +17,14 @@ import {
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { EnvironmentError } from '../cli/env.js';
 import type { Station } from '../model/types.js';
 import { visible } from '../notify/summary.js';
 
 export interface FailureRecord {
-  /** The dispatcher's own manifest commit the record counts at. */
-  head: string;
+  /** The dispatcher's own manifest commit the record counts at; none in Intake's alone. */
+  head?: string;
   /** The installed factory's hash when the manifest was issued (`factoryHash`). */
   factory: string;
   /** The attempts at `head`, each counted when it starts, before claude spawns. */
@@ -75,16 +77,20 @@ export function failureFile(home: string, repo: string, item: number, station: S
   return join(home, '.factory', 'failures', owner, name, `${String(item)}-${String(station)}.json`);
 }
 
-/** Whether `value` is a record: what is read, and what may be written. */
-function isRecord(value: unknown): value is FailureRecord {
+/** Whether `file` is Intake's record, the one with no head. */
+const intakeFile = (file: string) => basename(file).endsWith('-1.json');
+
+/** Whether `value` is a record for `file`: what is read, and what may be written. */
+function isRecord(value: unknown, file: string): value is FailureRecord {
   const record = (value ?? {}) as Record<string, unknown>;
   const fields = ['head', 'factory', 'count', 'last', 'session', 'outcome', 'context_full'];
   return (
     typeof value === 'object' &&
     !Array.isArray(value) &&
     Object.keys(record).every((key) => fields.includes(key)) &&
-    typeof record.head === 'string' &&
-    /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(record.head) &&
+    (intakeFile(file)
+      ? record.head === undefined
+      : typeof record.head === 'string' && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(record.head)) &&
     typeof record.factory === 'string' &&
     /^[0-9a-f]{64}$/.test(record.factory) &&
     Number.isSafeInteger(record.count) &&
@@ -114,7 +120,7 @@ export function readFailureRecord(file: string): FailureRecord | undefined {
   } catch (err) {
     throw new EnvironmentError(`the failure record ${file} is not JSON: ${why(err)}; ${OUT}`);
   }
-  if (!isRecord(value))
+  if (!isRecord(value, file))
     throw new EnvironmentError(`the failure record ${file} is malformed; ${OUT}`);
   return value;
 }
@@ -124,7 +130,7 @@ export function readFailureRecord(file: string): FailureRecord | undefined {
  * naming the file, so a bad record never stops every later pass.
  */
 export function writeFailureRecord(file: string, record: FailureRecord): void {
-  if (!isRecord(record))
+  if (!isRecord(record, file))
     throw new EnvironmentError(
       `the failure record ${file} is not written: ${visible(JSON.stringify(record))} is malformed`,
     );
@@ -171,29 +177,34 @@ export function recordIssued(
  * the record before it can run, so a factory stopped mid-session still has it counted, and a
  * record that cannot be read, names another head or cannot be written refuses it, as does a
  * clone the launcher checked at another head, `launched`, uncounted. Under a newly installed
- * factory the count starts again.
+ * factory the count starts again. Intake's, with no head, counts from no record and never
+ * compares its clone, since main moving never resets it.
  */
 export function recordSession(
   records: FailureRecords,
   at: { repo: string; item: number; station: Station },
-  head: string,
+  head: string | undefined,
   session: string,
   launched: string,
 ): void {
   const file = failureFile(records.home, at.repo, at.item, at.station);
   const record = readFailureRecord(file);
-  if (record?.head !== head)
+  if (head !== undefined && record?.head !== head)
     throw new EnvironmentError(
       `the failure record ${file} does not name ${head.slice(0, 12)}, the manifest this session starts on; run the factory again`,
     );
-  if (launched !== head)
+  if (head !== undefined && launched !== head)
     throw new EnvironmentError(
       `the session's clone is at ${visible(launched.slice(0, 12))}, not ${head.slice(0, 12)}, which ${file} names: the branch moved after its manifest was issued; run the factory again`,
     );
   const factory = records.factory();
-  const count = (record.factory === factory ? record.count : 0) + 1;
+  const count = (record?.factory === factory ? record.count : 0) + 1;
   // A new attempt has no outcome yet.
-  writeFailureRecord(file, { ...lastOf(record), head, factory, count, session });
+  const kept = {
+    ...(record === undefined ? {} : lastOf(record)),
+    ...(head === undefined ? {} : { head }),
+  };
+  writeFailureRecord(file, { ...kept, factory, count, session });
 }
 
 /** The record's last failure, the one field an attempt carries over from the one before it. */
@@ -207,17 +218,24 @@ const lastOf = (record: FailureRecord) => (record.last === undefined ? {} : { la
 export function recordOutcome(
   records: FailureRecords,
   at: { repo: string; item: number; station: Station },
-  head: string,
+  head: string | undefined,
   session: string,
   outcome: { failure: string; contextFull?: boolean } | 'ended',
 ): void {
   const file = failureFile(records.home, at.repo, at.item, at.station);
   const record = readFailureRecord(file);
-  if (record?.head !== head || record.session !== session)
+  if (record === undefined || record.head !== head || record.session !== session)
     throw new EnvironmentError(
-      `the failure record ${file} no longer names session ${visible(session)} at ${head.slice(0, 12)}, so its outcome is not recorded; run the factory again`,
+      `the failure record ${file} no longer names session ${visible(session)} at ${head?.slice(0, 12) ?? 'Intake'}, so its outcome is not recorded; run the factory again`,
     );
-  const rest = { ...lastOf(record), head, factory: record.factory, count: record.count, session };
+  const { factory, count } = record;
+  const rest = {
+    ...lastOf(record),
+    ...(head === undefined ? {} : { head }),
+    factory,
+    count,
+    session,
+  };
   writeFailureRecord(
     file,
     outcome === 'ended'
@@ -229,6 +247,21 @@ export function recordOutcome(
           context_full: outcome.contextFull ?? null,
         },
   );
+}
+
+/**
+ * Intake's record for `item`, deleted once the item leaves `new`, whatever the mode: a failure to
+ * delete it throws, naming the file, so the item stays in `new` with its count (T061).
+ */
+export function clearIntake(records: FailureRecords, repo: string, item: number): void {
+  const file = failureFile(records.home, repo, item, 1);
+  try {
+    rmSync(file, { force: true });
+  } catch (err) {
+    throw new EnvironmentError(
+      `the failure record ${file} cannot be deleted as #${String(item)} leaves new: ${why(err)}; delete it, by its path, then run the factory again`,
+    );
+  }
 }
 
 /** The dispatcher's own manifest at a tip, by its record, read from `file`. */

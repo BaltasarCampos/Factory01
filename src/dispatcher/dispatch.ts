@@ -58,6 +58,7 @@ import {
   type SessionLauncher,
 } from './launcher/types.js';
 import {
+  clearIntake,
   recordIssued,
   recordOutcome,
   recordSession,
@@ -434,6 +435,9 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       await alertOnce({ ...decision.alert, text: `#${String(issue.number)}: ${text}` });
     }
     if (decision.ok) {
+      // Any move out of `new` ends Intake's count, its record deleted first, so a failure to
+      // delete it stops the pass with the item still in `new` (T061).
+      if (item.state === 'new') clearIntake(ctx.failures, repo, issue.number);
       await addLabel(repo, issue.number, `state:${decision.to}`, options);
       for (const label of issue.labels)
         if (label.startsWith('state:') && label !== `state:${decision.to}`)
@@ -546,29 +550,33 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
   let starting: { starting: (id: string, launched: string) => void } | undefined;
   /** How the session that started ended, in its failure record, in local mode (T061). */
   let settled: ((outcome: Parameters<typeof recordOutcome>[4]) => void) | undefined;
+  const where = { repo, item: item.issue.number, station };
+  /**
+   * Each attempt counted as it starts, and its outcome after: on manifest `sha`, or at Intake,
+   * which has none, on the item alone, so main moving never resets its count (T061).
+   */
+  const attempt = (sha?: string) => {
+    starting = {
+      starting: (id, launched) => {
+        recordSession(ctx.failures, where, sha, id, launched);
+        settled = (outcome) => {
+          recordOutcome(ctx.failures, where, sha, id, outcome);
+        };
+      },
+    };
+  };
+  if (station === 1 && config.agents === 'local') attempt();
   if (station >= 2 && station <= 6) {
     const ref: ItemRef = { issue: item.issue.number, branch };
     createItemBranch(git, ref, comments, mainRef);
     await ensureDraftPr(repo, { ...ref, title: item.issue.title }, options);
     // In local mode the dispatcher's own manifest commit is known from the failure record alone,
     // written before the push, so a record that cannot be written pushes nothing (T061).
-    const at = { repo, item: ref.issue, station };
-    /** Each attempt on manifest `sha` counted as it starts, and its outcome after. */
-    const attempt = (sha: string) => {
-      starting = {
-        starting: (id, launched) => {
-          recordSession(ctx.failures, at, sha, id, launched);
-          settled = (outcome) => {
-            recordOutcome(ctx.failures, at, sha, id, outcome);
-          };
-        },
-      };
-    };
     // `agents:` is the one key for local mode, as the evidence reads it (T061).
     const issued =
       config.agents === 'local'
         ? (sha: string, parent: string) => {
-            recordIssued(ctx.failures, at, sha, parent);
+            recordIssued(ctx.failures, where, sha, parent);
             attempt(sha);
           }
         : undefined;
@@ -607,9 +615,11 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     });
   } catch (err) {
     // A release that cannot render the station's prompt: this item holds, tried again each pass,
-    // alerted once per pin and head, and the pass goes on (T061).
+    // alerted once per pin and head, and the pass goes on (T061). The pin opens the reason, since
+    // an alert is skipped only when its text matches.
     if (!(err instanceof ReleaseIncomplete)) throw err;
-    const reason = visible(err.message);
+    const { tag, sha } = config.factory_release;
+    const reason = visible(`release ${tag} (${sha.slice(0, 12)}): ${err.message}`);
     await held(pass, target, reason, { urgency: 'info', kind: 'release-incomplete' });
     return undefined;
   }

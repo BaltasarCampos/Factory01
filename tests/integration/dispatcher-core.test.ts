@@ -373,7 +373,7 @@ describe('dispatcher core: station prompts (T072)', () => {
 
     // Its manifest's head; branch.test.ts shows the alert is not repeated at the same head.
     const head = t.project.revParse('origin/claude/2-add-login').slice(0, 12);
-    const reason = `${lacking}; claude/2-add-login is at ${head}`;
+    const reason = `release v1.0.0 (aaaaaaaaaaaa): ${lacking}; claude/2-add-login is at ${head}`;
     expect(first.held).toEqual([{ issue: 2, reason }]);
     expect(first.launched).toMatchObject({ issue: 3, station: 2 });
     expect(first.refused).toBeUndefined();

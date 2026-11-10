@@ -1410,8 +1410,8 @@ export class LocalLauncher implements LocalSessionLauncher {
       throw new LaunchRefused(
         `no local session started: ${JSON.stringify(request.feature)} is not the feature folder of ${request.role} on ${request.branch}`,
       );
-    // A session at stations 2–6 is counted in its failure record before it can run (T061).
-    if (request.station >= 2 && request.station <= 6 && request.starting === undefined)
+    // A session at stations 1–6 is counted in its failure record before it can run (T061).
+    if (request.station >= 1 && request.station <= 6 && request.starting === undefined)
       throw new LaunchRefused(
         `no local session started: the ${request.role} session at station ${String(request.station)} has no failure record to count it in, and a session the count cannot see never starts; it is the factory's own error, so reinstall the pinned release`,
       );
