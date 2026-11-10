@@ -3,7 +3,7 @@
 The lifecycle of a session the local launcher starts (`agents: local` in main's `.factory/config`,
 T061), as the code on main stands after slice 28-4c-4b-3c-1. Every slice that changes it keeps
 this page current in its notes commit. Code: `src/dispatcher/failures.ts`, `evidence.ts`
-(`tipState`, `spentTip`), `dispatch.ts` (`startSession`, `hold`), `manifest.ts`,
+(`tipState`, `spentTip`), `dispatch.ts` (`startSession`, `held`, `hold`), `manifest.ts` (`testEnded`),
 `launcher/local.ts` (`launch`, `sessionRunning`, `stillRunning`), `src/commands/run.ts`.
 
 `R` is `retry_limit` from main's `.factory/config`, a positive integer, 3 by default. Stations
@@ -32,6 +32,7 @@ No session can reach `~/.factory/` (T183).
 | `/tmp/factory-<item>-<random>/`, the session's temporary folder | Launcher, before the session's environment, which names it as `TMPDIR` | `mkdtemp` | The launcher, at the end of the launch; not when the factory exits on a signal |
 | `~/.factory/failures/<owner>/<repo>/<item>-<station>.json`, the failure record | Dispatcher: `recordIssued` before a new manifest's push; `recordSession`, the `starting()` callback the launcher calls just before the spawn; `recordOutcome` after the launch returns | A `wx` 0600 temporary file renamed into place, folder 0700, checked with the reader's own checks first: a reader sees the old record or the new, never half | Never by the factory; `recordIssued` replaces it at a new manifest. The Owner, to start the count again |
 | `refs/factory/build/<branch>`, the issued ref | Dispatcher, in its own clone, after a Build manifest's push succeeds | `git update-ref` | Never by the factory. The Owner restores it with the command a `manifest-held` alert names |
+| `refs/factory/test/<branch>`, the Test ref | Dispatcher, in its own clone, after a Test manifest's push succeeds (T181) | `git update-ref` | Never by the factory. Verify's Test session has ended only when this commit is in the tip's history, is not the tip, and the issued ref, if any, is its ancestor, never by a commit subject; missing or older, Test runs once more; a git failure reading it, other than exit 1, stops the pass |
 
 The record's repo is exactly `owner/name` in GitHub's name characters, neither part `.` or `..`,
 both lower-cased; any other is an error. Its fields, and nothing else:
