@@ -271,7 +271,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(u.sessions()).toEqual([]);
   });
 
-  it('refuses a session at stations 2–6 that has no failure record to count it in, spawning nothing (T061)', async () => {
+  it('refuses a session at stations 1–6 that has no failure record to count it in, spawning nothing (T061)', async () => {
     const t = setup();
     for (const station of [2, 4, 6] as const) {
       const refused = t.launch({ ...UNCOUNTED, station, role: STATION_ROLE[station] });
@@ -280,10 +280,18 @@ describe('LocalLauncher (research R8, R9)', () => {
         `no local session started: the ${STATION_ROLE[station]} session at station ${String(station)} has no failure record to count it in, and a session the count cannot see never starts; it is the factory's own error, so reinstall the pinned release`,
       );
     }
+    // Intake too, which has a record of its own with no manifest (28-4c-4b-3c-2b).
+    const intake = t.launch({
+      ...UNCOUNTED,
+      role: 'intake',
+      station: 1,
+      branch: 'main',
+      feature: '',
+    });
+    await expect(intake).rejects.toThrow(
+      'no local session started: the intake session at station 1 has no failure record to count it in',
+    );
     expect(t.sessions()).toEqual([]);
-    // Intake writes no manifest, so nothing counts it yet (28-4c-4b-3c).
-    await t.launch({ ...UNCOUNTED, role: 'intake', station: 1, branch: 'main', feature: '' });
-    expect(t.sessions()).toHaveLength(1);
   });
 
   it('runs claude in a fresh clone of its own on the item branch, never in the Owner’s working copy', async () => {

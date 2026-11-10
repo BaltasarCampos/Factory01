@@ -28,6 +28,7 @@ import { ciAt, requiredChecksAt, requiredJobs } from '../merge/ci.js';
 import type { MainMerges } from '../git/merges.js';
 import type { ProjectConfig, RoleName, State, StationManifest, Tier } from '../model/types.js';
 import { checkIntakeIssue } from '../stations/checks/intake.js';
+import { visible } from '../notify/summary.js';
 import type { ReleaseKeys } from '../approvals/keys.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { checkPlan } from '../stations/checks/plan.js';
@@ -55,7 +56,13 @@ import {
   pendingStation,
   testEnded,
 } from './manifest.js';
-import { tipState, type FailureRecords, type OwnTip } from './failures.js';
+import {
+  failureFile,
+  readFailureRecord,
+  tipState,
+  type FailureRecords,
+  type OwnTip,
+} from './failures.js';
 import { sessionRunning } from './launcher/local.js';
 import { STATION_OF, type DecisionAlert, type Evidence } from './transitions.js';
 
@@ -268,6 +275,43 @@ function spentTip(
   return { hold: { urgency: 'urgent', kind: 'manifest-unreadable', text } };
 }
 
+/**
+ * Intake's record for `item`, while its output is incomplete in local mode (T061): its last
+ * session's folder read as at stations 2–6, so a live group waits and one that cannot be told
+ * stops the pass; a full context holds, under any installed factory, and so does a count past
+ * `retry_limit` under this one. Every launch counts, one that ended well too. The hold's text
+ * names the last session, so a hold after the record is deleted alerts again, and says how that
+ * session ended, never a failure older than it.
+ */
+function intakeBound(
+  records: FailureRecords,
+  config: ProjectConfig,
+  item: number,
+  missing: readonly string[],
+): 'running' | DecisionAlert | undefined {
+  const file = failureFile(records.home, config.repo, item, 1);
+  const record = readFailureRecord(file);
+  const id = record?.session;
+  if (record === undefined || id === undefined) return undefined;
+  if (sessionRunning(records.home, id) !== undefined) return 'running';
+  const out = `delete ${file} to reset`;
+  const failed =
+    record.outcome === 'failed' ? `failed: ${record.last ?? 'no reason recorded'}` : '';
+  if (failed !== '' && record.context_full === true) {
+    const text = `Intake session ${id} filled its context, so the item is too big for one session: split it; it ${failed}; ${out}`;
+    return { urgency: 'info', kind: 'context-full', text };
+  }
+  const count = record.factory === records.factory() ? record.count : 0;
+  if (count <= config.retry_limit) return undefined;
+  const incomplete = missing.length === 0 ? '' : `: ${visible(missing.join('; '))}`;
+  const how =
+    record.outcome === 'ended'
+      ? `ended well, but Intake's output is still incomplete${incomplete}`
+      : failed || 'has no outcome recorded';
+  const text = `${String(count)} Intake sessions started with retry_limit ${String(config.retry_limit)}, so no more start while the item is new; the last, ${id}, ${how}; ${out}`;
+  return { urgency: 'info', kind: 'retry-limit', text };
+}
+
 /** The Verify role that works next, or undefined once the tier's last one has ended. */
 export function nextVerifyRole(
   tier: Tier,
@@ -294,8 +338,14 @@ export function gatherEvidence(ctx: EvidenceContext) {
     if (item.state === 'new') {
       if (item.tier === undefined) return { ownerMerge };
       const intake = await checkIntakeIssue(config.repo, n, item.tier, options);
+      const bound =
+        config.agents === 'local' && !intake.complete
+          ? intakeBound(ctx.failures, config, n, intake.missing)
+          : undefined;
+      const needsSession = !intake.complete && bound === undefined;
       return {
-        ...{ ownerMerge, intakeComplete: intake.complete, needsSession: !intake.complete },
+        ...{ ownerMerge, intakeComplete: intake.complete, needsSession },
+        ...(bound === undefined || bound === 'running' ? {} : { ownHold: bound }),
         ...(intake.duplicateOf === undefined ? {} : { duplicateOf: intake.duplicateOf }),
       };
     }

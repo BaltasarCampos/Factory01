@@ -31,6 +31,7 @@ import {
 import { groupRecord } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { ReleaseIncomplete } from '../../src/dispatcher/prompts.js';
+import { checkIntakeIssue } from '../../src/stations/checks/intake.js';
 import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
 import { STATES, STATIONS, type ApprovalRecord, type Tier } from '../../src/model/types.js';
@@ -397,6 +398,102 @@ describe('Intake before triage (AC-009)', { timeout: 60_000 }, () => {
       expect.objectContaining({ role: 'intake', station: 1, branch: 'main', item: ISSUE }),
     ]);
     expect(t.project.git(['ls-remote', '--heads', 'origin', BRANCH])).toBe('');
+  });
+});
+
+describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
+  const holds = (t: ReturnType<typeof setup>) =>
+    t.inbox().flatMap((c) => {
+      const a = parseAlert({ ...c, id: String(c.id) });
+      return a?.text.startsWith('#2 holds: ') === true ? [`${a.kind} ${a.text}`] : [];
+    });
+  const passes = async (t: ReturnType<typeof setup>, n: number) => {
+    for (let i = 0; i < n; i++) await dispatchOnce(t.ctx);
+  };
+  const intakeLabels = (labels: string[]) => {
+    editState((repo) => {
+      const found = repo.issues.find((i) => i.number === ISSUE);
+      if (found !== undefined) found.labels = [...labels, 'owner:approved'];
+    });
+  };
+
+  it('counts every launch, ended well or failed, main moving or not; past retry_limit the item holds in new, alerted once per last session, so a hold after the record is deleted alerts again', async () => {
+    const t = setup({ labels: ['tier:2'], config: 'retry_limit: 1\n' });
+    const file = failureFile(t.home, REPO, ISSUE, 1);
+    await dispatchOnce(t.ctx);
+    t.project.commit({ 'notes.md': 'main moved\n' }, 'Notes', { signWith: owner });
+    t.project.push('main');
+    await passes(t, 3);
+    expect(t.local.launches.map((l) => l.station)).toEqual([1, 1]);
+    expect(readFailureRecord(file)).toEqual({
+      ...{ factory: HASH, count: 2, session: 'fake-local-2', outcome: 'ended' },
+    });
+    const { missing } = await checkIntakeIssue(REPO, ISSUE, 2);
+    const cap = `2 Intake sessions started with retry_limit 1, so no more start while the item is new; the last`;
+    const ended = `${cap}, fake-local-2, ended well, but Intake's output is still incomplete: ${missing.join('; ')}; delete ${file} to reset`;
+    expect(holds(t)).toEqual([`retry-limit #2 holds: ${ended}`]);
+
+    rmSync(file);
+    t.local.failure = new SessionFailed('claude exited 1: \u0007', false);
+    await passes(t, 3);
+    expect(t.local.launches).toHaveLength(4);
+    const failed = `${cap}, fake-local-4, failed: claude exited 1: \\u{7}; delete ${file} to reset`;
+    expect(holds(t)).toEqual([`retry-limit #2 holds: ${ended}`, `retry-limit #2 holds: ${failed}`]);
+    expect(t.labels()).not.toContain('state:triaged');
+  });
+
+  it('holds at once on a full context, under a newly installed factory too, and stops the pass at a last session it cannot tell has ended, launching nothing', async () => {
+    const t = setup({ labels: ['tier:2'] });
+    const full = new SessionFailed('claude exited 1', false);
+    full.contextFull = true;
+    t.local.failure = full;
+    await passes(t, 2);
+    t.evidence.failures.factory = () => 'e'.repeat(64);
+    await passes(t, 2);
+    expect(t.local.launches).toHaveLength(1);
+    const file = failureFile(t.home, REPO, ISSUE, 1);
+    expect(holds(t)).toEqual([
+      `context-full #2 holds: Intake session fake-local-1 filled its context, so the item is too big for one session: split it; it failed: claude exited 1; delete ${file} to reset`,
+    ]);
+
+    // A factory stopped after session.json was written: never read as ended.
+    const u = setup({ labels: ['tier:2'] });
+    writeFailureRecord(failureFile(u.home, REPO, ISSUE, 1), {
+      ...{ factory: HASH, count: 1, session: 'crashed' },
+    });
+    const dir = join(u.home, '.factory', 'sessions', 'crashed');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'session.json'), '{}');
+    await expect(dispatchOnce(u.ctx)).rejects.toThrow(
+      /whether session crashed still runs is unknown/,
+    );
+    expect(u.local.launches).toEqual([]);
+  });
+
+  it('deletes the record when the item leaves new, and a failure to delete it stops the pass with the item still in new; cloud mode writes none', async () => {
+    const t = setup({ labels: ['tier:2'] });
+    await dispatchOnce(t.ctx);
+    const file = failureFile(t.home, REPO, ISSUE, 1);
+    expect(readFailureRecord(file)).toMatchObject({ count: 1 });
+    intakeLabels(INTAKE_LABELS);
+    await dispatchOnce(t.ctx);
+    expect(t.labels()).toContain('state:triaged');
+    expect(readFailureRecord(file)).toBeUndefined();
+
+    const u = setup({ labels: ['tier:2'] });
+    const stuck = failureFile(u.home, REPO, ISSUE, 1);
+    mkdirSync(join(stuck, 'x'), { recursive: true });
+    intakeLabels(INTAKE_LABELS);
+    await expect(dispatchOnce(u.ctx)).rejects.toThrow(
+      `the failure record ${stuck} cannot be deleted as #2 leaves new`,
+    );
+    expect(u.labels()).not.toContain('state:triaged');
+    expect(u.local.launches).toEqual([]);
+
+    const c = setup({ labels: ['tier:2'], agents: 'cloud' });
+    await dispatchOnce(c.ctx);
+    expect(c.cloud.launches).toHaveLength(1);
+    expect(readFailureRecord(failureFile(c.home, REPO, ISSUE, 1))).toBeUndefined();
   });
 });
 
