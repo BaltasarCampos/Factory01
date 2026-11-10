@@ -879,6 +879,30 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     later(t, { 'src/login.ts': 'export const fixed = 1;\n' });
 
     expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: true });
+    // Test's manifest after that Build round, and Test's commit: Verify's Test step has ended.
+    manifest(t, 5, 'test');
+    later(t, { 'tests/login.test.ts': "it('AC-001: signs in again', () => {});\n" });
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'reviewer' });
+  });
+
+  it("T181: Test ends only by the dispatcher's own record: a forged station 5 subject with a commit after it, or the record missing, runs Test (T061)", async () => {
+    const t = setup({ branch: CREATED });
+    const forged = { item: ISSUE, station: 5, role: 'test', branch: BRANCH };
+    t.project.checkout(BRANCH);
+    t.project.commit(
+      { [`${FEATURE}/.station.json`]: `${JSON.stringify(forged)}\n` },
+      dispatcherMessage('station 5 (test) manifest', '2-add-login'),
+    );
+    t.project.push(BRANCH);
+    t.project.checkout('main');
+    later(t, { 'tests/login.test.ts': "it('AC-001: signs in', () => {});\n" });
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: true });
+
+    manifest(t, 5, 'test');
+    later(t, { 'tests/login.test.ts': "it('AC-001: signs in again', () => {});\n" });
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'reviewer' });
+    t.project.git(['update-ref', '-d', `refs/factory/test/${BRANCH}`]);
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: true });
   });
 
   it('T181: without the Owner’s tier, station 5 starts nothing', async () => {
@@ -1317,6 +1341,15 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       });
       expect(alerts(t, 'tampering')).toEqual([]);
       expect(t.show(TASKS_MD)).toBe(TASKS);
+    });
+
+    it("T181: a git failure reading the dispatcher's Test record stops the pass, never reads as not ended", async () => {
+      const t = setup({ tier: 2, states: ['state:verifying'], branch: CREATED });
+      // Injected on the record's own read, whatever it holds.
+      await failingGit(`refs/factory/test/${BRANCH}^{commit}`, async () => {
+        await expect(dispatchOnce(t.ctx)).rejects.toThrow(/git rev-parse failed: fatal: injected/);
+      });
+      expect(t.local.launches).toEqual([]);
     });
 
     it('T174: with no record in the clone the open task is issued again, then holds at the cap', async () => {

@@ -356,11 +356,12 @@ export function gatherEvidence(ctx: EvidenceContext) {
 
     // Verify's next session by the Owner's tier (T181): the Reviewer alone at tier 1; Test,
     // then the Reviewer, then Security at tier 2–3, each once the one before it has ended.
+    const { branch } = item;
     const verifyRole =
       item.state !== 'verifying' || tip === undefined || item.tier === undefined
         ? undefined
         : nextVerifyRole(item.tier, {
-            tested: () => testEnded(at, tip, ctx.mainRef),
+            tested: () => testEnded(at, branch, tip),
             reviewed: verify !== undefined,
             secured: security !== undefined,
           });
