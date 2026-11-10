@@ -67,7 +67,7 @@ import {
 import { issuedRef, tickTask, writeStationManifest } from './manifest.js';
 import { fileAt, signedAnswers } from '../git/answers.js';
 import { branchFeatureDir } from '../model/naming.js';
-import type { PromptFacts } from './prompts.js';
+import { ReleaseIncomplete, type PromptFacts } from './prompts.js';
 import { answersToApply, parseAnswers, type QuestionFile } from '../stations/checks/questions.js';
 import { isReleased, releasedHeads } from './released.js';
 import {
@@ -589,10 +589,10 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
       }
     session = { feature: `specs/${featureOf(ref)}`, files: manifest.files ?? [] };
   }
-  const answersFor = (file: QuestionFile | undefined) => {
-    const answers = file === undefined ? [] : ownerAnswers(git, branch, file, keys, mainRef);
-    return answers.length === 0 ? {} : { answers };
-  };
+  // Read from the project before the prompt: a git failure here stops the pass, never holds.
+  const file = station === 2 ? 'spec.md' : station === 3 ? 'plan.md' : undefined;
+  const answers = file === undefined ? [] : ownerAnswers(git, branch, file, keys, mainRef);
+  const changed = station === 5 ? { changed: changedFiles(git, mainRef, branch) } : {};
   let prompt: string;
   try {
     prompt = ctx.stationPrompt(config.factory_release.sha, {
@@ -600,16 +600,17 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
       body: item.issue.body,
       ...(item.branch === undefined ? {} : { itemBranch: item.branch }),
       ...(item.tier === undefined ? {} : { tier: item.tier }),
-      ...(station === 5 ? { changed: changedFiles(git, mainRef, branch) } : {}),
-      ...answersFor(station === 2 ? 'spec.md' : station === 3 ? 'plan.md' : undefined),
+      ...changed,
+      ...(answers.length === 0 ? {} : { answers }),
       ...(station === 7 ? { range: sinceLastDeploy(history, released, mainRef) } : {}),
       ...(failure === undefined ? {} : { failure }),
     });
   } catch (err) {
-    // A release without the station's prompt or commands: this item holds, tried again each pass,
+    // A release that cannot render the station's prompt: this item holds, tried again each pass,
     // alerted once per pin and head, and the pass goes on (T061).
-    if (!(err instanceof RefusedError)) throw err;
-    await held(pass, target, err.message, { urgency: 'info', kind: 'release-incomplete' });
+    if (!(err instanceof ReleaseIncomplete)) throw err;
+    const reason = visible(err.message);
+    await held(pass, target, reason, { urgency: 'info', kind: 'release-incomplete' });
     return undefined;
   }
   let sessionId: string;

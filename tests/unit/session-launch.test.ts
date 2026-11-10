@@ -671,6 +671,50 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(t.sessions()).toEqual([]);
   });
 
+  it('leaves no clone for an item held over three passes, keeping each session folder and its marker (T061)', async () => {
+    const files = Object.fromEntries(
+      Object.entries(GUARDED).filter(([path]) => path !== '.claude/agents/spec.md'),
+    );
+    const t = setup({
+      mainFiles: { '.claude/agents/spec.md': null },
+      release: () => manifestOf(files),
+    });
+    for (let pass = 0; pass < 3; pass++)
+      await expect(t.launch(REQUEST)).rejects.toMatchObject({ item: true });
+
+    expect(readdirSync(join(realpathSync(t.home), 'factory-work', 'owner', 'project'))).toEqual([]);
+    const sessions = readdirSync(join(t.home, '.factory', 'sessions'));
+    expect(sessions).toHaveLength(3);
+    for (const id of sessions)
+      expect(existsSync(join(t.home, '.factory', 'sessions', id, 'not-spawned'))).toBe(true);
+  });
+
+  it('names a clone it could not remove in the refusal, never hiding the refusal (T061)', async () => {
+    let held: string | undefined;
+    const old = fakeRunner(0, echo, '2.1.200');
+    // The clone is made by the time claude --version runs: its folder is made unwritable then.
+    const run: Runner = (program, args, options) => {
+      if (args[0] === '--version') {
+        held = dirname(options.cwd);
+        chmodSync(held, 0o500);
+      }
+      return old.run(program, args, options);
+    };
+    const t = setup({ run });
+    try {
+      const refused = t.launch(REQUEST);
+      await expect(refused).rejects.toThrow(LaunchRefused);
+      await expect(refused).rejects.toThrow(
+        new RegExp(
+          `Claude Code 2\\.1\\.309 or later[^]*; its clone ${work(t.home, '42-add-login')} could not be removed: EACCES`,
+        ),
+      );
+    } finally {
+      if (held !== undefined) chmodSync(held, 0o700);
+    }
+    expect(existsSync(work(t.home, '42-add-login'))).toBe(true);
+  });
+
   it('checks Claude Code as the session would run it, before launch', async () => {
     const t = setup();
     await t.launch(REQUEST);
@@ -2494,7 +2538,8 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       await expect(refused).rejects.toThrow(
         `release v1.0.0 registers the PostToolUse hook factory hook lint, which the installed factory does not serve; ${BRANCH} keeps release v1.0.0 from its merge base until main is merged into it: close the item and file it again`,
       );
-      await expect(refused).rejects.toMatchObject({ urgent: false });
+      // Only this item is refused: it holds, and the pass goes on (T061).
+      await expect(refused).rejects.toMatchObject({ urgent: false, item: true });
       expect(t.sessions()).toEqual([]);
     },
   );

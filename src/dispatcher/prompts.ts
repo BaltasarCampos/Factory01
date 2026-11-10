@@ -15,6 +15,17 @@ import { clean, visible } from '../notify/summary.js';
 export type ReleaseFile = (path: string) => string;
 
 /**
+ * The pinned release cannot render the station's prompt: the clone lacks its commit, or the
+ * release a file or a correct one. Only this holds the item; any other failure stops the pass.
+ */
+export class ReleaseIncomplete extends RefusedError {}
+
+const incorrect = (path: string, why: string) =>
+  new ReleaseIncomplete(
+    `factory/${path}: ${why}; pin a release on main with a correct factory/${path}`,
+  );
+
+/**
  * The release pinned at `sha`, read from git objects in the factory clone, never a checkout. A
  * commit the clone lacks, or a file the release lacks, refuses with its way out; any other git
  * failure is an error, never a missing file (T061).
@@ -33,13 +44,13 @@ export function pinnedRelease(factory: string, sha: string, env = process.env): 
   return (path) => {
     // Exit 1 alone is a commit the clone lacks.
     if (git(['rev-parse', '--verify', '-q', `${sha}^{commit}`], [0, 1]).status === 1)
-      throw new RefusedError(
+      throw new ReleaseIncomplete(
         `the factory clone ${factory} has no commit ${pin}, the release pinned on main: fetch the factory clone`,
       );
     const listed = git(['--literal-pathspecs', 'ls-tree', '-z', sha, '--', `factory/${path}`]).out;
     const oid = /^100(?:644|755) blob ([0-9a-f]+)\t/.exec(listed)?.[1];
     if (oid === undefined)
-      throw new RefusedError(
+      throw new ReleaseIncomplete(
         `the release pinned at ${pin} has no factory/${path}: pin a release on main that has it`,
       );
     return git(['cat-file', 'blob', oid]).out;
@@ -112,14 +123,14 @@ function commandSteps(text: string, input: string, path: string): string {
   const body = text.replace(/^---\n[\s\S]*?\n---\n/, '').replace(/^(#+) /gm, '#$1 ');
   const parts = body.split(INPUT_BLOCK);
   if (parts.some((part) => part.includes('$ARGUMENTS')))
-    throw new RefusedError(`factory/${path}: $ARGUMENTS outside its input block`);
+    throw incorrect(path, '$ARGUMENTS outside its input block');
   return parts.join(fenced(input)).trim();
 }
 
 function fill(template: string, vars: Readonly<Record<string, string>>, path: string): string {
   return template.replace(/\{\{([a-z]+)\}\}/g, (_match, name: string) => {
     const value = vars[name];
-    if (value === undefined) throw new RefusedError(`factory/${path}: no value for {{${name}}}`);
+    if (value === undefined) throw incorrect(path, `no value for {{${name}}}`);
     return value;
   });
 }
