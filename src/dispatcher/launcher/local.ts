@@ -1376,10 +1376,14 @@ export class LocalLauncher implements LocalSessionLauncher {
    * named with its session id: a clone path the Owner once trusted in Claude Code would otherwise
    * load the pinned release's allow rules into a later session.
    */
-  private clone(project: string, repo: string, branch: string, heads: Heads, session: string) {
-    const { home } = this.options;
+  private clonePath(repo: string, branch: string, session: string) {
     const name = branch === 'main' ? 'main' : branch.slice('claude/'.length);
-    const dir = join(realpathSync(home), 'factory-work', ...repo.split('/'), `${name}-${session}`);
+    const home = realpathSync(this.options.home);
+    return join(home, 'factory-work', ...repo.split('/'), `${name}-${session}`);
+  }
+
+  private clone(project: string, dir: string, branch: string, heads: Heads) {
+    const { home } = this.options;
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dirname(dir), { recursive: true });
     this.isolated(home, ['init', '-q', '-b', 'main', dir]);
@@ -1416,6 +1420,8 @@ export class LocalLauncher implements LocalSessionLauncher {
     let at: string | undefined;
     // Its folder, once made, says how it ended, so a later launch never reads a crash as ended.
     let folder: string | undefined;
+    /** Its clone, made for this launch alone. */
+    let clone: string | undefined;
     const ran = { spawned: false, started: false };
     try {
       step('looking for a session still running', () => {
@@ -1436,9 +1442,10 @@ export class LocalLauncher implements LocalSessionLauncher {
         : undefined;
       const files = step("making the session's folder", () => this.sessionFolder());
       folder = dirname(files.record);
-      const cwd = step("making the session's clone", () =>
-        this.clone(request.project, repo, request.branch, heads, files.id),
-      );
+      const cwd = step("making the session's clone", () => {
+        clone = this.clonePath(repo, request.branch, files.id);
+        return this.clone(request.project, clone, request.branch, heads);
+      });
       // Claude Code loads these from every folder above where it runs, whatever the settings say.
       const memory = step('reading the folders above the clone', () =>
         memoryAbove(cwd, realpathSync(this.options.home)),
@@ -1468,8 +1475,15 @@ export class LocalLauncher implements LocalSessionLauncher {
       const settingsPath = join(cwd, SETTINGS);
       const settings = existsSync(settingsPath) ? readFileSync(settingsPath) : undefined;
       const check = guardrailCheck(found, settings, manifest, request.branch, kept);
+      // Hooks the installed factory refuses are this branch's: only it holds (T061). Main's own
+      // pin is refused in `available()`, before any item.
       if (!check.ok)
-        throw new LaunchRefused(`no local session started: ${check.reason}`, check.urgent);
+        throw new LaunchRefused(
+          `no local session started: ${check.reason}`,
+          check.urgent,
+          undefined,
+          check.urgent !== true,
+        );
       const roleFile = join(cwd, '.claude', 'agents', `${request.role}.md`);
       // What the branch's release lacks refuses only this item, with the way out its branch has.
       const lacks = (what: string) =>
@@ -1692,6 +1706,17 @@ export class LocalLauncher implements LocalSessionLauncher {
           writeWhole(join(folder, 'not-spawned'), '');
         } catch {
           // Unwritten, the folder reads as unknown, which stops the next pass naming it.
+        }
+      // Nothing spawned, so nothing needs the clone, and a held item retried every pass would
+      // leave one each time; its session folder and marker stay (T061). A removal that fails is
+      // named in the refusal, never hiding it.
+      if (clone !== undefined && !ran.spawned)
+        try {
+          rmSync(clone, { recursive: true, force: true });
+        } catch (thrown) {
+          const why = visible(thrown instanceof Error ? thrown.message : String(thrown));
+          if (err instanceof Error)
+            err.message += `; its clone ${clone} could not be removed: ${why}`;
         }
       throw err;
     } finally {

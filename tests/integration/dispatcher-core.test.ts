@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { symlinkSync } from 'node:fs';
+import { symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
@@ -22,6 +22,7 @@ import { readState, seedState, type FakeIssue } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, mergeBrief, mergeIntoMain, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
+import { ReleaseIncomplete } from '../../src/dispatcher/prompts.js';
 
 // A pass that admits an item now creates and pushes its branch: more than the default 5 s.
 vi.setConfig({ testTimeout: 60_000 });
@@ -364,7 +365,7 @@ describe('dispatcher core: station prompts (T072)', () => {
     const asked: number[] = [];
     t.ctx.stationPrompt = (pin, facts) => {
       asked.push(facts.issue);
-      if (facts.issue === 2) throw new RefusedError(lacking);
+      if (facts.issue === 2) throw new ReleaseIncomplete(lacking);
       return testPrompts(pin, facts);
     };
 
@@ -383,9 +384,31 @@ describe('dispatcher core: station prompts (T072)', () => {
     ]);
   });
 
+  it('a git failure reading answers.md at Specify rejects the pass and launches nothing, never holding as release-incomplete (T061)', async () => {
+    const t = setup([{ number: 2, approval: 'signed' }]);
+    // A git that fails only on the Owner's answers' history, which only the dispatcher reads here.
+    const dir = tempDir();
+    const real = execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim();
+    const script = `#!/bin/sh\nfor a in "$@"; do [ "$a" = --full-history ] && { echo 'fatal: injected' >&2; exit 128; }; done\nexec ${real} "$@"\n`;
+    writeFileSync(join(dir, 'git'), script, { mode: 0o755 });
+    vi.stubEnv('PATH', `${dir}:${process.env.PATH ?? ''}`);
+    try {
+      await expect(dispatchOnce(t.ctx)).rejects.toThrow(/git rev-list --full-history .* injected/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(t.cloud.launches).toEqual([]);
+    expect(t.inbox().map((c) => c.body)).toEqual([]);
+  });
+
   it.each([
     ['a protected-path change', true, 'urgent kind=tampering'],
     ['no role file', false, 'info kind=launcher-unavailable'],
+    [
+      'a kept release whose hooks the installed factory refuses',
+      false,
+      'info kind=launcher-unavailable',
+    ],
   ] as const)(
     'holds an item the launcher refuses for %s alone, once per head, and starts the next item’s session in the same pass (T061)',
     async (_name, urgent, alert) => {

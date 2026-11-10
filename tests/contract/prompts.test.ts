@@ -3,11 +3,12 @@
 // runs, in order, read from `factory/skills/<command>/SKILL.md`, so it leaves no command for the
 // session to find or call. Every untrusted value sits in a code fence it cannot close (T159).
 import { describe, expect, it } from 'vitest';
-import { EnvironmentError, RefusedError } from '../../src/cli/env.js';
+import { EnvironmentError } from '../../src/cli/env.js';
 import {
   fenced,
   pinnedRelease,
   QUESTIONS_OPEN,
+  ReleaseIncomplete,
   STATION_COMMANDS,
   stationPrompt,
   type PromptFacts,
@@ -188,13 +189,21 @@ describe('station prompts (T072)', () => {
   it('refuses a command that takes $ARGUMENTS outside its input block', () => {
     const loose: ReleaseFile = (path) =>
       path.startsWith('skills/') ? `${release(path)}\nAlso see $ARGUMENTS.\n` : release(path);
-    expect(() => stationPrompt(loose, ITEM)).toThrow(/\$ARGUMENTS outside its input block/);
+    const render = () => stationPrompt(loose, ITEM);
+    expect(render).toThrow(ReleaseIncomplete);
+    expect(render).toThrow(
+      'factory/skills/speckit-specify/SKILL.md: $ARGUMENTS outside its input block; pin a release on main with a correct factory/skills/speckit-specify/SKILL.md',
+    );
   });
 
   it('refuses a template naming a placeholder it has no value for, or a missing file', () => {
     const broken: ReleaseFile = (path) =>
       path.startsWith('prompts/') ? 'Station 6 for {{nobody}}.\n' : release(path);
-    expect(() => stationPrompt(broken, { ...ITEM, station: 6 })).toThrow(/\{\{nobody\}\}/);
+    const six = () => stationPrompt(broken, { ...ITEM, station: 6 });
+    expect(six).toThrow(ReleaseIncomplete);
+    expect(six).toThrow(
+      'factory/prompts/station-6-integrate.md: no value for {{nobody}}; pin a release on main with a correct factory/prompts/station-6-integrate.md',
+    );
     const missing: ReleaseFile = () => {
       throw new Error('no such file');
     };
@@ -263,7 +272,7 @@ describe('the pinned release, read from the factory clone (T061)', () => {
     expect(read('prompts/station-1-intake.md')).toBe('Intake.\n');
 
     const file = () => read('prompts/station-2-specify.md');
-    expect(file).toThrow(RefusedError);
+    expect(file).toThrow(ReleaseIncomplete);
     expect(file).toThrow(
       `the release pinned at ${pin.slice(0, 12)} has no factory/prompts/station-2-specify.md: pin a release on main that has it`,
     );
