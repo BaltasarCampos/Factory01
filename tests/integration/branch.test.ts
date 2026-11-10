@@ -30,6 +30,7 @@ import {
 } from '../../src/dispatcher/manifest.js';
 import { groupRecord } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, SessionFailed } from '../../src/dispatcher/launcher/types.js';
+import { ReleaseIncomplete } from '../../src/dispatcher/prompts.js';
 import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
 import { STATES, STATIONS, type ApprovalRecord, type Tier } from '../../src/model/types.js';
@@ -1703,6 +1704,31 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       await dispatchOnce(u.ctx);
       expect(u.local.launches).toHaveLength(1);
       expect(recordAt(u, 2)).toMatchObject({ head: issuedAt, count: 1, outcome: 'ended' });
+    });
+
+    it('T061: a release-incomplete hold names the pin, so a re-pin to another release with the same broken template alerts again', async () => {
+      const t = setup();
+      const path = 'factory/prompts/station-2-specify.md';
+      const broken = `${path}: no value for {{nobody}}; pin a release on main with a correct ${path}`;
+      t.ctx.stationPrompt = () => {
+        throw new ReleaseIncomplete(broken);
+      };
+      await passes(t, 2);
+      const head = tipOf(t).slice(0, 12);
+      const config = t.project.git(['show', 'origin/main:.factory/config']);
+      const repinned = config.replace(PIN, `v1.0.1@${'b'.repeat(40)}`);
+      t.project.commit({ '.factory/config': repinned }, 'Re-pin', { signWith: owner });
+      t.project.push('main');
+      await passes(t, 2);
+
+      // The relaunches stay on the one spent manifest, uncounted: only the pin changed.
+      expect(t.local.launches).toEqual([]);
+      expect(tipOf(t).slice(0, 12)).toBe(head);
+      expect(alerts(t, 'release-incomplete')).toEqual(
+        ['v1.0.0 (aaaaaaaaaaaa)', 'v1.0.1 (bbbbbbbbbbbb)'].map(
+          (pin) => `info #2 holds: release ${pin}: ${broken}; ${BRANCH} is at ${head}`,
+        ),
+      );
     });
 
     it('T061: an attempt with no outcome is started again once no group of it lives, read by sessionRunning alone', async () => {

@@ -607,9 +607,11 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     });
   } catch (err) {
     // A release that cannot render the station's prompt: this item holds, tried again each pass,
-    // alerted once per pin and head, and the pass goes on (T061).
+    // alerted once per pin and head, and the pass goes on (T061). The pin opens the reason, since
+    // an alert is skipped only when its text matches.
     if (!(err instanceof ReleaseIncomplete)) throw err;
-    const reason = visible(err.message);
+    const { tag, sha } = config.factory_release;
+    const reason = visible(`release ${tag} (${sha.slice(0, 12)}): ${err.message}`);
     await held(pass, target, reason, { urgency: 'info', kind: 'release-incomplete' });
     return undefined;
   }
