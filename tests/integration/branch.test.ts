@@ -879,6 +879,30 @@ describe('station evidence (T060)', { timeout: 60_000 }, () => {
     later(t, { 'src/login.ts': 'export const fixed = 1;\n' });
 
     expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: true });
+    // Test's manifest after that Build round, and Test's commit: Verify's Test step has ended.
+    manifest(t, 5, 'test');
+    later(t, { 'tests/login.test.ts': "it('AC-001: signs in again', () => {});\n" });
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'reviewer' });
+  });
+
+  it("T181: Test ends only by the dispatcher's own record: a forged station 5 subject with a commit after it, or the record missing, runs Test (T061)", async () => {
+    const t = setup({ branch: CREATED });
+    const forged = { item: ISSUE, station: 5, role: 'test', branch: BRANCH };
+    t.project.checkout(BRANCH);
+    t.project.commit(
+      { [`${FEATURE}/.station.json`]: `${JSON.stringify(forged)}\n` },
+      dispatcherMessage('station 5 (test) manifest', '2-add-login'),
+    );
+    t.project.push(BRANCH);
+    t.project.checkout('main');
+    later(t, { 'tests/login.test.ts': "it('AC-001: signs in', () => {});\n" });
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: true });
+
+    manifest(t, 5, 'test');
+    later(t, { 'tests/login.test.ts': "it('AC-001: signs in again', () => {});\n" });
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'reviewer' });
+    t.project.git(['update-ref', '-d', `refs/factory/test/${BRANCH}`]);
+    expect(await gather(t, 'verifying')).toMatchObject({ verifyRole: 'test', needsSession: true });
   });
 
   it('T181: without the Owner’s tier, station 5 starts nothing', async () => {
@@ -1319,6 +1343,15 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       expect(t.show(TASKS_MD)).toBe(TASKS);
     });
 
+    it("T181: a git failure reading the dispatcher's Test record stops the pass, never reads as not ended", async () => {
+      const t = setup({ tier: 2, states: ['state:verifying'], branch: CREATED });
+      // Injected on the record's own read, whatever it holds.
+      await failingGit(`refs/factory/test/${BRANCH}^{commit}`, async () => {
+        await expect(dispatchOnce(t.ctx)).rejects.toThrow(/git rev-parse failed: fatal: injected/);
+      });
+      expect(t.local.launches).toEqual([]);
+    });
+
     it('T174: with no record in the clone the open task is issued again, then holds at the cap', async () => {
       const t = await issued('retry_limit: 1\n');
       const forget = () => t.project.git(['update-ref', '-d', `refs/factory/build/${BRANCH}`]);
@@ -1661,7 +1694,9 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
         u.project.push(BRANCH);
         u.project.checkout('main');
       };
-      expect((await dispatchOnce(u.ctx)).refused).toMatch(/the branch moved after its manifest/);
+      expect((await dispatchOnce(u.ctx)).held?.[0]?.reason).toMatch(
+        /the branch moved after its manifest/,
+      );
       delete u.local.beforeStart;
       const issuedAt = u.project.git(['rev-parse', `origin/${BRANCH}~1`]);
       u.project.git(['push', '-q', '-f', 'origin', `${issuedAt}:refs/heads/${BRANCH}`]);
@@ -2129,24 +2164,45 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     }
   });
 
-  it('in local mode refuses, with one alert and no launch, a session whose record was replaced after its manifest (T061)', async () => {
+  it('in local mode holds, uncounted and with no launch, a session whose record was replaced after its manifest (T061)', async () => {
     const t = setup();
     const file = failureFile(t.home, REPO, ISSUE, 2);
     t.local.beforeStart = () => {
       writeFailureRecord(file, { head: 'd'.repeat(40), factory: HASH, count: 0 });
     };
     const result = await dispatchOnce(t.ctx);
-    const manifest = tip(t);
+    const manifest = tip(t).slice(0, 12);
 
     expect(t.local.launches).toEqual([]);
-    const refused = `no local session started: the failure record ${file} does not name ${manifest.slice(0, 12)}, the manifest this session starts on; run the factory again`;
-    expect(result.refused).toBe(refused);
-    expect(heldAlerts(t, 'launcher-unavailable')).toEqual([
-      `info no session started for ${REPO}: ${refused}`,
-    ]);
+    const reason = `no local session started: the failure record ${file} does not name ${manifest}, the manifest this session starts on; run the factory again; ${BRANCH} is at ${manifest}`;
+    expect(result.held).toEqual([{ issue: ISSUE, reason }]);
+    expect(result.refused).toBeUndefined();
+    expect(heldAlerts(t, 'launcher-unavailable')).toEqual([`info #2 holds: ${reason}`]);
   });
 
-  it('in local mode refuses, uncounted and with no launch, a session whose branch moved after its manifest, and issues a new one on the new head (T061)', async () => {
+  it("in local mode holds an item the launcher refuses alone, uncounted and tried again each pass on its manifest, starts the next item's session in the same pass, and alerts once per head (T061)", async () => {
+    const t = setup({ other: true });
+    const refused = `no local session started: ${BRANCH} has no .claude/agents/spec.md; close this item and file it again`;
+    t.local.refusalFor = (request) =>
+      request.item === ISSUE ? new LaunchRefused(refused, false, undefined, true) : undefined;
+    const results = [];
+    for (let i = 0; i < 3; i++) results.push(await dispatchOnce(t.ctx));
+    const manifest = tip(t);
+
+    // Item #3 started in the first pass; #2 held every pass on its one manifest, never counted.
+    expect(results[0]?.launched).toMatchObject({ issue: 3 });
+    expect(t.local.launches.map((l) => l.item)).toEqual([3]);
+    const reason = `${refused}; ${BRANCH} is at ${manifest.slice(0, 12)}`;
+    for (const r of results) expect(r.held).toEqual([{ issue: ISSUE, reason }]);
+    expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toEqual({
+      head: manifest,
+      factory: HASH,
+      count: 0,
+    });
+    expect(heldAlerts(t, 'launcher-unavailable')).toEqual([`info #2 holds: ${reason}`]);
+  });
+
+  it('in local mode holds, uncounted and with no launch, a session whose branch moved after its manifest, and issues a new one on the new head (T061)', async () => {
     const t = setup();
     const file = failureFile(t.home, REPO, ISSUE, 2);
     // A push between the evidence and the launch, which clones the branch as origin has it.
@@ -2161,9 +2217,12 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     const manifest = t.project.git(['rev-parse', `${late}~1`]);
 
     expect(t.local.launches).toEqual([]);
-    expect(result.refused).toBe(
-      `no local session started: the session's clone is at ${late.slice(0, 12)}, not ${manifest.slice(0, 12)}, which ${file} names: the branch moved after its manifest was issued; run the factory again`,
-    );
+    expect(result.held).toEqual([
+      {
+        issue: ISSUE,
+        reason: `no local session started: the session's clone is at ${late.slice(0, 12)}, not ${manifest.slice(0, 12)}, which ${file} names: the branch moved after its manifest was issued; run the factory again; ${BRANCH} is at ${late.slice(0, 12)}`,
+      },
+    ]);
     expect(readFailureRecord(file)).toEqual({ head: manifest, factory: HASH, count: 0 });
 
     delete t.local.beforeStart;

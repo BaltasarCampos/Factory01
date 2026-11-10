@@ -16,6 +16,7 @@ import {
   featureOf,
   fetchBranch,
   git,
+  gitAnswer,
   type BranchContext,
   type ItemRef,
 } from './branch.js';
@@ -26,6 +27,8 @@ const MAX_MANIFEST = 64 * 1024;
 
 /** Where the dispatcher's clone records the Build manifest commit it last pushed to `branch`. */
 export const issuedRef = (branch: string) => `refs/factory/build/${branch}`;
+/** Where it records the Test manifest commit it last pushed to `branch` (T181). */
+export const testRef = (branch: string) => `refs/factory/test/${branch}`;
 
 /** The manifest at `commit`: undefined when it is missing or not a JSON object; git failing throws. */
 function manifestAt(ctx: BranchContext, commit: string, path: string) {
@@ -146,17 +149,21 @@ export const pendingStation = (ctx: BranchContext, tip: string, dir: string | un
 };
 
 /**
- * Whether Verify's Test session has ended since the last Build round (T181): on the branch's
- * first-parent history since main, its station 5 manifest is followed by a later commit, with no
- * Build manifest after it.
+ * Whether Verify's Test session has ended since the last Build round (T181), from the dispatcher's
+ * own records alone, never a commit subject a session could write: the Test manifest it last
+ * pushed is in `tip`'s history and is not `tip`, and the Build manifest it last pushed, if any, is
+ * an ancestor of it. A missing record reads as not ended, so Test runs once more; only git's exit 1
+ * is an answer, and any other failure stops the pass.
  */
-export function testEnded(ctx: BranchContext, tip: string, mainRef = 'origin/main'): boolean {
-  const log = git(ctx, ['log', '--first-parent', '--format=%s', `${mainRef}..${tip}`]);
-  for (const [i, subject] of log.split('\n').entries()) {
-    if (subject.startsWith('Dispatcher: station 4 (')) return false;
-    if (subject === 'Dispatcher: station 5 (test) manifest') return i > 0;
-  }
-  return false;
+export function testEnded(ctx: BranchContext, branch: string, tip: string): boolean {
+  const issued = (ref: string) =>
+    gitAnswer(ctx, ['rev-parse', '--verify', '-q', `${ref}^{commit}`]);
+  const before = (a: string, b: string) =>
+    gitAnswer(ctx, ['merge-base', '--is-ancestor', a, b]) !== undefined;
+  const test = issued(testRef(branch));
+  if (test === undefined || test === tip || !before(test, tip)) return false;
+  const build = issued(issuedRef(branch));
+  return build === undefined || before(build, test);
 }
 
 /**
@@ -200,7 +207,10 @@ export function writeStationManifest(
   const sha = commitAndPush(ctx, tip, files, message, item.branch, (made) => {
     issued?.(made, tip);
   });
+  // Recorded only once the push succeeded, so a record never names a commit the branch lacks.
   if (session.station === 4) git(ctx, ['update-ref', issuedRef(item.branch), sha]);
+  if (session.station === 5 && session.role === 'test')
+    git(ctx, ['update-ref', testRef(item.branch), sha]);
   fetchBranch(ctx, item.branch);
   return manifest;
 }

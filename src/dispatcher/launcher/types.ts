@@ -66,17 +66,21 @@ export interface Launchers {
 /**
  * A launch the launcher refused; `urgent` when the branch's guardrail files were tampered with,
  * or `kind` names another urgent alert, such as a session still running. `head` is the branch's
- * head it was refused at, once fetched, so a refusal that repeats alerts once per head.
+ * head it was refused at, once fetched, so a refusal that repeats alerts once per head. `item`
+ * when only this item is refused, by its branch or its failure record: the item holds and the
+ * pass goes on to the next one (T061).
  */
 export class LaunchRefused extends RefusedError {
   readonly urgent: boolean;
   readonly kind?: string;
+  readonly item: boolean;
   head?: string;
 
-  constructor(message: string, urgent = false, kind?: string) {
+  constructor(message: string, urgent = false, kind?: string, item = false) {
     super(message);
     this.urgent = urgent;
     if (kind !== undefined) this.kind = kind;
+    this.item = item;
   }
 }
 

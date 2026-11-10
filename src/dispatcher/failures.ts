@@ -31,7 +31,10 @@ export interface FailureRecord {
   last?: string;
   /** How the last attempt that settled ended; none while one runs. */
   outcome?: 'failed' | 'ended';
-  /** Whether that failed attempt's context was full; null when unknown. */
+  /**
+   * For that failed attempt, true or null only: true when its context was full, null covering
+   * both not full and unknown.
+   */
   context_full?: boolean | null;
   /** The id of the last session started at `head`, whose group tells whether it still runs. */
   session?: string;

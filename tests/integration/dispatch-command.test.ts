@@ -466,9 +466,10 @@ describe('local sessions wait for the guards (slice 28)', { timeout: 60_000 }, (
     await t.cli(['dispatch'], { launchers: { local } });
 
     expect(r.code).toBe(0);
-    // The launcher's history check finds it first: the branch's own commits change the hooks.
+    // The launcher's history check finds it first: the branch's own commits change the hooks,
+    // which holds this item alone (T061).
     expect(r.stdout).toMatch(
-      /no session started: .*claude\/2-add-login's own commits change \.claude\/settings\.json/,
+      /#2 holds: no local session started: claude\/2-add-login's own commits change \.claude\/settings\.json: a protected path, which no item or Define pull request may change; close this item and file it again; claude\/2-add-login is at [0-9a-f]{12}/,
     );
     expect(t.sessions.filter((s) => s.args[0] === '-p')).toEqual([]);
     expect(t.inbox()).toHaveLength(1);

@@ -1,6 +1,7 @@
 // Fake session launcher: records every launch instead of starting a Claude Code session.
 // Mirrors the `SessionLauncher` interface of src/dispatcher/launcher/types.ts (T037), and refuses
-// as the local launcher does when `starting` throws: a `LaunchRefused`, with nothing launched.
+// as the local launcher does when `starting` throws: a `LaunchRefused` for that item alone, with
+// nothing launched.
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -34,6 +35,8 @@ export class FakeLauncher {
   failure?: Error;
   /** What every launch throws before `starting`, as the local launcher's checks refuse. */
   refusal?: LaunchRefused;
+  /** What a launch for one request throws before `starting`, such as an item's own refusal. */
+  refusalFor?: (request: LaunchRequest) => LaunchRefused | undefined;
   /** Runs before `starting`, as anything else may between the manifest's issue and the start. */
   beforeStart?: () => void;
   /** Runs once `starting` has passed, as anything may while the session runs. */
@@ -66,7 +69,8 @@ export class FakeLauncher {
 
   launch(request: LaunchRequest): Promise<{ sessionId: string }> {
     if (!this.isAvailable) return Promise.reject(new Error(`${this.mode} launcher unavailable`));
-    if (this.refusal !== undefined) return Promise.reject(this.refusal);
+    const refusal = this.refusal ?? this.refusalFor?.(request);
+    if (refusal !== undefined) return Promise.reject(refusal);
     const sessionId = `fake-${this.mode}-${String(this.launches.length + 1)}`;
     this.beforeStart?.();
     try {
@@ -78,7 +82,8 @@ export class FakeLauncher {
       }
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
-      return Promise.reject(new LaunchRefused(`no local session started: ${visible(why)}`));
+      const message = `no local session started: ${visible(why)}`;
+      return Promise.reject(new LaunchRefused(message, false, undefined, true));
     }
     this.launches.push({ ...request, mode: this.mode, sessionId });
     this.afterStart?.();

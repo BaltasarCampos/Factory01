@@ -1,14 +1,14 @@
 # Contract: local sessions
 
 The lifecycle of a session the local launcher starts (`agents: local` in main's `.factory/config`,
-T061), as the code on main stands after slice 28-4c-4b-3b-2b-2b. Every slice that changes it keeps
+T061), as the code on main stands after slice 28-4c-4b-3c-1. Every slice that changes it keeps
 this page current in its notes commit. Code: `src/dispatcher/failures.ts`, `evidence.ts`
-(`tipState`, `spentTip`), `dispatch.ts` (`startSession`, `hold`), `manifest.ts`,
+(`tipState`, `spentTip`), `dispatch.ts` (`startSession`, `held`, `hold`), `manifest.ts` (`testEnded`),
 `launcher/local.ts` (`launch`, `sessionRunning`, `stillRunning`), `src/commands/run.ts`.
 
 `R` is `retry_limit` from main's `.factory/config`, a positive integer, 3 by default. Stations
 2–6 are the item-branch stations, the ones this lifecycle counts; Intake (1) is counted from slice
-28-4c-4b-3c, Define (0) is started by hand through `factory new` and `factory adopt`, and Release
+28-4c-4b-3c-2, Define (0) is started by hand through `factory new` and `factory adopt`, and Release
 and Ops start no session yet. Cloud mode keeps T059's rule: a tip that is a dispatcher manifest for the
 item's station is a session still running, and nothing relaunches.
 
@@ -32,6 +32,7 @@ No session can reach `~/.factory/` (T183).
 | `/tmp/factory-<item>-<random>/`, the session's temporary folder | Launcher, before the session's environment, which names it as `TMPDIR` | `mkdtemp` | The launcher, at the end of the launch; not when the factory exits on a signal |
 | `~/.factory/failures/<owner>/<repo>/<item>-<station>.json`, the failure record | Dispatcher: `recordIssued` before a new manifest's push; `recordSession`, the `starting()` callback the launcher calls just before the spawn; `recordOutcome` after the launch returns | A `wx` 0600 temporary file renamed into place, folder 0700, checked with the reader's own checks first: a reader sees the old record or the new, never half | Never by the factory; `recordIssued` replaces it at a new manifest. The Owner, to start the count again |
 | `refs/factory/build/<branch>`, the issued ref | Dispatcher, in its own clone, after a Build manifest's push succeeds | `git update-ref` | Never by the factory. The Owner restores it with the command a `manifest-held` alert names |
+| `refs/factory/test/<branch>`, the Test ref | Dispatcher, in its own clone, after a Test manifest's push succeeds (T181) | `git update-ref` | Never by the factory. Verify's Test session has ended only when this commit is in the tip's history, is not the tip, and the issued ref, if any, is its ancestor, never by a commit subject; missing or older, Test runs once more; a git failure reading it, other than exit 1, stops the pass |
 
 The record's repo is exactly `owner/name` in GitHub's name characters, neither part `.` or `..`,
 both lower-cased; any other is an error. Its fields, and nothing else:
@@ -65,7 +66,7 @@ stops the pass, naming it.
 | 4 | yes | yes | any | any | Error naming the folder: stops the pass |
 | 5 | — | — | yes | any | Ended: the run returned (only the tests' fake runner gets here) |
 | 6 | — | — | — | no | Ended: never counted, never spawned |
-| 7 | — | — | — | yes | Unknown (`SessionUnknown`): stops the pass, naming the session id, the `ps` check and removing the folder |
+| 7 | — | — | — | yes | Unknown (`SessionUnknown`): stops the pass, naming the session id, both causes (a stop after `session.json` is written, before claude spawns, or after it spawns, before `group.json`), the `ps` check and removing the folder |
 
 No folder at all reads as ended. Running, to the evidence, makes the tip running; to the launcher,
 it refuses the launch with an urgent `session-running` alert naming the group and how to stop it.
@@ -107,20 +108,23 @@ rebuilt as for a first attempt.
 | 4a | New: `writeStationManifest` makes the commit on the fetched tip; `recordIssued` reads the record, refuses when it names that tip (`StackRefused`), else writes count 0 at the new commit | Refused: nothing pushed, the item held. Write or hash failure: nothing pushed, the pass throws | Refused: held again, alerted once. Failure: the same tip, new |
 | 4b | The push, fast-forward only; at Build `update-ref` of the issued ref | Before the push: a record naming an unpushed commit; a rejected push the same, and the pass throws. After the push, before `update-ref`: the manifest at the tip, the ref older | The old tip, new: a new manifest, its record replacing. The manifest spent with count 0: relaunched. At Build the older ref only steers the round: the open task may be issued again, counted in Build's cap |
 | 4c | Relaunch: no commit; the attempt is on the record's head | Nothing | The same |
-| 5 | The prompt rendered from the pinned release | Refused (`release-incomplete`): no session, and the pass ends | Spent, count unchanged: tried again, alerted once |
-| 6 | Launcher: the request (session branch, feature folder, a `starting()` at stations 2–6), the still-running scan, the fetch of main and the branch, the history and guardrail checks, config, gh token | Refused (`LaunchRefused`) or an error; no folder | Not counted: tried again. A refusal alerts once per branch head, or once per text before the fetch, and ends the pass; an error throws the pass |
+| 5 | The prompt rendered from the pinned release, read from the factory clone | Refused (`release-incomplete`) when the clone lacks the pinned commit or the release the file: no session, the item holds and the pass goes on. Any other git failure: an error, and the pass throws | Spent, count unchanged: tried again, alerted once per pin and head |
+| 6 | Launcher: the request (session branch, feature folder, a `starting()` at stations 2–6), the still-running scan, the fetch of main and the branch, the history and guardrail checks, config, gh token | Refused (`LaunchRefused`) or an error; no folder | Not counted: tried again. A refusal tied to the item, a protected path in the branch's own commits, no role file or no allowed model, holds it, once per branch head, and the pass goes on; any other refusal alerts once per branch head, or once per text before the fetch, and ends the pass; an error throws the pass |
 | 7 | The session folder, the clone at the fetched head, the clone's checks, environment, PATH, shell check, `claude --version` | Refused or an error, `not-spawned` written; a crash: a folder with no `session.json` | Row 3 or 6: ended. Not counted |
 | 8 | `settings.json`, `mcp.json`, `session.json` | A crash after `session.json`: no marker | Row 7: unknown, every pass stops until the Owner removes the folder; never counted |
-| 9 | `starting(id, head)` → `recordSession`: the record must name the manifest and the clone must be at it, else refused; the count + 1 (from 0 under a new hash) and the id, by rename. A record that cannot be read or written refuses too: an info `LaunchRefused`, never a thrown pass | Refused, `not-spawned`, the record unchanged, and the pass ends; a crash after the write: counted, no marker | Refused: not counted; a moved branch reads as a new head. Crash: row 7 until removed, then spent with no outcome: relaunched, the attempt counted |
+| 9 | `starting(id, head)` → `recordSession`: the record must name the manifest and the clone must be at it, else refused; the count + 1 (from 0 under a new hash) and the id, by rename. A record that cannot be read or written refuses too: an info `LaunchRefused`, never a thrown pass | Refused, `not-spawned`, the record unchanged; the item holds and the pass goes on; a crash after the write: counted, no marker | Refused: not counted; a moved branch reads as a new head. Crash: row 7 until removed, then spent with no outcome: relaunched, the attempt counted |
 | 10 | claude spawned in its own process group; `group.json` | Spawn failure: counted, `not-spawned`, the pass throws. A crash: `group.json` alone | Spawn failure: spent, no outcome, relaunched. Crash: running while the group lives, then spent, relaunched |
 | 11 | The session, under its turn, wall-clock and silence caps | — | — |
 | 12 | Settle: `ended` once the group is gone, `context_full` from the log, `result.json` | A group still alive: no `ended` | Row 2: running until it goes |
 | 13 | `recordOutcome`: a failure (`SessionFailed`, `SessionCapped`) keeps `last` and `context_full`; a success records `ended` | A failure alerted; a failure to record it is named in that alert and throws. A crash, or a failed `ended` write: no outcome | Failed: hold or relaunch. No outcome: spent, relaunched, one more counted session even after one that ended well |
 
-A `LaunchRefused`, a prompt refusal and a failed session each end the pass: `startSession` returns,
-and `dispatchOnce` returns from its target loop, so no later item is tried that pass, until 3c
-makes a refusal tied to one item a hold. Only a hold (`StackRefused`, or a spent tip's hold read
-with the evidence) lets the pass go on to the next target.
+A hold lets the pass go on to the next target: a `StackRefused`, a spent tip's hold read with the
+evidence, a prompt refusal, and a `LaunchRefused` tied to one item (`item`: a protected path in the
+branch's own commits, no role file, no allowed model, `recordSession`'s refusals). A held item is
+alerted once per head, the head the launcher refused at or else the branch's as fetched (main's for
+Intake), and tried again each pass, uncounted. Any other `LaunchRefused`, one that hits every item,
+and a failed session end the pass: `startSession` returns, and `dispatchOnce` returns from its
+target loop, so no later item is tried that pass.
 
 A new head (anyone's commit at the tip), a newly installed factory hash or a deleted record ends
 the count: a new head or a deleted record gets a new manifest, one commit per reset; a new hash
@@ -144,8 +148,9 @@ reads count 0 and relaunches on the same commit, though a `context-full` hold st
 Every alert below is posted once per kind and text, against the inbox's posted alerts, so "once
 per" is what the text holds. Not every text carries `#<issue>`: the holds start with it, a failed
 session names `<repo>#<issue>`, and a refusal names the repository and, after the fetch, the
-branch and its head, but no issue. A refusal ends the pass: no later item is tried that pass, until
-3c.
+branch and its head, but no issue. A refusal tied to one item holds it, alerted as `#<issue>
+holds: <refusal>; <branch> is at <head>`, keeping the refusal's kind and urgency, and the pass goes
+on; any other refusal ends the pass.
 
 | Kind | Urgency | Raised when | Once per | Way out it names |
 |---|---|---|---|---|
@@ -155,8 +160,8 @@ branch and its head, but no issue. A refusal ends the pass: no later item is tri
 | `manifest-held` | info | `recordIssued` refuses a manifest on the record's own spent one | Parent head; at Build, the issued ref's state | Delete the record; at Build also `git -C <the dispatcher's clone> update-ref refs/factory/build/<branch> <sha>` when the ref is missing or elsewhere |
 | `session-failed`, `session-capped` | info, urgent for an urgent failure | A session that spawned failed or hit a cap; nothing of it is pushed | Its text: role, item, failure | The failure's own; the item relaunches or holds as above |
 | `session-running` | urgent | The still-running scan finds a live group | Session and group | `kill -TERM -<pgid>` if no factory runs it, then run again. The pass ends there |
-| `launcher-unavailable`, `tampering` | info, urgent | A `LaunchRefused` with no kind of its own, `recordSession`'s refusals included; `available()`'s refusals too, unless they carry a kind of their own | Text and branch head; a refusal before the fetch carries no head, so once per text | Its own: run the factory again for a moved branch. The pass ends there |
-| `release-incomplete` | info | The pinned release lacks the station's prompt or commands | Text | None named: the text names the missing file. The pass ends there: no later item is tried that pass, until 3c |
+| `launcher-unavailable`, `tampering` | info, urgent | A `LaunchRefused` with no kind of its own, `recordSession`'s refusals included; `available()`'s refusals too, unless they carry a kind of their own | Text and branch head; a refusal before the fetch carries no head, so once per text | Its own: run the factory again for a moved branch; for a protected path in the branch's own commits, or a role file or model the branch's release lacks, close the item and file it again (on main: re-pin main to a release that has it). A refusal tied to one item holds it; any other ends the pass |
+| `release-incomplete` | info | The factory clone lacks the pinned commit, or the release lacks the station's prompt or commands | The pin and the head | Fetch the factory clone, or pin a release on main that has the file. The item holds and the pass goes on |
 | `pass-threw` | urgent | `factory run`'s pass throws: a bad record or `group.json` read with the evidence, rows 4 and 7, a record `recordIssued` cannot write, no hash, a spawn failure, an unrecorded outcome | Main's head, the error's kind and first line, with no temporary path, id (but row 7's), pid or time | The error's own: delete the record, remove the folder after `ps`, reinstall the release, free the disk |
 | `checks-unreadable` | info | CI's `build-test` at the Builder's head, or Verify's required checks, cannot be read | Head and reason | None but waiting: the item waits until they can be read |
 | `build-failed` | info | Build's cap, or a conflict git does not find | Head and task | Close the item and file it again, until T096 |

@@ -6,7 +6,7 @@
 // send the same text. Placeholders are filled in one pass, so text from the issue is never
 // expanded again, and every untrusted value goes in a code fence it cannot close.
 import { spawnSync } from 'node:child_process';
-import { RefusedError } from '../cli/env.js';
+import { EnvironmentError, RefusedError } from '../cli/env.js';
 import { branchFeatureDir } from '../model/naming.js';
 import type { Station, Tier } from '../model/types.js';
 import { clean, visible } from '../notify/summary.js';
@@ -14,17 +14,35 @@ import { clean, visible } from '../notify/summary.js';
 /** A file of the release, by its path under `factory/`. */
 export type ReleaseFile = (path: string) => string;
 
-/** The release pinned at `sha`, read from git objects in the factory clone, never a checkout. */
+/**
+ * The release pinned at `sha`, read from git objects in the factory clone, never a checkout. A
+ * commit the clone lacks, or a file the release lacks, refuses with its way out; any other git
+ * failure is an error, never a missing file (T061).
+ */
 export function pinnedRelease(factory: string, sha: string, env = process.env): ReleaseFile {
+  const git = (args: readonly string[], ok: readonly number[] = [0]) => {
+    const r = spawnSync('git', args, { cwd: factory, env, encoding: 'utf8' });
+    if (r.error === undefined && r.status !== null && ok.includes(r.status))
+      return { status: r.status, out: r.stdout };
+    const why = r.error?.message ?? (r.stderr.trim().split('\n')[0] || `exit ${String(r.status)}`);
+    throw new EnvironmentError(
+      `git ${args.join(' ')} failed in the factory clone ${factory}: ${visible(why)}`,
+    );
+  };
+  const pin = sha.slice(0, 12);
   return (path) => {
-    const shown = spawnSync('git', ['show', `${sha}:factory/${path}`], {
-      cwd: factory,
-      env,
-      encoding: 'utf8',
-    });
-    if (shown.error !== undefined || shown.status !== 0)
-      throw new RefusedError(`the release pinned at ${sha.slice(0, 12)} has no factory/${path}`);
-    return shown.stdout;
+    // Exit 1 alone is a commit the clone lacks.
+    if (git(['rev-parse', '--verify', '-q', `${sha}^{commit}`], [0, 1]).status === 1)
+      throw new RefusedError(
+        `the factory clone ${factory} has no commit ${pin}, the release pinned on main: fetch the factory clone`,
+      );
+    const listed = git(['--literal-pathspecs', 'ls-tree', '-z', sha, '--', `factory/${path}`]).out;
+    const oid = /^100(?:644|755) blob ([0-9a-f]+)\t/.exec(listed)?.[1];
+    if (oid === undefined)
+      throw new RefusedError(
+        `the release pinned at ${pin} has no factory/${path}: pin a release on main that has it`,
+      );
+    return git(['cat-file', 'blob', oid]).out;
   };
 }
 

@@ -3,8 +3,10 @@
 // runs, in order, read from `factory/skills/<command>/SKILL.md`, so it leaves no command for the
 // session to find or call. Every untrusted value sits in a code fence it cannot close (T159).
 import { describe, expect, it } from 'vitest';
+import { EnvironmentError, RefusedError } from '../../src/cli/env.js';
 import {
   fenced,
+  pinnedRelease,
   QUESTIONS_OPEN,
   STATION_COMMANDS,
   stationPrompt,
@@ -12,6 +14,7 @@ import {
   type ReleaseFile,
 } from '../../src/dispatcher/prompts.js';
 import type { Station } from '../../src/model/types.js';
+import { gitEnv, makeRepo } from '../helpers/git-repo.js';
 import { workingRelease as release } from '../helpers/release.js';
 
 const ITEM: PromptFacts = {
@@ -249,5 +252,29 @@ describe('untrusted text in the station prompts (T159)', () => {
   it('keeps a title cleaned and on one line', () => {
     const text = render(1, { title: 'Add\nlogin\u202e\r\n```' });
     expect(text).toContain('````text\n#42 Add login ```\n````');
+  });
+});
+
+describe('the pinned release, read from the factory clone (T061)', () => {
+  it('names the way out of a missing commit or file, and stops on any other git failure', () => {
+    const clone = makeRepo({ files: { 'factory/prompts/station-1-intake.md': 'Intake.\n' } });
+    const pin = clone.revParse('HEAD');
+    const read = pinnedRelease(clone.path, pin, gitEnv);
+    expect(read('prompts/station-1-intake.md')).toBe('Intake.\n');
+
+    const file = () => read('prompts/station-2-specify.md');
+    expect(file).toThrow(RefusedError);
+    expect(file).toThrow(
+      `the release pinned at ${pin.slice(0, 12)} has no factory/prompts/station-2-specify.md: pin a release on main that has it`,
+    );
+    const lost = () => pinnedRelease(clone.path, 'e'.repeat(40), gitEnv)('prompts/x.md');
+    expect(lost).toThrow(
+      `the factory clone ${clone.path} has no commit eeeeeeeeeeee, the release pinned on main: fetch the factory clone`,
+    );
+
+    // git that cannot run is never a missing file: the pass stops.
+    const broken = () => pinnedRelease(clone.path, pin, { ...gitEnv, PATH: '' })('prompts/x.md');
+    expect(broken).toThrow(EnvironmentError);
+    expect(broken).toThrow(/^git rev-parse --verify -q \S+ failed in the factory clone /);
   });
 });
