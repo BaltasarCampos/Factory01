@@ -606,9 +606,11 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
       ...(failure === undefined ? {} : { failure }),
     });
   } catch (err) {
-    // A release without the station's prompt or commands: no session, until the pin moves.
+    // A release without the station's prompt or commands: this item holds, tried again each pass,
+    // alerted once per pin and head, and the pass goes on (T061).
     if (!(err instanceof RefusedError)) throw err;
-    return refuse(err.message, false, 'release-incomplete');
+    await held(pass, target, err.message, { urgency: 'info', kind: 'release-incomplete' });
+    return undefined;
   }
   let sessionId: string;
   let notices: readonly Notice[] = [];
@@ -653,6 +655,13 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;
+    if (err.item) {
+      // Only this item is refused: it holds, uncounted and tried again each pass (T061).
+      const urgency = err.urgent || err.kind !== undefined ? 'urgent' : 'info';
+      const kind = err.kind ?? (err.urgent ? 'tampering' : 'launcher-unavailable');
+      await held(pass, target, visible(err.message), { urgency, kind }, err.head);
+      return undefined;
+    }
     // Once per branch head: a refusal that repeats on every pass alerts again only on a new one.
     const at = err.head === undefined ? '' : `; ${branch} is at ${err.head.slice(0, 12)}`;
     const refused = visible(`${err.message}${at}`);
@@ -669,6 +678,25 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     ...result,
     launched: { issue: item.issue.number, station, role, branch, mode, sessionId },
   };
+}
+
+/**
+ * A refusal tied to `target`'s item alone: the item holds with one alert per head, the head the
+ * launcher refused at or else the branch's as fetched, main's for Intake, and the pass goes on.
+ */
+async function held(
+  pass: Pass,
+  target: Target,
+  reason: string,
+  alert: Pick<NewAlert, 'urgency' | 'kind'>,
+  refusedAt?: string,
+) {
+  const { branch, item } = target;
+  const ref = branch === 'main' ? pass.mainRef : `refs/remotes/origin/${branch}`;
+  const head = refusedAt ?? runGit(pass.git, ['rev-parse', '--verify', `${ref}^{commit}`]);
+  const why = `${reason}; ${branch} is at ${head.slice(0, 12)}`;
+  await pass.alertOnce({ ...alert, text: `#${String(item.issue.number)} holds: ${why}` });
+  (pass.result.held ??= []).push({ issue: item.issue.number, reason: why });
 }
 
 /** `word` as one shell word, single-quoted, for a command the Owner copies. */

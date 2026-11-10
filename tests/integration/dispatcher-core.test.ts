@@ -13,6 +13,7 @@ import {
   type StationEvidence,
 } from '../../src/dispatcher/dispatch.js';
 import { selectLauncher } from '../../src/dispatcher/launcher/select.js';
+import { LaunchRefused } from '../../src/dispatcher/launcher/types.js';
 import { RefusedError } from '../../src/cli/env.js';
 import { verifiedMerges } from '../../src/git/merges.js';
 import { STATES, STATIONS, type ApprovalRecord } from '../../src/model/types.js';
@@ -354,22 +355,60 @@ describe('dispatcher core: station prompts (T072)', () => {
     expect(sinceLastDeploy({ commits }, new Set(['x9']), 'origin/main')).toBe('origin/main');
   });
 
-  it('starts no session when the pinned release lacks the station’s prompt, and alerts once', async () => {
-    const t = setup([{ number: 2, approval: 'signed' }]);
-    t.ctx.stationPrompt = () => {
-      throw new RefusedError(
-        'the release pinned at abc has no factory/prompts/station-1-intake.md',
-      );
+  it('holds an item whose pinned release lacks its prompt, naming the pin and the head, and starts the next item’s session in the same pass (T061)', async () => {
+    const t = setup([
+      { number: 2, approval: 'signed' },
+      { number: 3, approval: 'signed' },
+    ]);
+    const lacking = 'the release pinned at abc has no factory/prompts/station-2-specify.md';
+    const asked: number[] = [];
+    t.ctx.stationPrompt = (pin, facts) => {
+      asked.push(facts.issue);
+      if (facts.issue === 2) throw new RefusedError(lacking);
+      return testPrompts(pin, facts);
     };
 
     const first = await dispatchOnce(t.ctx);
-    await dispatchOnce(t.ctx);
 
-    expect(first.refused).toMatch(/no factory\/prompts\/station-1-intake\.md/);
-    expect(t.cloud.launches).toEqual([]);
-    expect(t.inbox()).toHaveLength(1);
-    expect(t.inbox()[0]?.body).toMatch(/urgency=info kind=release-incomplete/);
+    // Its manifest's head; branch.test.ts shows the alert is not repeated at the same head.
+    const head = t.project.revParse('origin/claude/2-add-login').slice(0, 12);
+    const reason = `${lacking}; claude/2-add-login is at ${head}`;
+    expect(first.held).toEqual([{ issue: 2, reason }]);
+    expect(first.launched).toMatchObject({ issue: 3, station: 2 });
+    expect(first.refused).toBeUndefined();
+    expect(asked).toEqual([2, 3]);
+    expect(t.cloud.launches.map((l) => l.item)).toEqual([3]);
+    expect(t.inbox().map((c) => c.body)).toEqual([
+      expect.stringMatching(new RegExp(`urgency=info kind=release-incomplete[^]*#2 holds: `)),
+    ]);
   });
+
+  it.each([
+    ['a protected-path change', true, 'urgent kind=tampering'],
+    ['no role file', false, 'info kind=launcher-unavailable'],
+  ] as const)(
+    'holds an item the launcher refuses for %s alone, once per head, and starts the next item’s session in the same pass (T061)',
+    async (_name, urgent, alert) => {
+      const t = setup([
+        { number: 2, approval: 'signed' },
+        { number: 3, approval: 'signed' },
+      ]);
+      const refusal = new LaunchRefused('no local session started: x; y', urgent, undefined, true);
+      refusal.head = 'a'.repeat(40);
+      t.cloud.refusalFor = (request) => (request.item === 2 ? refusal : undefined);
+
+      const first = await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      const reason = 'no local session started: x; y; claude/2-add-login is at aaaaaaaaaaaa';
+      expect(first.held).toEqual([{ issue: 2, reason }]);
+      expect(first.launched).toMatchObject({ issue: 3 });
+      expect(t.cloud.launches.map((l) => l.item)).toEqual([3, 3]);
+      expect(t.inbox().map((c) => c.body)).toEqual([
+        expect.stringMatching(new RegExp(`urgency=${alert}[^]*#2 holds: ${reason}`)),
+      ]);
+    },
+  );
 });
 
 describe('dispatcher core: owner: labels (AC-068)', () => {

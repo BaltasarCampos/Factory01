@@ -266,6 +266,8 @@ describe('LocalLauncher (research R8, R9)', () => {
     await expect(refused).rejects.toThrow(
       'no local session started: the failure record /r cannot be written: EROFS; check that /r',
     );
+    // Only this item is refused: it holds and the pass goes on (T061).
+    await expect(refused).rejects.toMatchObject({ item: true });
     expect(u.sessions()).toEqual([]);
   });
 
@@ -462,7 +464,9 @@ describe('LocalLauncher (research R8, R9)', () => {
     'refuses the branch %s before building any path',
     async (branch) => {
       const t = setup();
-      await expect(t.launch({ ...REQUEST, branch })).rejects.toThrow(/not a session branch/);
+      const refused = t.launch({ ...REQUEST, branch });
+      await expect(refused).rejects.toThrow(/not a session branch/);
+      await expect(refused).rejects.toMatchObject({ item: false });
       expect(existsSync(join(t.home, '.factory', 'sessions'))).toBe(false);
       expect(existsSync(join(t.home, 'factory-work'))).toBe(false);
     },
@@ -632,9 +636,38 @@ describe('LocalLauncher (research R8, R9)', () => {
     const refused = t.launch(REQUEST);
 
     await expect(refused).rejects.toThrow(LaunchRefused);
-    await expect(refused).rejects.toThrow(/\.claude\/agents\/spec\.md names no model/);
-    // Refused at the branch's head, so a refusal that repeats alerts once per head.
-    await expect(refused).rejects.toMatchObject({ head: t.repo.revParse(`origin/${BRANCH}`) });
+    await expect(refused).rejects.toThrow(
+      /\.claude\/agents\/spec\.md names no model a session may run; close this item and file it again, since the branch keeps the release pinned at its merge base$/,
+    );
+    // Refused at the branch's head, so a refusal that repeats alerts once per head; only this
+    // item is refused.
+    const head = t.repo.revParse(`origin/${BRANCH}`);
+    await expect(refused).rejects.toMatchObject({ head, item: true });
+    expect(t.sessions()).toEqual([]);
+  });
+
+  it("refuses only the item, naming its way out, when its branch's release has no role file for it, and main's way out on main (T061)", async () => {
+    const files = Object.fromEntries(
+      Object.entries(GUARDED).filter(([path]) => !/agents\/(spec|intake)\.md$/.test(path)),
+    );
+    const gone = { '.claude/agents/spec.md': null, '.claude/agents/intake.md': null };
+    const t = setup({ mainFiles: gone, release: () => manifestOf(files) });
+
+    const refused = t.launch(REQUEST);
+    await expect(refused).rejects.toThrow(
+      `no local session started: ${BRANCH} has no .claude/agents/spec.md; close this item and file it again, since the branch keeps the release pinned at its merge base`,
+    );
+    await expect(refused).rejects.toMatchObject({ urgent: false, item: true });
+    const intake = t.launch({
+      ...REQUEST,
+      role: 'intake',
+      station: 1,
+      branch: 'main',
+      feature: '',
+    });
+    await expect(intake).rejects.toThrow(
+      'no local session started: main has no .claude/agents/intake.md; re-pin main to a release that has it',
+    );
     expect(t.sessions()).toEqual([]);
   });
 
@@ -1861,12 +1894,13 @@ describe('LocalLauncher (research R8, R9)', () => {
           // counted or spawned, so ended.
           rmSync(join(dir, 'ended'));
           expect(sessionRunning(home, OLD)).toBeUndefined();
-          // With session.json, as a crash between the spawn and the group's record leaves: unknown.
+          // With session.json, as a stop after it is written, before or after the spawn: unknown,
+          // and the message names both.
           mark('session.json');
           const read = () => sessionRunning(home, OLD);
           expect(read).toThrow(SessionUnknown);
           expect(read).toThrow(
-            `whether session ${OLD} still runs is unknown: ${dir} records no process group and no end, as when a factory stops between claude's spawn and its record; ${out}`,
+            `whether session ${OLD} still runs is unknown: ${dir} records no process group and no end, as when a factory stops after session.json is written and before claude spawns, or after claude spawns and before its group is recorded; ${out}`,
           );
           rmSync(dir, { recursive: true });
           expect(sessionRunning(home, OLD)).toBeUndefined();
@@ -2096,8 +2130,9 @@ describe("LocalLauncher: the branch's history, checked in the factory's own clon
     const launch = t.launch(REQUEST);
 
     await expect(launch).rejects.toThrow(LaunchRefused);
-    await expect(launch).rejects.toMatchObject({ urgent: true });
+    await expect(launch).rejects.toMatchObject({ urgent: true, item: true });
     await expect(launch).rejects.toThrow(path);
+    await expect(launch).rejects.toThrow(/; close this item and file it again$/);
     expect(t.sessions()).toEqual([]);
   });
 

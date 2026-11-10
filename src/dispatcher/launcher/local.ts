@@ -503,6 +503,15 @@ function present(path: string): boolean {
 }
 
 /**
+ * The way out when a branch's release lacks what a session needs: main's pin moves; an item
+ * branch keeps the release pinned at its merge base until main is merged into it (T061).
+ */
+const keptOut = (branch: string) =>
+  branch === 'main'
+    ? 're-pin main to a release that has it'
+    : 'close this item and file it again, since the branch keeps the release pinned at its merge base';
+
+/**
  * Why session `id` still runs, or undefined when it does not, read fail-closed from its folder
  * (T061): `ended`, written once nothing of its group remained, or `not-spawned`, written when it
  * failed before the spawn, reads as ended, as does no folder at all, or a folder with no
@@ -524,7 +533,7 @@ export function sessionRunning(home: string, id: string): string | undefined {
     // Never counted and never spawned: its folder was made before the checks, its record after.
     if (!present(join(dir, 'session.json'))) return undefined;
     throw new SessionUnknown(
-      `whether session ${visible(id)} still runs is unknown: ${visible(dir)} records no process group and no end, as when a factory stops between claude's spawn and its record; ${out}`,
+      `whether session ${visible(id)} still runs is unknown: ${visible(dir)} records no process group and no end, as when a factory stops after session.json is written and before claude spawns, or after claude spawns and before its group is recorded; ${out}`,
     );
   }
   return groupRunning(file, id);
@@ -1340,9 +1349,12 @@ export class LocalLauncher implements LocalSessionLauncher {
       safeDiff(project, base, heads.head, env),
     );
     const problems = pathRule(changes, branch === DEFINE_BRANCH);
+    // Only this item: it holds, and the pass goes on to the next (T061).
     if (problems.length > 0)
       throw new LaunchRefused(
-        `no local session started: ${branch}'s own commits change ${problems.map(visible).join('; ')}`,
+        `no local session started: ${branch}'s own commits change ${problems.map(visible).join('; ')}; close this item and file it again`,
+        true,
+        undefined,
         true,
       );
     const pin = step(`the release pinned at ${base}`, () => this.config(project, base));
@@ -1459,16 +1471,22 @@ export class LocalLauncher implements LocalSessionLauncher {
       if (!check.ok)
         throw new LaunchRefused(`no local session started: ${check.reason}`, check.urgent);
       const roleFile = join(cwd, '.claude', 'agents', `${request.role}.md`);
-      if (!existsSync(roleFile))
-        throw new LaunchRefused(
-          `no local session started: ${request.branch} has no .claude/agents/${request.role}.md`,
+      // What the branch's release lacks refuses only this item, with the way out its branch has.
+      const lacks = (what: string) =>
+        new LaunchRefused(
+          `no local session started: ${what}; ${keptOut(request.branch)}`,
+          false,
+          undefined,
+          true,
         );
+      if (!existsSync(roleFile))
+        throw lacks(`${request.branch} has no .claude/agents/${request.role}.md`);
       // One value, matched to the release with the role file, for --model and the record.
       const role = readFileSync(roleFile);
       const model = roleModel(role.toString('utf8'));
       if (model === undefined)
-        throw new LaunchRefused(
-          `no local session started: ${request.branch}'s .claude/agents/${request.role}.md names no model a session may run`,
+        throw lacks(
+          `${request.branch}'s .claude/agents/${request.role}.md names no model a session may run`,
         );
       // git's identity in the clone's own config: the session's git reads no global config.
       step("setting git's identity in the session's clone", () => {
@@ -1544,7 +1562,12 @@ export class LocalLauncher implements LocalSessionLauncher {
             request.starting?.(files.id, heads.head);
           } catch (err) {
             const why = err instanceof Error ? err.message : String(err);
-            throw new LaunchRefused(`no local session started: ${visible(why)}`);
+            throw new LaunchRefused(
+              `no local session started: ${visible(why)}`,
+              false,
+              undefined,
+              true,
+            );
           }
           try {
             const invocation = localInvocation(request, files, model, caps.turns);
