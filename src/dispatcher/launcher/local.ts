@@ -144,6 +144,20 @@ export const SILENCE = 12 * 60_000;
 export const UNINSTALLED =
   "The factory could not install this repository's dependencies before the session: run npm ci, or npm install if package-lock.json is out of step with package.json.";
 
+/**
+ * The prompt's line for a Builder or Define whose install npm never ran: the first finding,
+ * fenced and through visible(), what to change, and no npm ci, which would run the same prepare.
+ */
+function refusedLine(why: string): string {
+  const text = visible(why);
+  const fence = '`'.repeat(Math.max(3, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1)));
+  return [
+    "The factory did not install this repository's dependencies, and npm never ran, because:",
+    `${fence}text\n${text}\n${fence}`,
+    'Change that first: a registry version, with its integrity, for a git, file or link dependency, or remove a committed node_modules or npm-shrinkwrap.json. Do not run npm ci or npm install before then: they would run what the factory refused.',
+  ].join('\n');
+}
+
 /** How often `factory run` hears from a running session, in ms. */
 const HEARTBEAT = 60_000;
 
@@ -1521,7 +1535,7 @@ export class LocalLauncher implements LocalSessionLauncher {
       });
       const tmp = step("making the session's temporary folder", () => this.tmpFolder(request.item));
       try {
-        const installed = step("installing the clone's dependencies", () =>
+        const uninstalled = step("installing the clone's dependencies", () =>
           this.dependencies(request, cwd, tmp),
         );
         const env = step("building the session's environment", () =>
@@ -1599,7 +1613,8 @@ export class LocalLauncher implements LocalSessionLauncher {
             );
           }
           try {
-            const prompt = installed ? request.prompt : `${request.prompt}\n\n${UNINSTALLED}`;
+            const prompt =
+              uninstalled === undefined ? request.prompt : `${request.prompt}\n\n${uninstalled}`;
             const invocation = localInvocation({ ...request, prompt }, files, model, caps.turns);
             result = await this.run('claude', invocation, {
               ...{ cwd, env, group: true, line: live.line },
@@ -1886,13 +1901,13 @@ export class LocalLauncher implements LocalSessionLauncher {
 
   /**
    * The clone's dependencies, for Define, the Builder and Test when it has a package-lock.json;
-   * false when the install failed for the Builder or Define, who start anyway (T061). Test holds:
-   * its head passed CI's npm ci, so a failed npm is most likely the registry's or the network's,
-   * and a clone npm must not run on needs a new head. A sandbox that could not start ran no npm: a
-   * refusal that ends the pass. A timeout is an error.
+   * for the Builder or Define after a failed install, who start anyway, the prompt's line (T061).
+   * Test holds: its head passed CI's npm ci, so a failed npm is most likely the registry's or the
+   * network's, and a clone npm must not run on needs a new item. A sandbox that could not start ran
+   * no npm: a refusal that ends the pass. A timeout is an error.
    */
-  private dependencies(request: LaunchRequest, clone: string, tmp: string): boolean {
-    if (!installs(request.role, clone)) return true;
+  private dependencies(request: LaunchRequest, clone: string, tmp: string): string | undefined {
+    if (!installs(request.role, clone)) return undefined;
     const { env } = this.options;
     const git = located('git', (env.PATH ?? '').split(':').filter(Boolean));
     if (git === undefined)
@@ -1904,13 +1919,13 @@ export class LocalLauncher implements LocalSessionLauncher {
       if (!(err instanceof RefusedError) || err instanceof LaunchRefused) throw err;
       throw new LaunchRefused(`no local session started: ${visible(err.message)}`);
     }
-    if (failed === undefined) return true;
-    if (request.role !== 'test') return false;
+    if (failed === undefined) return undefined;
+    if (request.role !== 'test') return failed.npm ? UNINSTALLED : refusedLine(failed.why);
     const once = 'tried again each pass and alerted once per head';
     throw new LaunchRefused(
       failed.npm
         ? `no local session started: the test session's npm ci failed (${failed.why}); the head passed CI's npm ci, so most likely the registry or the network is down: the item holds until they are back, ${once}`
-        : `no local session started: the test session's npm ci never ran: ${visible(failed.why)}; the item holds until a new head changes it, ${once}`,
+        : `no local session started: the test session's npm ci never ran: ${visible(failed.why)}; nothing at Test makes a new head, so close the item and file it again; it holds, ${once}`,
       false,
       undefined,
       true,

@@ -58,33 +58,37 @@ function install(repo: TestRepo) {
 
 describe("the clone's install, for real (T061)", () => {
   it(
-    'runs npm ci on a lockfile with no dependencies to status 0, leaving the clone otherwise unchanged',
+    'runs npm ci in the install folder beside the clone, renames its node_modules into the clone and removes the folder',
     () => {
-      const repo = clone();
+      const integrity =
+        'sha512-41Cifkg6e8TylSpdtTpeLVMqvSBEVzTttHvERD741+pnZ8ANv0004MRL43QKPDlK9cGvNp6NZWZUBlbGXYxxng==';
+      const resolved = 'https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz';
+      const entry = { version: '7.0.0', resolved, integrity };
+      const repo = clone({ 'node_modules/is-number': entry }, { 'is-number': '7.0.0' });
       const before = snapshot(repo.path);
-      expect(install(repo)).toEqual({ result: undefined, runs: [repo.path] });
-      // npm ci worked with node_modules as the sandbox's one writable mount point in the clone.
-      expect(lstatSync(join(repo.path, 'node_modules')).isDirectory()).toBe(true);
+      expect(install(repo)).toEqual({ result: undefined, runs: [`${repo.path}.install`] });
+      expect(existsSync(join(repo.path, 'node_modules', 'is-number', 'package.json'))).toBe(true);
       expect(snapshot(repo.path, 'node_modules')).toEqual(before);
+      expect(existsSync(`${repo.path}.install`)).toBe(false);
     },
     RUN,
   );
 
   it(
-    'lets the install write only node_modules and its own folder: not the clone, its .git or the rest of the temporary folder',
+    'lets npm write only the install folder and its own: not the clone, which it never sees, or the rest of the temporary folder',
     () => {
       const repo = makeRepo({ files: { 'package.json': '{}\n' } });
       const tmp = realpathSync(tempDir());
-      const dirs = ['node_modules', '.git/x'].map((d) => join(repo.path, d));
-      for (const dir of [...dirs, join(tmp, 'x'), join(tmp, 'npm-install', 'npm-cache')])
-        mkdirSync(dir, { recursive: true });
-      const { args } = deps.installArgs(repo.path, tmp, git);
+      const dir = `${repo.path}.install`;
+      for (const at of [dir, join(tmp, 'x'), join(tmp, 'npm-install', 'npm-cache')])
+        mkdirSync(at, { recursive: true });
+      const { args } = deps.installArgs(dir, tmp, git);
       const writes = (path: string) =>
         attached(args, ['/bin/sh', '-c', `echo x > '${path}'`], undefined, outer, 'no pasta')
           .status === 0;
-      expect(writes(join(repo.path, 'node_modules', 'ok'))).toBe(true);
+      expect(writes(join(dir, 'ok'))).toBe(true);
       expect(writes(join(tmp, 'npm-install', 'npm-cache', 'ok'))).toBe(true);
-      for (const path of ['probe', '.git/config', '.git/x/probe'].map((p) => join(repo.path, p)))
+      for (const path of ['probe', '.git/config'].map((p) => join(repo.path, p)))
         expect(writes(path), path).toBe(false);
       expect(writes(join(tmp, 'x', 'probe'))).toBe(false);
     },

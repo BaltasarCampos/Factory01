@@ -247,7 +247,8 @@ function checkOptions(words: string[]) {
   const program = words[0] ?? '';
   const refused = `o${Object.hasOwn(SHORT, program) ? (SHORT[program] ?? '') : ''}`;
   for (const word of words.slice(1)) {
-    const name = word.split('=')[0] ?? '';
+    // npm strips any run of dashes (nopt): `---output` is `--output`.
+    const name = (word.split('=')[0] ?? '').replace(/^-{3,}/, '--');
     const long = name.startsWith('--') && name.length >= 4;
     if ((long && WRITES.test(name)) || (long && '--output'.startsWith(name)))
       refuse('option', `the option ${word}, which writes a file; write files with the Write tool`);
@@ -314,12 +315,12 @@ function checkGhFiles({ cwd, clone, home }: Places, words: string[]) {
 }
 
 /**
- * npm's ignore-scripts option in any form npm reads it (T061): one dash or two, any prefix npm
+ * npm's ignore-scripts option in any form npm reads it (T061): any run of dashes, any prefix npm
  * accepts, from `ig`, after any run of `no-`, which nopt strips in a loop, `_` for `-`, any letter
  * case and any value.
  */
 const scriptsOption = (word: string) => {
-  const name = /^--?([^=]+)/.exec(word)?.[1]?.toLowerCase().replaceAll('_', '-') ?? '';
+  const name = /^-+([^=]+)/.exec(word)?.[1]?.toLowerCase().replaceAll('_', '-') ?? '';
   const bare = name.replace(/^(?:no-)+/, '');
   return bare.length >= 2 && 'ignore-scripts'.startsWith(bare);
 };

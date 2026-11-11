@@ -276,6 +276,8 @@ describe("the command guard: nothing that shows a session's environment, where t
     ['builder', 'npm ci --no-no-no-ig'],
     ['builder', 'npm ci -ignore-scripts=false'],
     ['define', 'npm install -ig=false'],
+    ['builder', 'npm ci ---ignore-scripts=false'],
+    ['builder', 'npm ci ----ig=false'],
   ])('%s: %s, which would change whether npm runs scripts, is refused (T061)', (role, command) => {
     expect(refusal(role, command)).toMatch(/^option: refused: .*whether npm runs scripts/);
   });

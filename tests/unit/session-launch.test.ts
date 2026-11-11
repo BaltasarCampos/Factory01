@@ -22,6 +22,7 @@ import { alertThrown, runLoop, thrownText } from '../../src/commands/run.js';
 import type { PassResult } from '../../src/dispatcher/dispatch.js';
 import { SERVED_HOOKS } from '../../src/commands/hook.js';
 import { CloudLauncher, cloudInvocation } from '../../src/dispatcher/launcher/cloud.js';
+import * as deps from '../../src/dispatcher/launcher/deps.js';
 import { installArgs, installs, type Installer } from '../../src/dispatcher/launcher/deps.js';
 import {
   guardrailCheck,
@@ -874,9 +875,13 @@ describe('LocalLauncher (research R8, R9)', () => {
     const TEST = { ...REQUEST, role: 'test', station: 5 } as const;
     /** A launch whose install returns `status`, or throws `error`, recording each call. */
     const installing = (outcome: number | Error, branchFiles: Record<string, string> = LOCK) => {
-      const calls: { clone: string; tmp: string; git: string }[] = [];
-      const install: Installer = (clone, tmp, git) => {
-        calls.push({ clone, tmp, git });
+      const calls: { dir: string; tmp: string; git: string; files: string[]; lock: string }[] = [];
+      const install: Installer = (dir, tmp, git) => {
+        const [files, lock] = [
+          readdirSync(dir).sort(),
+          readFileSync(join(dir, 'package-lock.json'), 'utf8'),
+        ];
+        calls.push({ dir, tmp, git, files, lock });
         if (outcome instanceof Error) throw outcome;
         return outcome;
       };
@@ -910,22 +915,25 @@ describe('LocalLauncher (research R8, R9)', () => {
       expect(roles.filter((role) => installs(role, clone))).toEqual(['define', 'builder', 'test']);
     });
 
-    it("runs npm ci in the CI sandbox: the clone read-only but its node_modules, home and cache in a folder of the session's temporary one, git by its real path", () => {
-      const { args, argv } = installArgs('/w/clone', '/tmp/factory-42-x', '/usr/bin/git');
+    it("runs npm ci in the CI sandbox: only the install folder writable, home and cache in a folder of the session's temporary one, git by its real path", () => {
+      const { args, argv } = installArgs('/w/x.install', '/tmp/factory-42-x', '/usr/bin/git');
       expect(args).toEqual(
         expect.arrayContaining(['--unshare-all', '--clearenv', '--die-with-parent']),
       );
       const line = args.join(' ');
-      // node_modules after the clone, so the read-only bind does not cover it.
-      expect(line).toMatch(/--ro-bind \/w\/clone \/w\/clone .*--bind \/w\/clone\/node_modules /);
-      expect(line).not.toMatch(/--bind \/w\/clone |--bind \/tmp\/factory-42-x /);
+      expect(line).toContain('--bind /w/x.install /w/x.install');
+      expect(line).not.toMatch(/--bind \/tmp\/factory-42-x /);
       expect(line).toContain('--bind /tmp/factory-42-x/npm-install /tmp/factory-42-x/npm-install');
       expect(line).toContain('--setenv HOME /tmp/factory-42-x/npm-install/home');
       expect(line).toContain('--setenv npm_config_cache /tmp/factory-42-x/npm-install/npm-cache');
-      expect(args.join(' ')).toContain('--chdir /w/clone');
+      expect(args.join(' ')).toContain('--chdir /w/x.install');
       expect(args.join(' ')).not.toMatch(/GH_TOKEN|setenv (?!PATH|HOME|npm_config_cache)/);
       expect(argv.slice(0, 1)).toEqual([process.execPath]);
-      expect(argv.slice(2)).toEqual(['ci', '--ignore-scripts', '--git=/usr/bin/git', '--no-audit']);
+      expect(argv.slice(2)).toEqual(
+        ['ci', '--ignore-scripts', '--git=/usr/bin/git', '--no-audit']
+          .concat(['--registry=https://registry.npmjs.org/', '--replace-registry-host=never'])
+          .concat(['--install-links=false', '--strict-ssl=true']),
+      );
     });
 
     it("installs the Builder's clone once, in its clone, before the session, and excludes /node_modules/", async () => {
@@ -935,7 +943,12 @@ describe('LocalLauncher (research R8, R9)', () => {
       const git = realpathSync(
         execFileSync('sh', ['-c', 'command -v git'], { encoding: 'utf8' }).trim(),
       );
-      expect(t.calls).toEqual([{ clone, tmp: t.sessions()[0]?.env.TMPDIR, git }]);
+      const files = ['package-lock.json', 'package.json'];
+      const lock = LOCK['package-lock.json'];
+      expect(t.calls).toEqual([
+        { dir: `${clone}.install`, tmp: t.sessions()[0]?.env.TMPDIR, git, files, lock },
+      ]);
+      expect(existsSync(`${clone}.install`)).toBe(false);
       expect(t.prompts()).toEqual([BUILD.prompt]);
       expect(readFileSync(join(clone, '.git', 'info', 'exclude'), 'utf8')).toMatch(
         /^\/node_modules\/$/m,
@@ -980,13 +993,83 @@ describe('LocalLauncher (research R8, R9)', () => {
         const refused = await t.launch(TEST).catch((err: unknown) => err);
         expect(refused).toMatchObject({ item: true });
         expect((refused as Error).message).toMatch(said);
-        expect((refused as Error).message).toMatch(/the item holds until a new head changes it/);
+        expect((refused as Error).message).toMatch(/close the item and file it again/);
         const u = installing(0, files);
         await u.launch(BUILD);
-        expect(u.prompts()).toEqual([`${BUILD.prompt}\n\n${UNINSTALLED}`]);
+        const line = String(u.prompts()[0]);
+        expect(line).toMatch(/npm never ran, because:\n```text\n.*\n```\nChange that first/);
+        expect(line).toMatch(/node_modules/);
+        expect(line).not.toMatch(/run npm ci,|run npm ci or npm install if/);
         expect([...t.calls, ...u.calls]).toEqual([]);
       },
     );
+
+    it("installs from the head's blobs alone: no .npmrc, and the lockfile as committed, not as checked out", async () => {
+      const npmrc = 'registry=http://127.0.0.1:9/\ninstall-links=true\n';
+      const t = installing(0, { ...LOCK, '.npmrc': npmrc });
+      await t.launch(BUILD);
+      expect(t.calls.map((c) => c.files)).toEqual([['package-lock.json', 'package.json']]);
+      const repo = makeRepo({ files: LOCK });
+      writeFileSync(
+        join(repo.path, '.gitattributes'),
+        'package-lock.json working-tree-encoding=UTF-16\n',
+      );
+      repo.git(['add', '.gitattributes']);
+      repo.git(['commit', '-q', '--no-gpg-sign', '-m', 'enc']);
+      rmSync(join(repo.path, 'package-lock.json'));
+      repo.git(['checkout', '--', 'package-lock.json']);
+      expect(readFileSync(join(repo.path, 'package-lock.json'), 'utf8')).not.toBe(
+        LOCK['package-lock.json'],
+      );
+      const seen: string[] = [];
+      const fake: Installer = (dir) => (
+        seen.push(readFileSync(join(dir, 'package-lock.json'), 'utf8')),
+        0
+      );
+      expect(deps.installDependencies(repo.path, tempDir(), '/usr/bin/git', gitEnv, fake)).toBe(
+        undefined,
+      );
+      expect(seen).toEqual([LOCK['package-lock.json']]);
+    });
+
+    it.each([
+      [
+        'a link entry',
+        { 'node_modules/a': { link: true, resolved: 'a' } },
+        /a link, which the install refuses/,
+      ],
+      ['a key outside node_modules/', { a: { version: '1.0.0' } }, /a: outside node_modules\//],
+      [
+        'a missing integrity',
+        {
+          'node_modules/a': {
+            version: '1.0.0',
+            resolved: 'https://registry.npmjs.org/a/-/a-1.0.0.tgz',
+          },
+        },
+        /no integrity/,
+      ],
+      ['a null entry', { 'node_modules/a': null }, /node_modules\/a is not an object/],
+    ])('refuses %s with npm never run', (_, packages, said) => {
+      const repo = makeRepo({ files: { ...LOCK, 'package-lock.json': lockfile(packages) } });
+      const fake: Installer = () => 0;
+      expect(
+        deps.installDependencies(repo.path, tempDir(), '/usr/bin/git', gitEnv, fake),
+      ).toMatchObject({ npm: false, why: expect.stringMatching(said) as string });
+    });
+
+    it('refuses a null lockfile, and a git failure reading the head throws', () => {
+      const fake: Installer = () => 0;
+      const repo = makeRepo({ files: { ...LOCK, 'package-lock.json': 'null' } });
+      expect(
+        deps.installDependencies(repo.path, tempDir(), '/usr/bin/git', gitEnv, fake),
+      ).toMatchObject({ npm: false, why: expect.stringMatching(/has no packages/) as string });
+      const plain = tempDir();
+      writeFileSync(join(plain, 'package-lock.json'), LOCK['package-lock.json']);
+      expect(() =>
+        deps.installDependencies(plain, tempDir(), '/usr/bin/git', gitEnv, fake),
+      ).toThrow(/git ls-tree failed/);
+    });
 
     it('refuses, ending the pass, when the sandbox or its network could not start, since npm never ran', async () => {
       const t = installing(

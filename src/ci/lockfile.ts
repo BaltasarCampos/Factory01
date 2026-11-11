@@ -33,6 +33,7 @@ interface Entry {
   resolved?: unknown;
   link?: unknown;
   inBundle?: unknown;
+  integrity?: unknown;
 }
 
 /**
@@ -48,24 +49,38 @@ export function readLockfile(
   return bytes === undefined ? { packages: [], problems: [] } : lockEntries(bytes, commit);
 }
 
-/** The identity rule on a lockfile's bytes, read at `commit`; throws when it is not JSON v2+. */
+/**
+ * The identity rule on a lockfile's bytes, read at `commit`; throws when it is not JSON v2+. For
+ * the launcher's install, `install` also refuses link entries, keys outside `node_modules/` and an
+ * entry with no integrity that is not bundled (T061).
+ */
 export function lockEntries(
   bytes: Buffer,
   commit: string,
+  install = false,
 ): { packages: LockedPackage[]; problems: string[] } {
-  let lock: { packages?: Record<string, Entry> };
+  let lock: { packages?: Record<string, Entry | null> | null } | null;
   try {
     lock = JSON.parse(bytes.toString('utf8')) as typeof lock;
   } catch {
     throw new RefusedError(`${LOCK} at ${commit.slice(0, 12)} is not JSON`);
   }
-  if (lock.packages === undefined || typeof lock.packages !== 'object')
+  if (lock === null || lock.packages === null || typeof lock.packages !== 'object')
     throw new RefusedError(
       `${LOCK} at ${commit.slice(0, 12)} has no packages (lockfile v2 or later)`,
     );
   const packages: LockedPackage[] = [];
   const problems: string[] = [];
   for (const [path, entry] of Object.entries(lock.packages)) {
+    if (entry === null || typeof entry !== 'object')
+      throw new RefusedError(`${LOCK} at ${commit.slice(0, 12)}: ${path} is not an object`);
+    const outside = path !== '' && !path.startsWith('node_modules/');
+    if (install && (entry.link === true || outside)) {
+      problems.push(
+        `${LOCK}: ${path}: ${outside ? 'outside node_modules/' : 'a link'}, which the install refuses`,
+      );
+      continue;
+    }
     if (path === '' || entry.link === true) continue;
     const fromPath = path.slice(path.lastIndexOf('node_modules/') + 'node_modules/'.length);
     const name = typeof entry.name === 'string' ? entry.name : fromPath;
@@ -90,6 +105,10 @@ export function lockEntries(
       problems.push(
         problem(`resolves to ${resolved}, not ${tarball}, the registry's ${name}@${version}`),
       );
+      continue;
+    }
+    if (install && entry.inBundle !== true && typeof entry.integrity !== 'string') {
+      problems.push(problem('no integrity, which the install requires'));
       continue;
     }
     packages.push({ path, name, version });
