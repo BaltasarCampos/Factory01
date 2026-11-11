@@ -117,6 +117,8 @@ describe('the sandbox settings for session shells (T183)', () => {
     for (const role of ROLES)
       expect(hosts[role]?.includes('api.github.com'), role).toBe(usesGh(role));
     expect(hosts.builder).toEqual(['registry.npmjs.org']);
+    // Test's clone is installed before it starts, and its head passed CI's npm ci (T061).
+    expect(hosts.test).toEqual([]);
     expect(hosts.spec).toEqual([]);
     expect(hosts.release).toEqual([]);
   });

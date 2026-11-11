@@ -43,6 +43,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   accessSync,
+  appendFileSync,
   constants,
   existsSync,
   linkSync,
@@ -58,7 +59,7 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EnvironmentError } from '../../cli/env.js';
+import { EnvironmentError, RefusedError } from '../../cli/env.js';
 import { SERVED_HOOKS } from '../../commands/hook.js';
 import { WRAPPERS } from '../../guard/command-guard.js';
 import { isFable, roleVersion } from '../../events/schema.js';
@@ -80,6 +81,7 @@ import { ReleaseTagError } from '../../release/tag.js';
 import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
 import { hashOnce } from '../failures.js';
+import { installs, sandboxedInstall, type Installer } from './deps.js';
 import {
   LaunchRefused,
   SessionCapped,
@@ -153,6 +155,10 @@ const HEARTBEAT = 60_000;
  * that comes while the output drains ends the factory as the run settles. `started` is called once
  * every listener is in place, and if it throws, the group is stopped and the run rejects.
  */
+/** The prompt's line for a Builder or Define whose clone's install failed; no npm output in it. */
+export const UNINSTALLED =
+  "The factory could not install this repository's dependencies before the session: run npm ci, or npm install if package-lock.json is out of step with package.json.";
+
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
     const { timeout, group, silence, line, chunk: heard, ...spawned } = options;
@@ -1200,6 +1206,8 @@ export interface LocalOptions {
   minute?: number;
   silence?: number;
   heartbeat?: number;
+  /** The clone's install; tests give their own, so no row needs bwrap or pasta. */
+  install?: Installer;
 }
 
 export class LocalLauncher implements LocalSessionLauncher {
@@ -1387,6 +1395,9 @@ export class LocalLauncher implements LocalSessionLauncher {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dirname(dir), { recursive: true });
     this.isolated(home, ['init', '-q', '-b', 'main', dir]);
+    // The install's folder is never part of a commit; 28-6's push check is the backstop.
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    appendFileSync(join(dir, '.git', 'info', 'exclude'), '/node_modules/\n');
     const refs = [
       `+${heads.main}:refs/remotes/origin/main`,
       ...(heads.onOrigin ? [`+${heads.head}:refs/remotes/origin/${branch}`] : []),
@@ -1509,6 +1520,9 @@ export class LocalLauncher implements LocalSessionLauncher {
       });
       const tmp = step("making the session's temporary folder", () => this.tmpFolder(request.item));
       try {
+        const installed = step("installing the clone's dependencies", () =>
+          this.dependencies(request, cwd, tmp),
+        );
         const env = step("building the session's environment", () =>
           this.sessionEnv(request, files.id, tmp, token),
         );
@@ -1584,7 +1598,8 @@ export class LocalLauncher implements LocalSessionLauncher {
             );
           }
           try {
-            const invocation = localInvocation(request, files, model, caps.turns);
+            const prompt = installed ? request.prompt : `${request.prompt}\n\n${UNINSTALLED}`;
+            const invocation = localInvocation({ ...request, prompt }, files, model, caps.turns);
             result = await this.run('claude', invocation, {
               ...{ cwd, env, group: true, line: live.line },
               chunk: () => {
@@ -1863,7 +1878,38 @@ export class LocalLauncher implements LocalSessionLauncher {
       ...(NO_ADVISOR.has(request.role) ? { CLAUDE_CODE_DISABLE_ADVISOR_TOOL: '1' } : {}),
       // Home is unreadable to sandboxed shells (T183): their temporary files and npm's cache here.
       ...{ TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, npm_config_cache: join(tmp, 'npm') },
+      // No script runs and npx installs nothing; the command guard refuses the flags that beat these.
+      ...{ npm_config_yes: 'false', npm_config_ignore_scripts: 'true' },
     };
+  }
+
+  /**
+   * The clone's dependencies, for Define, the Builder and Test when it has a package-lock.json;
+   * false when npm ci failed for the Builder or Define, who start anyway (T061). Test's head passed
+   * CI's npm ci, so its failure is the registry's or the network's: the item holds. A sandbox that
+   * could not start ran no npm: a refusal that ends the pass. A timeout is an error.
+   */
+  private dependencies(request: LaunchRequest, clone: string, tmp: string): boolean {
+    if (!installs(request.role, clone)) return true;
+    const folders = (this.options.env.PATH ?? '').split(':').filter((folder) => folder !== '');
+    const git = located('git', folders);
+    if (git === undefined)
+      throw new LaunchRefused("no local session started: no git on the factory's PATH for npm ci");
+    let status: number | null;
+    try {
+      status = (this.options.install ?? sandboxedInstall(this.options.env))(clone, tmp, git.real);
+    } catch (err) {
+      if (!(err instanceof RefusedError) || err instanceof LaunchRefused) throw err;
+      throw new LaunchRefused(`no local session started: ${visible(err.message)}`);
+    }
+    if (status === 0) return true;
+    if (request.role !== 'test') return false;
+    throw new LaunchRefused(
+      `no local session started: the test session's npm ci failed (${status === null ? 'killed' : `status ${String(status)}`}); the head passed CI's npm ci, so the registry or the network is down: the item holds until they are back, tried again each pass and alerted once per head`,
+      false,
+      undefined,
+      true,
+    );
   }
 
   /** The session's own folder under `~/.factory/sessions/`, made for this launch alone. */

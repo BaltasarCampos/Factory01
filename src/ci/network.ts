@@ -9,7 +9,7 @@ import { lstatSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { extname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RefusedError } from '../cli/env.js';
+import { EnvironmentError, RefusedError } from '../cli/env.js';
 import { SPAWN } from './sandbox.js';
 
 /**
@@ -110,7 +110,9 @@ export type Attached = SpawnSyncReturns<string> & { pasta: number | undefined };
  * Runs `argv` in bubblewrap with pasta's network, through the helper; `outer` holds only PATH.
  * Refuses, with `what` and pasta's own error, when pasta fails: the command never starts
  * without its network. With `service`, as the app's unit runs it, the command's output goes
- * straight to this process's, for the journal, and there is no time limit.
+ * straight to this process's, for the journal, and there is no time limit. With `timeout`, in ms, a
+ * run past it is stopped, the helper killing bwrap and pasta and with bwrap everything in its PID
+ * namespace, and it throws an `EnvironmentError` (T061).
  */
 export function attached(
   args: readonly string[],
@@ -119,15 +121,24 @@ export function attached(
   outer: NodeJS.ProcessEnv,
   what: string,
   service = false,
+  timeout?: number,
 ): Attached {
   const command = attachCommand(args, argv, port);
   try {
     const run = spawnSync(command.command, command.args, {
       ...(service ? { encoding: 'utf8' } : SPAWN),
+      ...(timeout === undefined ? {} : { timeout }),
       env: { PATH: outer.PATH ?? '' },
       input: command.input,
       stdio: ['pipe', service ? 'inherit' : 'pipe', service ? 'inherit' : 'pipe', 'pipe'],
     });
+    if (
+      timeout !== undefined &&
+      (run.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT'
+    )
+      throw new EnvironmentError(
+        `it ran past ${String(timeout / 1000)} s and was stopped, with everything in its sandbox`,
+      );
     const reports = (run.output[3] ?? '')
       .split('\n')
       .filter(Boolean)

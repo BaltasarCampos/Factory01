@@ -112,7 +112,8 @@ roles:
     write: ['{tests}']
     shell: [npm test, npm run test, npx vitest]
     blocked: []
-    network: [registry.npmjs.org]
+    # Its clone's dependencies are installed before it starts (T061).
+    network: []
     branch: item
     caps: { turns: 120, minutes: 60 }
   reviewer:

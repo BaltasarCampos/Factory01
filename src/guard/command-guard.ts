@@ -313,6 +313,16 @@ function checkGhFiles({ cwd, clone, home }: Places, words: string[]) {
   });
 }
 
+/**
+ * npm's ignore-scripts option in any form npm reads it (T061): any prefix npm accepts, from
+ * `--ig`, with `no-` before it, `_` for `-`, any letter case and any value.
+ */
+const scriptsOption = (word: string) => {
+  const name = /^--([^=]+)/.exec(word)?.[1]?.toLowerCase().replaceAll('_', '-') ?? '';
+  const bare = name.replace(/^no-/, '');
+  return bare.length >= 2 && 'ignore-scripts'.startsWith(bare);
+};
+
 /** Test's runs that update snapshots: `-u` or `--update` rewrite existing ones (T070). */
 const updatesSnapshots = (words: string[]) =>
   words.slice(1).some((word) => {
@@ -384,6 +394,11 @@ function checkCommand(policy: Policy, role: RoleName, places: Places, command: S
         'environment',
         `${shown}: npm run env prints the environment, which holds the session's credentials; run a script from package.json`,
       );
+  if ((program === 'npm' || program === 'npx') && words.some(scriptsOption))
+    refuse(
+      'option',
+      `${shown}: the factory sets whether npm runs scripts, and no session changes it; leave the option out`,
+    );
   if (role === 'test' && updatesSnapshots(words))
     refuse(
       'option',
