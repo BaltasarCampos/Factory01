@@ -314,12 +314,13 @@ function checkGhFiles({ cwd, clone, home }: Places, words: string[]) {
 }
 
 /**
- * npm's ignore-scripts option in any form npm reads it (T061): any prefix npm accepts, from
- * `--ig`, with `no-` before it, `_` for `-`, any letter case and any value.
+ * npm's ignore-scripts option in any form npm reads it (T061): one dash or two, any prefix npm
+ * accepts, from `ig`, after any run of `no-`, which nopt strips in a loop, `_` for `-`, any letter
+ * case and any value.
  */
 const scriptsOption = (word: string) => {
-  const name = /^--([^=]+)/.exec(word)?.[1]?.toLowerCase().replaceAll('_', '-') ?? '';
-  const bare = name.replace(/^no-/, '');
+  const name = /^--?([^=]+)/.exec(word)?.[1]?.toLowerCase().replaceAll('_', '-') ?? '';
+  const bare = name.replace(/^(?:no-)+/, '');
   return bare.length >= 2 && 'ignore-scripts'.startsWith(bare);
 };
 
@@ -385,6 +386,11 @@ function checkCommand(policy: Policy, role: RoleName, places: Places, command: S
   if (words[0] === 'xargs' && words.some((word) => /(^|\/)(git|gh)$/.test(word)))
     refuse('xargs', `${shown}: xargs into git or gh; run the git or gh command itself`);
   checkLabels(words);
+  if ((program === 'npm' || program === 'npx') && words.some(scriptsOption))
+    refuse(
+      'option',
+      `${shown}: the factory sets whether npm runs scripts, and no session changes it; leave the option out`,
+    );
   checkOptions(words);
   checkReads(policy, places, words);
   checkGhFiles(places, words);
@@ -394,11 +400,6 @@ function checkCommand(policy: Policy, role: RoleName, places: Places, command: S
         'environment',
         `${shown}: npm run env prints the environment, which holds the session's credentials; run a script from package.json`,
       );
-  if ((program === 'npm' || program === 'npx') && words.some(scriptsOption))
-    refuse(
-      'option',
-      `${shown}: the factory sets whether npm runs scripts, and no session changes it; leave the option out`,
-    );
   if (role === 'test' && updatesSnapshots(words))
     refuse(
       'option',

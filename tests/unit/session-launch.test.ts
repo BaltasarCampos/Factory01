@@ -862,7 +862,10 @@ describe('LocalLauncher (research R8, R9)', () => {
   );
 
   describe("the clone's dependencies, installed before the session (T061)", () => {
-    const LOCK = { 'package.json': '{}\n', 'package-lock.json': '{}\n' };
+    const ROOT = { name: 'x', version: '1.0.0' };
+    const lockfile = (packages: Record<string, unknown> = {}) =>
+      JSON.stringify({ ...ROOT, lockfileVersion: 3, packages: { '': ROOT, ...packages } });
+    const LOCK = { 'package.json': `${JSON.stringify(ROOT)}\n`, 'package-lock.json': lockfile() };
     const ROLES = {
       '.claude/agents/builder.md': roleFile('builder'),
       '.claude/agents/test.md': roleFile('test'),
@@ -907,14 +910,18 @@ describe('LocalLauncher (research R8, R9)', () => {
       expect(roles.filter((role) => installs(role, clone))).toEqual(['define', 'builder', 'test']);
     });
 
-    it("runs npm ci in the CI sandbox: the clone writable, no home, the cache in the session's temporary folder, git by its real path", () => {
+    it("runs npm ci in the CI sandbox: the clone read-only but its node_modules, home and cache in a folder of the session's temporary one, git by its real path", () => {
       const { args, argv } = installArgs('/w/clone', '/tmp/factory-42-x', '/usr/bin/git');
       expect(args).toEqual(
         expect.arrayContaining(['--unshare-all', '--clearenv', '--die-with-parent']),
       );
-      expect(args.join(' ')).toContain('--bind /w/clone /w/clone');
-      expect(args.join(' ')).toContain('--setenv HOME /tmp/factory-42-x/home');
-      expect(args.join(' ')).toContain('--setenv npm_config_cache /tmp/factory-42-x/npm-cache');
+      const line = args.join(' ');
+      // node_modules after the clone, so the read-only bind does not cover it.
+      expect(line).toMatch(/--ro-bind \/w\/clone \/w\/clone .*--bind \/w\/clone\/node_modules /);
+      expect(line).not.toMatch(/--bind \/w\/clone |--bind \/tmp\/factory-42-x /);
+      expect(line).toContain('--bind /tmp/factory-42-x/npm-install /tmp/factory-42-x/npm-install');
+      expect(line).toContain('--setenv HOME /tmp/factory-42-x/npm-install/home');
+      expect(line).toContain('--setenv npm_config_cache /tmp/factory-42-x/npm-install/npm-cache');
       expect(args.join(' ')).toContain('--chdir /w/clone');
       expect(args.join(' ')).not.toMatch(/GH_TOKEN|setenv (?!PATH|HOME|npm_config_cache)/);
       expect(argv.slice(0, 1)).toEqual([process.execPath]);
@@ -936,9 +943,6 @@ describe('LocalLauncher (research R8, R9)', () => {
     });
 
     it('installs nothing for a role that does not build, or a clone with no package-lock.json', async () => {
-      await installing(0)
-        .launch(REQUEST)
-        .then(() => undefined);
       const t = installing(0, {});
       await t.launch(BUILD);
       expect(t.calls).toEqual([]);
@@ -959,10 +963,30 @@ describe('LocalLauncher (research R8, R9)', () => {
       expect(refused).toBeInstanceOf(LaunchRefused);
       expect(refused).toMatchObject({ item: true, urgent: false });
       expect((refused as Error).message).toBe(
-        "no local session started: the test session's npm ci failed (status 1); the head passed CI's npm ci, so the registry or the network is down: the item holds until they are back, tried again each pass and alerted once per head",
+        "no local session started: the test session's npm ci failed (status 1); the head passed CI's npm ci, so most likely the registry or the network is down: the item holds until they are back, tried again each pass and alerted once per head",
       );
       expect(t.sessions()).toEqual([]);
     });
+
+    const GIT_DEP = { 'node_modules/dep': { version: '1.0.0', resolved: 'git+file:///w/dep#1' } };
+    it.each([
+      ['a git dependency', GIT_DEP, {}, /never ran: 1: package-lock\.json: node_modules\/dep: /],
+      ['a node_modules of its own', {}, { 'node_modules/x.js': '' }, /node_modules of its own/],
+    ])(
+      'installs nothing for a clone with %s: Test holds and the Builder starts uninstalled, npm never run',
+      async (_, packages, more, said) => {
+        const files = { ...LOCK, 'package-lock.json': lockfile(packages), ...more };
+        const t = installing(0, files);
+        const refused = await t.launch(TEST).catch((err: unknown) => err);
+        expect(refused).toMatchObject({ item: true });
+        expect((refused as Error).message).toMatch(said);
+        expect((refused as Error).message).toMatch(/the item holds until a new head changes it/);
+        const u = installing(0, files);
+        await u.launch(BUILD);
+        expect(u.prompts()).toEqual([`${BUILD.prompt}\n\n${UNINSTALLED}`]);
+        expect([...t.calls, ...u.calls]).toEqual([]);
+      },
+    );
 
     it('refuses, ending the pass, when the sandbox or its network could not start, since npm never ran', async () => {
       const t = installing(

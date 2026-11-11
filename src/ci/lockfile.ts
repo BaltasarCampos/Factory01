@@ -45,7 +45,14 @@ export function readLockfile(
   env: NodeJS.ProcessEnv,
 ): { packages: LockedPackage[]; problems: string[] } {
   const bytes = fileAt(repo, commit, LOCK, env);
-  if (bytes === undefined) return { packages: [], problems: [] };
+  return bytes === undefined ? { packages: [], problems: [] } : lockEntries(bytes, commit);
+}
+
+/** The identity rule on a lockfile's bytes, read at `commit`; throws when it is not JSON v2+. */
+export function lockEntries(
+  bytes: Buffer,
+  commit: string,
+): { packages: LockedPackage[]; problems: string[] } {
   let lock: { packages?: Record<string, Entry> };
   try {
     lock = JSON.parse(bytes.toString('utf8')) as typeof lock;

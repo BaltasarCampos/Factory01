@@ -81,7 +81,7 @@ import { ReleaseTagError } from '../../release/tag.js';
 import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
 import { hashOnce } from '../failures.js';
-import { installs, sandboxedInstall, type Installer } from './deps.js';
+import { installDependencies, installs, type Installer } from './deps.js';
 import {
   LaunchRefused,
   SessionCapped,
@@ -1886,27 +1886,31 @@ export class LocalLauncher implements LocalSessionLauncher {
 
   /**
    * The clone's dependencies, for Define, the Builder and Test when it has a package-lock.json;
-   * false when npm ci failed for the Builder or Define, who start anyway (T061). Test's head passed
-   * CI's npm ci, so its failure is the registry's or the network's: the item holds. A sandbox that
-   * could not start ran no npm: a refusal that ends the pass. A timeout is an error.
+   * false when the install failed for the Builder or Define, who start anyway (T061). Test holds:
+   * its head passed CI's npm ci, so a failed npm is most likely the registry's or the network's,
+   * and a clone npm must not run on needs a new head. A sandbox that could not start ran no npm: a
+   * refusal that ends the pass. A timeout is an error.
    */
   private dependencies(request: LaunchRequest, clone: string, tmp: string): boolean {
     if (!installs(request.role, clone)) return true;
-    const folders = (this.options.env.PATH ?? '').split(':').filter((folder) => folder !== '');
-    const git = located('git', folders);
+    const { env } = this.options;
+    const git = located('git', (env.PATH ?? '').split(':').filter(Boolean));
     if (git === undefined)
       throw new LaunchRefused("no local session started: no git on the factory's PATH for npm ci");
-    let status: number | null;
+    let failed: ReturnType<typeof installDependencies>;
     try {
-      status = (this.options.install ?? sandboxedInstall(this.options.env))(clone, tmp, git.real);
+      failed = installDependencies(clone, tmp, git.real, env, this.options.install);
     } catch (err) {
       if (!(err instanceof RefusedError) || err instanceof LaunchRefused) throw err;
       throw new LaunchRefused(`no local session started: ${visible(err.message)}`);
     }
-    if (status === 0) return true;
+    if (failed === undefined) return true;
     if (request.role !== 'test') return false;
+    const once = 'tried again each pass and alerted once per head';
     throw new LaunchRefused(
-      `no local session started: the test session's npm ci failed (${status === null ? 'killed' : `status ${String(status)}`}); the head passed CI's npm ci, so the registry or the network is down: the item holds until they are back, tried again each pass and alerted once per head`,
+      failed.npm
+        ? `no local session started: the test session's npm ci failed (${failed.why}); the head passed CI's npm ci, so most likely the registry or the network is down: the item holds until they are back, ${once}`
+        : `no local session started: the test session's npm ci never ran: ${visible(failed.why)}; the item holds until a new head changes it, ${once}`,
       false,
       undefined,
       true,

@@ -98,7 +98,7 @@ export function probeBwrap(args: readonly string[], env: NodeJS.ProcessEnv, what
 /**
  * The bubblewrap arguments for a run in `work` (made by `mkdtemp`), starting in `cwd`, with the
  * folders in `readOnly`, inside `work`, bound read-only over its writable bind, and those in
- * `writable` bound writable, such as a session's clone for its install.
+ * `writable` bound writable after them, such as a read-only clone's `node_modules` for its install.
  */
 export function sandboxArgs(
   work: string,
@@ -125,8 +125,9 @@ export function sandboxArgs(
     ...ro(join(root, 'node_modules')),
     ...['--proc', '/proc', ...DEV, '--tmpfs', '/tmp'],
     ...['--bind', work, work],
-    ...writable.flatMap((dir) => ['--bind', dir, dir]),
     ...readOnly.flatMap((dir) => ['--ro-bind', dir, dir]),
+    // After the read-only binds, so a writable folder inside one stays writable.
+    ...writable.flatMap((dir) => ['--bind', dir, dir]),
     ...['--chdir', cwd],
   ];
 }
