@@ -334,6 +334,11 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['builder', 'npm test --script-sh=python3', /^option: /],
     ['builder', 'npm --prefix ../other test', /^option: /],
     ['builder', 'npm -C ../other test', /^option: /],
+    // nopt reads one dash before two or more letters as a long option (T061).
+    ['builder', 'npm -prefix=/x run test', /option: refused: the option -prefix=\/x, .*runs/],
+    ['builder', 'npm -prefix /x run test', /option: refused: the option -prefix, .*runs/],
+    ['test', 'npx -prefix=/x vitest run', /^option: /],
+    ['builder', 'npm -xC ../other test', /option: refused: the option -xC, /],
     ['builder', 'npm run x --node-options=--require=y', /^option: /],
     ['builder', 'git grep -O x', /^option: /],
     ['builder', 'git grep --open-files-in-pager=x y', /^option: /],

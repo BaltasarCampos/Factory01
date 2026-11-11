@@ -246,16 +246,19 @@ function checkLabels(words: string[]) {
 function checkOptions(words: string[]) {
   const program = words[0] ?? '';
   const refused = `o${Object.hasOwn(SHORT, program) ? (SHORT[program] ?? '') : ''}`;
+  const nopt = program === 'npm' || program === 'npx';
   for (const word of words.slice(1)) {
-    // npm strips any run of dashes (nopt): `---output` is `--output`.
-    const name = (word.split('=')[0] ?? '').replace(/^-{3,}/, '--');
+    // npm strips any run of dashes (nopt): `---output` is `--output`, and one dash before two or
+    // more letters is a long option too, `-prefix=/x` being `--prefix=/x`. The short-letter rule
+    // below still reads the word as written.
+    const name = (word.split('=')[0] ?? '').replace(nopt ? /^-+(?=[A-Za-z]{2})/ : /^-{3,}/, '--');
     const long = name.startsWith('--') && name.length >= 4;
     if ((long && WRITES.test(name)) || (long && '--output'.startsWith(name)))
       refuse('option', `the option ${word}, which writes a file; write files with the Write tool`);
     const at = cluster(word)
       .split('')
       .findIndex((letter) => refused.includes(letter));
-    if (long ? RUNS.some((run) => run.startsWith(name)) : at >= 0)
+    if ((long && RUNS.some((run) => run.startsWith(name))) || (!word.startsWith('--') && at >= 0))
       refuse(
         'option',
         `the option ${word}, which writes a file or runs a program; ${at > 0 ? "if this is the option's value, put it in a separate word, such as git log -S foo; otherwise leave the option out" : 'leave it out'}`,
