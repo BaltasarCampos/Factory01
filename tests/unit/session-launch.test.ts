@@ -239,7 +239,7 @@ function setup(
   const launch = (request: Omit<LaunchRequest, 'project'>) =>
     launcher.launch({ project: repo.path, ...request });
   const available = () => launcher.available(repo.path);
-  return { repo, home, launch, available, sessions, versions, owner };
+  return { repo, home, launch, available, sessions, versions, owner, launcher };
 }
 const FACTORY_SETTINGS = new URL('../../factory/settings/settings.json', import.meta.url);
 /** The session's clone: a folder of its own for each launch, named with its session id. */
@@ -541,6 +541,31 @@ describe('LocalLauncher (research R8, R9)', () => {
     });
     // The hooks read it as written.
     expect(readSessionRecord(t.home, id)).toEqual(recordOf(t.home, id));
+  });
+
+  it('T125: sessionShape gives the environment, settings and arguments launch() spawns claude with', async () => {
+    const t = setup();
+    await t.launch(REQUEST);
+    const [launch] = t.sessions();
+    const id = launchedId(launch?.args ?? []) ?? '';
+    const spawned = launch?.env ?? {};
+    const clone = work(t.home, '42-add-login', id);
+
+    const shape = t.launcher.sessionShape({ project: t.repo.path, ...REQUEST }, clone, 'sonnet');
+
+    // Only the session's id and its temporary folder are its own.
+    const swap = (text: string) =>
+      text.replaceAll(shape.files.id, id).replaceAll(shape.tmp, spawned.TMPDIR ?? '');
+    expect(JSON.parse(swap(JSON.stringify(shape.env)))).toEqual(spawned);
+    expect(shape.argv.map(swap)).toEqual(launch?.args);
+    const launched = sessionFiles(t.home, id);
+    expect(swap(readFileSync(shape.files.settings, 'utf8'))).toBe(
+      readFileSync(launched.settings, 'utf8'),
+    );
+    expect(readFileSync(shape.files.mcp, 'utf8')).toBe(readFileSync(launched.mcp, 'utf8'));
+    // It writes no record and starts nothing.
+    expect(existsSync(shape.files.record)).toBe(false);
+    expect(t.sessions()).toHaveLength(1);
   });
 
   it("builds the session's environment from an allowlist, never from the Owner's", async () => {

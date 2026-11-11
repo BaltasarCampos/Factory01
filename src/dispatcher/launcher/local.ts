@@ -1872,6 +1872,21 @@ export class LocalLauncher implements LocalSessionLauncher {
     return token;
   }
 
+  /**
+   * For T125's short run alone (Owner decision 2026-11-05): a session's folder, temporary folder,
+   * environment, settings and MCP files and `claude` arguments, by the same steps `launch()`
+   * takes, for a role in `clone`. It writes no record, gives no gh token and starts nothing.
+   */
+  sessionShape(request: LaunchRequest, clone: string, model: string) {
+    const files = this.sessionFolder();
+    const tmp = this.tmpFolder(request.item);
+    const env = this.sessionEnv(request, files.id, tmp);
+    const folders = env.PATH.split(':').filter((folder) => folder !== '');
+    this.writeSettings(request, files, { clone, tmp, tests: this.testFiles(clone), folders });
+    const { caps } = factoryPolicy().roles[request.role];
+    return { files, tmp, env, argv: localInvocation(request, files, model, caps.turns) };
+  }
+
   /** The session's environment, from the allowlist alone; no Spec Kit variables (T171). */
   private sessionEnv(request: LaunchRequest, id: string, tmp: string, token?: string) {
     const { env } = this.options;
