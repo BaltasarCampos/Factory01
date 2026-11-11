@@ -43,6 +43,7 @@ import { spawn } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   accessSync,
+  appendFileSync,
   constants,
   existsSync,
   linkSync,
@@ -58,7 +59,7 @@ import {
 } from 'node:fs';
 import { dirname, join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { EnvironmentError } from '../../cli/env.js';
+import { EnvironmentError, RefusedError } from '../../cli/env.js';
 import { SERVED_HOOKS } from '../../commands/hook.js';
 import { WRAPPERS } from '../../guard/command-guard.js';
 import { isFable, roleVersion } from '../../events/schema.js';
@@ -80,6 +81,7 @@ import { ReleaseTagError } from '../../release/tag.js';
 import { isTestFile } from '../../stations/edges.js';
 import { git } from '../branch.js';
 import { hashOnce } from '../failures.js';
+import { installDependencies, installs, type Installer } from './deps.js';
 import {
   LaunchRefused,
   SessionCapped,
@@ -137,6 +139,25 @@ const GRACE = 3000;
 export const BASH_MAX_TIMEOUT = 600_000;
 /** How long a session's stream may be silent, in ms: above the longest command a role runs. */
 export const SILENCE = 12 * 60_000;
+
+/** The prompt's line for a Builder or Define whose clone's install failed; no npm output in it. */
+export const UNINSTALLED =
+  "The factory could not install this repository's dependencies before the session: run npm ci, or npm install if package-lock.json is out of step with package.json.";
+
+/**
+ * The prompt's line for a Builder or Define whose install npm never ran: the first finding,
+ * fenced and through visible(), what to change, and no npm ci, which would run the same prepare.
+ */
+function refusedLine(why: string): string {
+  const text = visible(why);
+  const fence = '`'.repeat(Math.max(3, ...(text.match(/`+/g) ?? []).map((r) => r.length + 1)));
+  return [
+    "The factory did not install this repository's dependencies, and npm never ran, because:",
+    `${fence}text\n${text}\n${fence}`,
+    'Change that first: a registry version, with its integrity, for a git, file or link dependency, or remove a committed node_modules or npm-shrinkwrap.json. Do not run npm ci or npm install before then: they would run what the factory refused.',
+  ].join('\n');
+}
+
 /** How often `factory run` hears from a running session, in ms. */
 const HEARTBEAT = 60_000;
 
@@ -1200,6 +1221,8 @@ export interface LocalOptions {
   minute?: number;
   silence?: number;
   heartbeat?: number;
+  /** The clone's install; tests give their own, so no row needs bwrap or pasta. */
+  install?: Installer;
 }
 
 export class LocalLauncher implements LocalSessionLauncher {
@@ -1387,6 +1410,9 @@ export class LocalLauncher implements LocalSessionLauncher {
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dirname(dir), { recursive: true });
     this.isolated(home, ['init', '-q', '-b', 'main', dir]);
+    // The install's folder is never part of a commit; 28-6's push check is the backstop.
+    mkdirSync(join(dir, '.git', 'info'), { recursive: true });
+    appendFileSync(join(dir, '.git', 'info', 'exclude'), '/node_modules/\n');
     const refs = [
       `+${heads.main}:refs/remotes/origin/main`,
       ...(heads.onOrigin ? [`+${heads.head}:refs/remotes/origin/${branch}`] : []),
@@ -1509,6 +1535,9 @@ export class LocalLauncher implements LocalSessionLauncher {
       });
       const tmp = step("making the session's temporary folder", () => this.tmpFolder(request.item));
       try {
+        const uninstalled = step("installing the clone's dependencies", () =>
+          this.dependencies(request, cwd, tmp),
+        );
         const env = step("building the session's environment", () =>
           this.sessionEnv(request, files.id, tmp, token),
         );
@@ -1584,7 +1613,9 @@ export class LocalLauncher implements LocalSessionLauncher {
             );
           }
           try {
-            const invocation = localInvocation(request, files, model, caps.turns);
+            const prompt =
+              uninstalled === undefined ? request.prompt : `${request.prompt}\n\n${uninstalled}`;
+            const invocation = localInvocation({ ...request, prompt }, files, model, caps.turns);
             result = await this.run('claude', invocation, {
               ...{ cwd, env, group: true, line: live.line },
               chunk: () => {
@@ -1863,7 +1894,42 @@ export class LocalLauncher implements LocalSessionLauncher {
       ...(NO_ADVISOR.has(request.role) ? { CLAUDE_CODE_DISABLE_ADVISOR_TOOL: '1' } : {}),
       // Home is unreadable to sandboxed shells (T183): their temporary files and npm's cache here.
       ...{ TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, npm_config_cache: join(tmp, 'npm') },
+      // No script runs and npx installs nothing; the command guard refuses the flags that beat these.
+      ...{ npm_config_yes: 'false', npm_config_ignore_scripts: 'true' },
     };
+  }
+
+  /**
+   * The clone's dependencies, for Define, the Builder and Test when it has a package-lock.json;
+   * for the Builder or Define after a failed install, who start anyway, the prompt's line (T061).
+   * Test holds: its head passed CI's npm ci, so a failed npm is most likely the registry's or the
+   * network's, and a clone npm must not run on needs a new item. A sandbox that could not start ran
+   * no npm: a refusal that ends the pass. A timeout is an error.
+   */
+  private dependencies(request: LaunchRequest, clone: string, tmp: string): string | undefined {
+    if (!installs(request.role, clone)) return undefined;
+    const { env } = this.options;
+    const git = located('git', (env.PATH ?? '').split(':').filter(Boolean));
+    if (git === undefined)
+      throw new LaunchRefused("no local session started: no git on the factory's PATH for npm ci");
+    let failed: ReturnType<typeof installDependencies>;
+    try {
+      failed = installDependencies(clone, tmp, git.real, env, this.options.install);
+    } catch (err) {
+      if (!(err instanceof RefusedError) || err instanceof LaunchRefused) throw err;
+      throw new LaunchRefused(`no local session started: ${visible(err.message)}`);
+    }
+    if (failed === undefined) return undefined;
+    if (request.role !== 'test') return failed.npm ? UNINSTALLED : refusedLine(failed.why);
+    const once = 'tried again each pass and alerted once per head';
+    throw new LaunchRefused(
+      failed.npm
+        ? `no local session started: the test session's npm ci failed (${failed.why}); the head passed CI's npm ci, so most likely the registry or the network is down: the item holds until they are back, ${once}`
+        : `no local session started: the test session's npm ci never ran: ${visible(failed.why)}; nothing at Test makes a new head, so close the item and file it again; it holds, ${once}`,
+      false,
+      undefined,
+      true,
+    );
   }
 
   /** The session's own folder under `~/.factory/sessions/`, made for this launch alone. */

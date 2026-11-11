@@ -265,6 +265,29 @@ describe("the command guard: nothing that shows a session's environment, where t
   );
 
   it.each([
+    ['builder', 'npm ci --ignore-scripts=false'],
+    ['builder', 'npm install --no-ignore-scripts'],
+    ['define', 'npm install --ignore-scripts false lodash'],
+    ['builder', 'npm test --ig=false'],
+    ['builder', 'npm run build --no-ignore'],
+    ['builder', 'npm test -- --IGNORE_SCRIPTS=false'],
+    ['test', 'npx --no-ignore-scripts vitest run'],
+    ['builder', 'npm install --no-no-no-ignore-scripts'],
+    ['builder', 'npm ci --no-no-no-ig'],
+    ['builder', 'npm ci -ignore-scripts=false'],
+    ['define', 'npm install -ig=false'],
+    ['builder', 'npm ci ---ignore-scripts=false'],
+    ['builder', 'npm ci ----ig=false'],
+  ])('%s: %s, which would change whether npm runs scripts, is refused (T061)', (role, command) => {
+    expect(refusal(role, command)).toMatch(/^option: refused: .*whether npm runs scripts/);
+  });
+
+  it('lets npm options that only start like it through, such as --include and --if-present', () => {
+    expect(check('builder', 'npm install --include=dev')).toEqual({ allowed: true });
+    expect(check('builder', 'npm run lint --if-present')).toEqual({ allowed: true });
+  });
+
+  it.each([
     'vitest -u',
     'vitest run -u',
     'vitest -ru',

@@ -10,6 +10,7 @@ import {
   chmodSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -360,6 +361,43 @@ describe('pasta never outlives the sandbox (T069, T164)', () => {
       expect(result.status).toBe(status);
       expect(result.pasta).toBeTypeOf('number');
       expect(gone(result.pasta)).toBe(true);
+    },
+    RUN,
+  );
+
+  it(
+    "past its timeout a run is stopped with everything in its sandbox, a child holding the run's output open included (T061)",
+    async () => {
+      const work = realpathSync(tempDir());
+      // A child in the background keeps stdout open and names the run's folder; the loop ticks.
+      const script = `/bin/sh -c 'sleep 60' held "$PWD" & while :; do echo x >> tick; sleep 0.2; done`;
+      const started = Date.now();
+      expect(() =>
+        attached(
+          sandboxArgs(work, work),
+          ['/bin/sh', '-c', script],
+          undefined,
+          outer,
+          'pasta failed',
+          false,
+          3000,
+        ),
+      ).toThrow(/ran past 3 s and was stopped, with everything in its sandbox/);
+      expect(Date.now() - started).toBeLessThan(3000 + 3000);
+      const ticks = readFileSync(join(work, 'tick'), 'utf8');
+      expect(ticks.length).toBeGreaterThan(0);
+      await sleep(1000);
+      expect(readFileSync(join(work, 'tick'), 'utf8')).toBe(ticks);
+      // No process is left whose command line names the run's folder: bwrap's or the child's.
+      const left = readdirSync('/proc').filter((pid) => {
+        if (!/^\d+$/.test(pid) || Number(pid) === process.pid) return false;
+        try {
+          return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(work);
+        } catch {
+          return false;
+        }
+      });
+      expect(left).toEqual([]);
     },
     RUN,
   );
