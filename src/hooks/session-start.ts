@@ -54,9 +54,12 @@ function mismatch(r: SessionRecord, input: HookInput, env: NodeJS.ProcessEnv) {
       input.agent_type === r.role,
       `agent_type ${shown(input.agent_type)} is not the session's role ${r.role}`,
     ],
+    // Claude Code 2.1.322's SessionStart input carries no permission_mode (T125's short run, S1),
+    // so a missing one passes: the launcher fails a session whose init message is not dontAsk, and
+    // the gate refuses every tool call whose PreToolUse input is not dontAsk, a missing one too.
     [
       'permission-mode',
-      input.permission_mode === 'dontAsk',
+      input.permission_mode === undefined || input.permission_mode === 'dontAsk',
       `permission_mode ${shown(input.permission_mode)} is not dontAsk`,
     ],
     [

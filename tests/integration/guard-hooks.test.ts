@@ -584,13 +584,6 @@ describe('the session-start hook (T086, T078)', () => {
       /permission_mode "bypassPermissions" is not dontAsk/,
       'permission-mode',
     ],
-    [
-      'permission_mode missing',
-      { permission_mode: undefined },
-      {},
-      /permission_mode unset is not dontAsk/,
-      'permission-mode',
-    ],
   ] as const)(
     'blocks %s, records it, and writes no passed record',
     async (_name, extra, env, reason, rule) => {
@@ -609,6 +602,29 @@ describe('the session-start hook (T086, T078)', () => {
       expect((await hook('command-guard', at, 'Bash', { command: 'npm test' })).code).toBe(2);
     },
   );
+
+  it('passes a start whose input carries no permission_mode, as 2.1.322 sends it, while the gate still refuses a tool call without one (T125)', async () => {
+    const at = setUp({}, { passed: false });
+    expect(await start(at, { permission_mode: undefined })).toEqual({ code: 0, stderr: '' });
+    expect(JSON.parse(readFileSync(passedRecord(at.home), 'utf8'))).toMatchObject({
+      session: SESSION,
+    });
+    expect(await hook('gate', at, 'Read', { file_path: 'src/login.ts' })).toEqual({
+      code: 0,
+      stderr: '',
+    });
+    const unset = await hook(
+      'gate',
+      at,
+      'Read',
+      { file_path: 'src/login.ts' },
+      {
+        permission_mode: undefined,
+      },
+    );
+    expect(unset.code).toBe(2);
+    expect(unset.stderr).toMatch(/permission_mode unset is not dontAsk; no tool call runs/);
+  });
 
   it('blocks FACTORY_ITEM for a session with no item', async () => {
     const at = setUp(
