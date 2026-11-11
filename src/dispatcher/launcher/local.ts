@@ -139,6 +139,11 @@ const GRACE = 3000;
 export const BASH_MAX_TIMEOUT = 600_000;
 /** How long a session's stream may be silent, in ms: above the longest command a role runs. */
 export const SILENCE = 12 * 60_000;
+
+/** The prompt's line for a Builder or Define whose clone's install failed; no npm output in it. */
+export const UNINSTALLED =
+  "The factory could not install this repository's dependencies before the session: run npm ci, or npm install if package-lock.json is out of step with package.json.";
+
 /** How often `factory run` hears from a running session, in ms. */
 const HEARTBEAT = 60_000;
 
@@ -155,10 +160,6 @@ const HEARTBEAT = 60_000;
  * that comes while the output drains ends the factory as the run settles. `started` is called once
  * every listener is in place, and if it throws, the group is stopped and the run rejects.
  */
-/** The prompt's line for a Builder or Define whose clone's install failed; no npm output in it. */
-export const UNINSTALLED =
-  "The factory could not install this repository's dependencies before the session: run npm ci, or npm install if package-lock.json is out of step with package.json.";
-
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
     const { timeout, group, silence, line, chunk: heard, ...spawned } = options;
