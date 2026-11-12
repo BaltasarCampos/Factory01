@@ -39,7 +39,7 @@
 // read-only, expiring soon after the run. GitHub has no comment-only permission, so it can also
 // change labels and close issues, which is why gates rest on signed records. Without it the role
 // does not start, and it never falls back to the Owner's own `gh` login, which can push.
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   accessSync,
@@ -112,6 +112,8 @@ export type Runner = (
     chunk?: () => void;
     /** The program's pid once it has started: for a grouped run, its process group's id. */
     started?: (pid: number) => void;
+    /** Bubblewrap's arguments to run the program inside, as a session's claude runs (`CONTAIN`). */
+    contain?: readonly string[];
   },
 ) => Promise<{
   status: number | null;
@@ -129,6 +131,27 @@ export type Runner = (
  * untimed run's, such as a session's, longer, so its last lines are not lost.
  */
 const DRAIN = { timed: 200, untimed: 2000 };
+
+/**
+ * The bubblewrap a session's claude runs in (T061, T125's findings 2 and 3): the host as it is, but
+ * a PID namespace of its own, with its own /proc, ending with the factory. Claude Code starts each
+ * Bash command, a background task's included, in a session and process group of its own, outside
+ * claude's; inside this namespace every one of them ends once its first process does, nested
+ * namespaces included, and that process ends with this bwrap, which the launcher starts and
+ * records as the session's group: so a factory SIGKILLed, or this bwrap killed alone, leaves
+ * nothing of the session running.
+ */
+export const CONTAIN = [
+  ...['--dev-bind', '/', '/', '--proc', '/proc'],
+  ...['--unshare-pid', '--die-with-parent', '--'],
+] as const;
+/** Claude Code's own sandbox, in the shape each Bash command starts it, for the nested probe. */
+const NESTED = [
+  ...['--new-session', '--die-with-parent', '--unshare-net', '--unshare-pid'],
+  ...['--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', 'true'],
+];
+/** How long the nested probe may run, in ms, killed with SIGKILL past it. */
+const PROBE = 30_000;
 /** The longest line `line` is given, in characters; a longer one is cut there, the rest skipped. */
 export const MAX_LINE = 4 * 1024 * 1024;
 /** The signals that end the factory, each with its exit status, 128 and the signal's number. */
@@ -176,7 +199,7 @@ const HEARTBEAT = 60_000;
  */
 export const runProcess: Runner = (program, args, options) =>
   new Promise((resolve, reject) => {
-    const { timeout, group, silence, line, chunk: heard, ...spawned } = options;
+    const { timeout, group, silence, line, chunk: heard, contain, ...spawned } = options;
     const grouped = timeout !== undefined || group === true;
     let stdout = '';
     let stderr = '';
@@ -219,7 +242,9 @@ export const runProcess: Runner = (program, args, options) =>
     }
     const child = (() => {
       try {
-        return spawn(program, args, {
+        const argv =
+          contain === undefined ? [program, ...args] : ['bwrap', ...contain, program, ...args];
+        return spawn(argv[0] ?? program, argv.slice(1), {
           ...spawned,
           stdio: ['ignore', 'pipe', 'pipe'],
           detached: grouped,
@@ -596,7 +621,7 @@ function groupRunning(file: string, id: string): string | undefined {
     return `no local session started: session ${visible(id)} is still running (this or another factory) as process group ${String(pgid)}; if no factory runs it, stop it with kill -TERM -${String(pgid)}, then run the factory again`;
   const members = groupMembers(pgid);
   if (members.length > 0)
-    return `no local session started: session ${visible(id)}'s claude has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); look at them with ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}, then run the factory again`;
+    return `no local session started: session ${visible(id)}'s bubblewrap has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); look at them with ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}, then run the factory again`;
   return undefined;
 }
 
@@ -1558,6 +1583,7 @@ export class LocalLauncher implements LocalSessionLauncher {
         });
         await this.shellNames(empty, env);
         await this.claudeVersion(cwd, env);
+        this.nested(env);
         step("writing the session's settings and record", () => {
           const tests = this.testFiles(cwd);
           this.writeSettings(request, files, { clone: cwd, tmp, tests, folders });
@@ -1618,7 +1644,7 @@ export class LocalLauncher implements LocalSessionLauncher {
               uninstalled === undefined ? request.prompt : `${request.prompt}\n\n${uninstalled}`;
             const invocation = localInvocation({ ...request, prompt }, files, model, caps.turns);
             result = await this.run('claude', invocation, {
-              ...{ cwd, env, group: true, line: live.line },
+              ...{ cwd, env, group: true, line: live.line, contain: CONTAIN },
               chunk: () => {
                 live.silence = Math.max(live.silence, Date.now() - heard);
                 heard = Date.now();
@@ -1858,6 +1884,25 @@ export class LocalLauncher implements LocalSessionLauncher {
     }
   }
 
+  /**
+   * Claude's bubblewrap with Claude Code's own nested inside it, as every Bash command starts, run
+   * before every spawn (T061): if it fails, no session starts, so none runs uncontained or without
+   * its sandbox.
+   */
+  private nested(env: NodeJS.ProcessEnv) {
+    const probe = spawnSync('bwrap', [...CONTAIN, 'bwrap', ...NESTED], {
+      ...{ env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
+      ...{ timeout: PROBE, killSignal: 'SIGKILL' },
+    });
+    if (probe.error === undefined && probe.status === 0) return;
+    const why =
+      probe.error?.message ??
+      (probe.signal === null ? probe.stderr.trim() : `ended by ${probe.signal}`);
+    throw new LaunchRefused(
+      `no local session started: claude runs in a bubblewrap of the factory's, with Claude Code's own sandbox nested inside it, and that failed: ${visible(why)}; check that bwrap --dev-bind / / --proc /proc --unshare-pid -- bwrap --ro-bind / / --proc /proc true runs on this machine`,
+    );
+  }
+
   /** The project's gh token, for a role with `gh` in its shell. */
   private ghToken(role: RoleName, repo: string): string {
     const file = tokenFile(this.options.home, repo);
@@ -1888,7 +1933,8 @@ export class LocalLauncher implements LocalSessionLauncher {
       const folders = env.PATH.split(':').filter((folder) => folder !== '');
       this.writeSettings(request, files, { clone, tmp, tests: this.testFiles(clone), folders });
       const { caps } = factoryPolicy().roles[request.role];
-      return { files, tmp, env, argv: localInvocation(request, files, model, caps.turns) };
+      const argv = localInvocation(request, files, model, caps.turns);
+      return { files, tmp, env, argv, contain: CONTAIN };
     } catch (err) {
       if (tmp !== undefined) rmSync(tmp, { recursive: true, force: true });
       rmSync(dirname(files.record), { recursive: true, force: true });

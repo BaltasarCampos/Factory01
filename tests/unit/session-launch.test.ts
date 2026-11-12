@@ -26,6 +26,7 @@ import * as deps from '../../src/dispatcher/launcher/deps.js';
 import { installArgs, installs, type Installer } from '../../src/dispatcher/launcher/deps.js';
 import {
   guardrailCheck,
+  CONTAIN,
   LocalLauncher,
   groupRecord,
   localInvocation,
@@ -570,6 +571,44 @@ describe('LocalLauncher (research R8, R9)', () => {
     // It writes no record and starts nothing.
     expect(existsSync(shape.files.record)).toBe(false);
     expect(t.sessions()).toHaveLength(1);
+  });
+
+  it("starts claude alone in the factory's bubblewrap, in a PID namespace of its own (T061)", async () => {
+    const run = vi.fn(fakeRunner().run);
+    const t = setup({ run });
+    await t.launch(REQUEST);
+    const contained = run.mock.calls.filter(([, , options]) => options.contain !== undefined);
+    expect(contained.map(([program, args]) => [program, args[0]])).toEqual([['claude', '-p']]);
+    expect(contained[0]?.[2].contain).toEqual(CONTAIN);
+    expect(CONTAIN).toEqual(expect.arrayContaining(['--unshare-pid', '--die-with-parent']));
+    // T125's kit runs what the launcher runs.
+    const clone = work(t.home, '42-add-login');
+    const shape = t.launcher.sessionShape({ project: t.repo.path, ...REQUEST }, clone, 'sonnet');
+    expect(shape.contain).toEqual(CONTAIN);
+  });
+
+  it("refuses a launch, counting nothing, when Claude Code's sandbox cannot start inside the factory's bubblewrap (T061)", async () => {
+    const heard: string[] = [];
+    const t = setup({
+      stubs: false,
+      path: (home) => {
+        const dir = join(home, 'broken-bwrap');
+        mkdirSync(dir);
+        writeFileSync(join(dir, 'bwrap'), '#!/bin/sh\necho "bwrap: no nesting" >&2\nexit 1\n', {
+          mode: 0o755,
+        });
+        writeFileSync(join(dir, 'socat'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+        return `${dir}:${standIns('gh')}:${launchFolder()}`;
+      },
+    });
+    const refused = t.launch({ ...REQUEST, starting: (id) => heard.push(id) });
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(
+      "no local session started: claude runs in a bubblewrap of the factory's, with Claude Code's own sandbox nested inside it, and that failed: bwrap: no nesting",
+    );
+    expect(t.sessions()).toEqual([]);
+    expect(heard).toEqual([]);
+    expect(existsSync(join(t.home, '.factory', 'sessions', FIRST, 'not-spawned'))).toBe(true);
   });
 
   it('T125: sessionShape leaves neither folder it made when it throws', () => {
@@ -1902,8 +1941,11 @@ describe('LocalLauncher (research R8, R9)', () => {
           // The child is started first, so its pid is on record before any line is read.
           const left = 'sleep 30 & echo $! > left.pid; ';
           const script = at.ends === true ? 'cat stream.jsonl' : `${left}cat stream.jsonl; wait`;
-          // The stand-in's own PATH: the session's holds no cat or sleep.
-          return runProcess('bash', ['-c', script], { ...options, cwd: dir, env: gitEnv });
+          // The stand-in's own PATH: the session's holds no cat or sleep. Uncontained, so its
+          // pids are the host's (tests/contract/contain.test.ts runs CONTAIN).
+          const host = { ...options };
+          delete host.contain;
+          return runProcess('bash', ['-c', script], { ...host, cwd: dir, env: gitEnv });
         };
         const t = setup({ run });
         home = t.home;
@@ -1962,8 +2004,10 @@ describe('LocalLauncher (research R8, R9)', () => {
         const run: Runner = (program, args, options) => {
           if (args[0] !== '-p') return base.run(program, args, options);
           const dir = join(home, '.factory', 'sessions', FIRST);
+          const host = { ...options };
+          delete host.contain;
           return runProcess('bash', ['-c', script], {
-            ...{ ...options, cwd: dir, env: gitEnv },
+            ...{ ...host, cwd: dir, env: gitEnv },
             started: (pid) => {
               started?.(pid, dir);
               options.started?.(pid);
@@ -2102,7 +2146,7 @@ describe('LocalLauncher (research R8, R9)', () => {
           await expect(refused).rejects.toMatchObject({ urgent: true, kind: 'session-running' });
           await expect(refused).rejects.toThrow(
             new RegExp(
-              `claude has ended, but processes ${left} of its process group .*ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}`,
+              `bubblewrap has ended, but processes ${left} of its process group .*ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}`,
             ),
           );
         } finally {
