@@ -6,6 +6,7 @@
 // `blocking:`, is open, and an open one keeps the item in `verifying`; a dismissal is the Owner's
 // (T105).
 import type { CheckResult } from '../../hooks/stop.js';
+import type { SessionOutput } from '../../hooks/session-commits.js';
 import { featureFiles } from './feature.js';
 
 const REPORT = 'reports/security.md';
@@ -46,8 +47,8 @@ export function checkSecurityReport(text: string): SecurityResult {
 }
 
 /** The stop hook's check for Security's session: the committed report of the feature folder. */
-export function securityStopCheck(cwd: string): CheckResult {
-  const files = featureFiles(cwd, [REPORT]);
+export function securityStopCheck(at: SessionOutput): CheckResult {
+  const files = featureFiles(at, [REPORT]);
   const report = files.text[REPORT];
   return report === undefined
     ? { complete: false, missing: files.missing }

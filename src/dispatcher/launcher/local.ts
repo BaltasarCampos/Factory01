@@ -1564,6 +1564,7 @@ export class LocalLauncher implements LocalSessionLauncher {
           const record = {
             ...{ role: request.role, item: request.item, station: request.station },
             ...{ feature: request.feature, files: request.files, clone: cwd, model },
+            project: realpathSync(request.project),
             role_version: roleVersion(manifest.release, role),
             ...{
               repo,

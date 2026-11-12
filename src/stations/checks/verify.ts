@@ -5,6 +5,7 @@
 // review findings are task items, `- [ ] blocking: …` until resolved and `- [x] …` after; they may
 // also sit under a `## Blocking findings` heading. Any failing line keeps the item in `verifying`.
 import type { CheckResult } from '../../hooks/stop.js';
+import type { SessionOutput } from '../../hooks/session-commits.js';
 import { featureFiles } from './feature.js';
 
 export const VERIFY_CHECKS = ['Review'] as const;
@@ -57,8 +58,8 @@ export function checkVerifyReport(text: string): VerifyResult {
 }
 
 /** The stop hook's check for Verify: the committed report of the feature folder. */
-export function verifyStopCheck(cwd: string): CheckResult {
-  const files = featureFiles(cwd, [REPORT]);
+export function verifyStopCheck(at: SessionOutput): CheckResult {
+  const files = featureFiles(at, [REPORT]);
   const report = files.text[REPORT];
   return report === undefined
     ? { complete: false, missing: files.missing }

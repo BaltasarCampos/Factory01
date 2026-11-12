@@ -8,7 +8,8 @@
 //
 // The role, station, item, clone and repository come from the session's record
 // (src/hooks/session.ts), never from the clone, and a blocked stop is logged in the session's own
-// log, Define's and Intake's included.
+// log, Define's and Intake's included. No factory git runs in the clone: its head is read inside
+// the factory's sandbox into the factory's own clone (session-commits.ts), and checked there.
 import { homedir } from 'node:os';
 import { STATIONS, type Station } from '../model/types.js';
 import { visible } from '../notify/summary.js';
@@ -20,6 +21,7 @@ import { securityStopCheck } from '../stations/checks/security.js';
 import { specStopCheck } from '../stations/checks/spec.js';
 import { verifyStopCheck } from '../stations/checks/verify.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
+import { sessionOutput, UnreadableHead, type SessionOutput } from './session-commits.js';
 import { logBlocked, readSessionRecord, sessionId, type SessionRecord } from './session.js';
 
 export interface CheckResult {
@@ -30,7 +32,10 @@ export interface CheckResult {
   waiting?: boolean;
 }
 
-export type StationChecker = (r: SessionRecord) => CheckResult | Promise<CheckResult>;
+export type StationChecker = (
+  r: SessionRecord,
+  at: () => SessionOutput,
+) => CheckResult | Promise<CheckResult>;
 
 /**
  * Intake checks its item's labels in the record's repository; a record with no item blocks the
@@ -43,17 +48,17 @@ function intakeStopCheck(r: SessionRecord): CheckResult | Promise<CheckResult> {
 }
 
 /**
- * Output checkers by station, each reading the record's clone; a station without one fails
- * closed. Verify has two outputs, so the record's role picks Security's report or the review
- * (T168).
+ * Output checkers by station, each reading the session's head in the factory's own clone, but
+ * Intake's, which reads GitHub; a station without one fails closed. Verify has two outputs, so
+ * the record's role picks Security's report or the review (T168).
  */
 export const CHECKERS: Partial<Record<Station, StationChecker>> = {
-  0: (r) => defineStopCheck(r.clone),
+  0: (r, at) => defineStopCheck(r, at()),
   1: intakeStopCheck,
-  2: (r) => specStopCheck(r.clone),
-  3: (r) => planStopCheck(r.clone),
-  4: (r) => buildStopCheck(r.clone),
-  5: (r) => (r.role === 'security' ? securityStopCheck(r.clone) : verifyStopCheck(r.clone)),
+  2: (_r, at) => specStopCheck(at()),
+  3: (_r, at) => planStopCheck(at()),
+  4: (_r, at) => buildStopCheck(at()),
+  5: (r, at) => (r.role === 'security' ? securityStopCheck(at()) : verifyStopCheck(at())),
 };
 
 export async function runStop(
@@ -71,9 +76,18 @@ export async function runStop(
   if (checker === undefined) {
     reason = `no output checker for station ${String(record.station)} (${name}) in this build; the session cannot confirm its output`;
   } else {
-    const result = await checker(record);
-    if (!result.complete) {
-      reason = `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
+    // Read once, when a checker asks: Intake's never does.
+    const env = { ...process.env, ...ctx.env };
+    let output: SessionOutput | undefined;
+    const at = () => (output ??= sessionOutput(record, home, session, env));
+    try {
+      const result = await checker(record, at);
+      if (!result.complete) {
+        reason = `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
+      }
+    } catch (err) {
+      if (!(err instanceof UnreadableHead)) throw err;
+      reason = `station ${name} output cannot be read: ${err.message}`;
     }
   }
   if (reason === undefined) return { block: false };

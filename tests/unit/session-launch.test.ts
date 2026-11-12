@@ -538,6 +538,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(recordOf(t.home, id)).toEqual({
       ...{ role: 'spec', item: 42, station: 2, feature: 'specs/42-add-login' },
       ...{ files: ['specs/42-add-login/spec.md'], clone: work(t.home, '42-add-login') },
+      project: realpathSync(t.repo.path),
       ...{ model: 'sonnet', role_version: roleVersion('v1.0.0', roleFile('spec')) },
       ...{ repo: 'owner/project', inbox_issue: 1, branch: BRANCH },
       ...{ head: t.repo.revParse(`origin/${BRANCH}`), tests: ['tests/login.test.ts'] },

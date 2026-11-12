@@ -9,15 +9,14 @@
 //
 // The seed marker and the backlog list are trace information: admission waits for the Owner's
 // signed `Factory-Merge: define` and each issue's own `owner:approved` (src/dispatcher).
-import { spawnSync } from 'node:child_process';
-import { join } from 'node:path';
-import { EnvironmentError } from '../../cli/env.js';
 import { gh, Fields, numberArg, repoArg, type GhOptions } from '../../github/gh.js';
 import { listPrs } from '../../github/prs.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
-import { loadConfig } from '../../model/config.js';
 import type { ReleaseKeys } from '../../approvals/keys.js';
 import { signedAnswers } from '../../git/answers.js';
+import { safeGit } from '../../git/diff.js';
+import type { SessionOutput } from '../../hooks/session-commits.js';
+import type { SessionRecord } from '../../hooks/session.js';
 import type { CheckResult } from '../../hooks/stop.js';
 import { BRIEF_PATH } from '../../install/manifest.js';
 
@@ -61,13 +60,10 @@ export interface DefineCheck {
   answersSignedBy: ReleaseKeys | 'as-committed';
 }
 
+/** Git without the Owner's config, as every factory read of branch content runs. */
 function git(cwd: string, args: readonly string[]): { ok: boolean; out: string } {
-  const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
-    cwd,
-    encoding: 'utf8',
-  });
-  if (result.error) throw new EnvironmentError(`could not run git: ${result.error.message}`);
-  return { ok: result.status === 0, out: result.stdout.trim() };
+  const result = safeGit(cwd, args, process.env);
+  return { ok: result.status === 0, out: result.stdout.toString().trim() };
 }
 
 /** A file at a commit, or undefined when it is not there. */
@@ -275,9 +271,16 @@ export async function checkDefine(input: DefineCheck): Promise<DefineResult> {
   return done(missing);
 }
 
-/** The stop hook's check: a Define session may stop when done or waiting for answers. */
-export async function defineStopCheck(cwd: string): Promise<CheckResult> {
-  const { repo } = await loadConfig(join(cwd, '.factory', 'config'));
-  const result = await checkDefine({ workdir: cwd, repo, answersSignedBy: 'as-committed' });
+/**
+ * The stop hook's check: a Define session may stop when done or waiting for answers. It reads the
+ * session's head in the factory's own clone, and the repository from the session's record.
+ */
+export async function defineStopCheck(r: SessionRecord, at: SessionOutput): Promise<CheckResult> {
+  if (r.branch !== DEFINE_BRANCH)
+    return { complete: false, missing: [`not on ${DEFINE_BRANCH} (on ${r.branch})`] };
+  const result = await checkDefine({
+    ...{ workdir: at.repo, ref: at.commit, repo: r.repo },
+    answersSignedBy: 'as-committed',
+  });
   return result.waiting ? { complete: true } : result;
 }

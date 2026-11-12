@@ -12,6 +12,7 @@
 // A question under `## Clarifications` that is not settled keeps the spec incomplete; when the
 // questions waiting for the Owner are all that is missing, the stop is a waiting one (T180, T182,
 // questions.ts).
+import type { SessionOutput } from '../../hooks/session-commits.js';
 import type { CheckResult } from '../../hooks/stop.js';
 import { committed, featureDir, featureFiles } from './feature.js';
 import {
@@ -163,13 +164,13 @@ export function checkSpec(
 }
 
 /** The stop hook's check for Specify: the committed `spec.md` of the feature folder. */
-export function specStopCheck(cwd: string): CheckResult {
-  const files = featureFiles(cwd, ['spec.md']);
+export function specStopCheck(at: SessionOutput): CheckResult {
+  const files = featureFiles(at, ['spec.md']);
   const spec = files.text['spec.md'];
   if (spec === undefined) return { complete: false, missing: files.missing };
-  return checkSpec(spec, committedAnswers(cwd));
+  return checkSpec(spec, committedAnswers(at));
 }
 
-/** The Owner's answers as committed in the feature folder at HEAD. */
-export const committedAnswers = (cwd: string) =>
-  parseAnswers(committed(cwd, `${featureDir(cwd)}/answers.md`));
+/** The Owner's answers as committed in the feature folder at the session's head. */
+export const committedAnswers = (at: SessionOutput) =>
+  parseAnswers(committed(at, `${featureDir(at)}/answers.md`));

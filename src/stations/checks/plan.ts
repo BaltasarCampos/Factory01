@@ -9,6 +9,7 @@
 import type { CheckResult } from '../../hooks/stop.js';
 import { parseConfig } from '../../model/config.js';
 import { isPlainPath } from '../../model/naming.js';
+import type { SessionOutput } from '../../hooks/session-commits.js';
 import { committed, featureFiles } from './feature.js';
 import { questionsIn } from './questions.js';
 import { checkSpec, committedAnswers, section, withQuestions } from './spec.js';
@@ -125,12 +126,12 @@ export function checkPlan(input: PlanInput): CheckResult & { missing: string[] }
 }
 
 /** The stop hook's check for Plan, against the size limit in the committed project config. */
-export function planStopCheck(cwd: string): CheckResult {
-  const files = featureFiles(cwd, ['spec.md', 'plan.md', 'tasks.md']);
+export function planStopCheck(at: SessionOutput): CheckResult {
+  const files = featureFiles(at, ['spec.md', 'plan.md', 'tasks.md']);
   const { 'spec.md': spec, 'plan.md': plan, 'tasks.md': tasks } = files.text;
   if (spec === undefined || plan === undefined || tasks === undefined)
     return { complete: false, missing: files.missing };
-  const config = parseConfig(committed(cwd, '.factory/config') ?? '');
-  const answers = committedAnswers(cwd);
+  const config = parseConfig(committed(at, '.factory/config') ?? '');
+  const answers = committedAnswers(at);
   return checkPlan({ spec, plan, tasks, sizeLimit: config.size_limit_lines, answers });
 }

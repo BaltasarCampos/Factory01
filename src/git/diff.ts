@@ -49,13 +49,13 @@ const GITLINK = '160000';
  * `GIT_DIR`, `GIT_INDEX_FILE` or `GIT_OBJECT_DIRECTORY` could point at another repository.
  * Dropping the global config also drops a CI runner's `safe.directory`, so the repository is
  * named on the command line, which git counts as protected configuration. `index` is a temporary
- * index file the factory made, set after the drop.
+ * index file the factory made, set after the drop. `input` is text, or a file descriptor to read.
  */
 export function safeGit(
   repo: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
-  input?: string,
+  input?: string | number,
   index?: string,
 ) {
   const clean = Object.fromEntries(
@@ -78,7 +78,8 @@ export function safeGit(
         ...(index === undefined ? {} : { GIT_INDEX_FILE: index }),
       },
       maxBuffer: 1024 * 1024 * 1024,
-      ...(input === undefined ? {} : { input }),
+      ...(typeof input === 'number' ? { stdio: [input, 'pipe', 'pipe'] as const } : {}),
+      ...(typeof input === 'string' ? { input } : {}),
     },
   );
   if (result.error !== undefined) throw result.error;
