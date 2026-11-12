@@ -490,42 +490,79 @@ const RULES = /^(claude(\.local)?\.md|rules)$/i;
 const errno = (error: unknown) => (error as NodeJS.ErrnoException).code;
 
 /**
- * The fields of `/proc/<pid>/stat` from the third on, read after the last `)`, since the command's
- * name may hold spaces: `[0]` its state, `[2]` its process group, `[19]` its start time in clock
- * ticks since boot. Undefined once the process has gone.
+ * `/proc`, read for the sessions' process groups (T061, deferred (1) and (2)): one scan of every
+ * process for a launch's still-running check, made at most once, and a fresh one for each later
+ * question. `root` is `/proc`, or a folder a test sets up in its place.
  */
-function procStat(pid: number): string[] | undefined {
-  let text: string;
-  try {
-    text = readFileSync(`/proc/${String(pid)}/stat`, 'utf8');
-  } catch (err) {
-    if (errno(err) === 'ENOENT' || errno(err) === 'ESRCH') return undefined;
-    throw err;
-  }
-  return text.slice(text.lastIndexOf(')') + 2).split(' ');
-}
+export class ProcScan {
+  /** How many times every process was read. */
+  scans = 0;
+  private groups: Map<string, number[]> | undefined;
+  constructor(readonly root = '/proc') {}
 
-const bootId = () => readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+  /**
+   * The fields of `<pid>/stat` from the third on, read after the last `)`, since the command's
+   * name may hold spaces: `[0]` its state, `[2]` its process group, `[19]` its start time in clock
+   * ticks since boot. Undefined once the process has gone, and, when `others`, for a process whose
+   * stat cannot be read, as another user's under a /proc mounted with hidepid: a session's
+   * processes are all the Owner's. Any other failure, or a stat that cannot be parsed, is an error.
+   */
+  stat(pid: number, others = false): string[] | undefined {
+    const file = join(this.root, String(pid), 'stat');
+    let text: string;
+    try {
+      text = readFileSync(file, 'utf8');
+    } catch (err) {
+      if (errno(err) === 'ENOENT' || errno(err) === 'ESRCH') return undefined;
+      if (others && errno(err) === 'EACCES') return undefined;
+      const hidepid = errno(err) === 'EACCES' ? ', as under a /proc mounted with hidepid' : '';
+      throw new EnvironmentError(
+        `${file} cannot be read (${visible(String(errno(err)))})${hidepid}, so no session's process group can be checked; mount /proc so the Owner's processes can be read`,
+      );
+    }
+    const end = text.lastIndexOf(')');
+    const fields = end === -1 ? [] : text.slice(end + 2).split(' ');
+    if (fields.length < 20)
+      throw new EnvironmentError(`${file} cannot be parsed: ${visible(text.slice(0, 80))}`);
+    return fields;
+  }
+
+  /** The kernel's boot id, which tells a recorded leader from a later process given its pid. */
+  boot(): string {
+    const file = join(this.root, 'sys', 'kernel', 'random', 'boot_id');
+    try {
+      return readFileSync(file, 'utf8').trim();
+    } catch (err) {
+      throw new EnvironmentError(
+        `${file} cannot be read (${visible(String(errno(err)))}), so no session's process group can be told from a later one`,
+      );
+    }
+  }
+
+  /** The live processes of process group `pgid`, a zombie not counted. */
+  members(pgid: number): number[] {
+    if (this.groups === undefined) {
+      this.scans += 1;
+      this.groups = new Map();
+      for (const name of readdirSync(this.root).filter((n) => /^\d+$/.test(n))) {
+        const stat = this.stat(Number(name), true);
+        if (stat === undefined || stat[0] === 'Z') continue;
+        this.groups.set(stat[2] ?? '', [...(this.groups.get(stat[2] ?? '') ?? []), Number(name)]);
+      }
+    }
+    return this.groups.get(String(pgid)) ?? [];
+  }
+}
 
 /**
  * A session's process group as recorded in its folder: its id, and its leader's start time and
- * the kernel's boot id, which together tell that leader from a later process given its pid (T061).
+ * the kernel's boot id, read before the spawn, which together tell that leader from a later
+ * process given its pid (T061).
  */
-export function groupRecord(pgid: number) {
-  const start = procStat(pgid)?.[19];
+export function groupRecord(pgid: number, boot = new ProcScan().boot(), scan = new ProcScan()) {
+  const start = scan.stat(pgid)?.[19];
   if (start === undefined) throw new Error(`process ${String(pgid)} has no start time`);
-  return { pgid, start, boot: bootId() };
-}
-
-/** The live processes of process group `pgid`, a zombie not counted. */
-function groupMembers(pgid: number): number[] {
-  return readdirSync('/proc')
-    .filter((name) => /^\d+$/.test(name))
-    .map(Number)
-    .filter((pid) => {
-      const stat = procStat(pid);
-      return stat !== undefined && stat[0] !== 'Z' && stat[2] === String(pgid);
-    });
+  return { pgid, start, boot };
 }
 
 /** Whether `done` holds within about a second, asked every 50 ms. */
@@ -566,7 +603,11 @@ const keptOut = (branch: string) =>
  * when a factory stopped between the spawn and the group's record, stop the pass, naming the way
  * out.
  */
-export function sessionRunning(home: string, id: string): string | undefined {
+export function sessionRunning(
+  home: string,
+  id: string,
+  scan = new ProcScan(),
+): string | undefined {
   const dir = join(home, '.factory', 'sessions', id);
   const file = join(dir, 'group.json');
   const out = `remove ${visible(dir)} once ps -eo pid,pgid,args shows nothing of session ${visible(id)}`;
@@ -582,11 +623,11 @@ export function sessionRunning(home: string, id: string): string | undefined {
       `whether session ${visible(id)} still runs is unknown: ${visible(dir)} records no process group and no end, as when a factory stops after session.json is written and before claude spawns, or after claude spawns and before its group is recorded; ${out}`,
     );
   }
-  return groupRunning(file, id);
+  return groupRunning(file, id, scan);
 }
 
 /** Why the group recorded in `file` for session `id` still runs, or undefined when it does not. */
-function groupRunning(file: string, id: string): string | undefined {
+function groupRunning(file: string, id: string, scan = new ProcScan()): string | undefined {
   let text: string;
   try {
     text = readFileSync(file, 'utf8');
@@ -614,12 +655,12 @@ function groupRunning(file: string, id: string): string | undefined {
     );
   }
   const pgid = group.pgid as number;
-  if (group.boot !== bootId()) return undefined;
-  const leader = procStat(pgid);
+  if (group.boot !== scan.boot()) return undefined;
+  const leader = scan.stat(pgid);
   if (leader !== undefined && leader[19] !== group.start) return undefined;
   if (leader !== undefined && leader[0] !== 'Z')
     return `no local session started: session ${visible(id)} is still running (this or another factory) as process group ${String(pgid)}; if no factory runs it, stop it with kill -TERM -${String(pgid)}, then run the factory again`;
-  const members = groupMembers(pgid);
+  const members = scan.members(pgid);
   if (members.length > 0)
     return `no local session started: session ${visible(id)}'s bubblewrap has ended, but processes ${members.join(', ')} of its process group ${String(pgid)} still run (this or another factory); look at them with ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}, then run the factory again`;
   return undefined;
@@ -1242,6 +1283,8 @@ export interface LocalOptions {
   sessionId?: () => string;
   /** Where the session's temporary folder is made, kept short (T061); default `/tmp`. */
   tmpRoot?: string;
+  /** `/proc`, or a folder a test sets up in its place. */
+  proc?: string;
   /** A cap's minute, the watchdog's silence and the heartbeat, in ms; tests shorten them. */
   minute?: number;
   silence?: number;
@@ -1584,6 +1627,9 @@ export class LocalLauncher implements LocalSessionLauncher {
         await this.shellNames(empty, env);
         await this.claudeVersion(cwd, env);
         this.nested(env);
+        const proc = () => new ProcScan(this.options.proc);
+        // Before the spawn: once claude runs, a failure here would stop it unrecorded.
+        const boot = step("reading the kernel's boot id", () => proc().boot());
         step("writing the session's settings and record", () => {
           const tests = this.testFiles(cwd);
           this.writeSettings(request, files, { clone: cwd, tmp, tests, folders });
@@ -1653,7 +1699,7 @@ export class LocalLauncher implements LocalSessionLauncher {
               started: (pgid) => {
                 ran.spawned = true;
                 ran.started = true;
-                writeWhole(group, `${JSON.stringify(groupRecord(pgid))}\n`);
+                writeWhole(group, `${JSON.stringify(groupRecord(pgid, boot, proc()))}\n`);
               },
             });
           } catch (err) {
@@ -1727,7 +1773,8 @@ export class LocalLauncher implements LocalSessionLauncher {
         try {
           // A runner that never reported a group, as the tests' fake one, has returned: ended.
           const gone = () =>
-            !ran.started || (existsSync(group) && groupRunning(group, files.id) === undefined);
+            !ran.started ||
+            (existsSync(group) && groupRunning(group, files.id, proc()) === undefined);
           if (await until(gone)) writeWhole(join(folder, 'ended'), '');
         } catch {
           // Its group cannot be read now: a later launch reads it, and stops if it still cannot.
@@ -1878,8 +1925,10 @@ export class LocalLauncher implements LocalSessionLauncher {
       throw new EnvironmentError(
         `no local session started: ${join(sessions, visible(odd.name))} is not a session's folder; remove it, then run the factory again`,
       );
+    // One scan of /proc for every folder (deferred (1)).
+    const scan = new ProcScan(this.options.proc);
     for (const id of entries.map((entry) => entry.name)) {
-      const running = sessionRunning(this.options.home, id);
+      const running = sessionRunning(this.options.home, id, scan);
       if (running !== undefined) throw new LaunchRefused(running, true, 'session-running');
     }
   }

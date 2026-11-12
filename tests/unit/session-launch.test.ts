@@ -28,6 +28,7 @@ import {
   guardrailCheck,
   CONTAIN,
   LocalLauncher,
+  ProcScan,
   groupRecord,
   localInvocation,
   MAX_LINE,
@@ -194,6 +195,8 @@ function setup(
     tmpRoot?: string;
     /** The clone's install, in place of the sandboxed npm ci. */
     install?: Installer;
+    /** A /proc of the test's own. */
+    proc?: string;
   } = {},
 ) {
   const repo = makeRepo({ files: { '.factory/config': CONFIG, ...GUARDED } });
@@ -232,6 +235,7 @@ function setup(
     ...options.limits,
     ...(options.install === undefined ? {} : { install: options.install }),
     ...(options.tmpRoot === undefined ? {} : { tmpRoot: options.tmpRoot }),
+    ...(options.proc === undefined ? {} : { proc: options.proc }),
   });
   const owner = () => [
     repo.git(['rev-parse', '--abbrev-ref', 'HEAD']),
@@ -609,6 +613,17 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(t.sessions()).toEqual([]);
     expect(heard).toEqual([]);
     expect(existsSync(join(t.home, '.factory', 'sessions', FIRST, 'not-spawned'))).toBe(true);
+  });
+
+  it('reads the boot id before the spawn: one it cannot read refuses, counting nothing (T061)', async () => {
+    const heard: string[] = [];
+    const t = setup({ proc: tempDir('proc-') });
+    const refused = t.launch({ ...REQUEST, starting: (id) => heard.push(id) });
+    await expect(refused).rejects.toThrow(
+      /no local session started: reading the kernel's boot id: .*boot_id cannot be read \(ENOENT\)/,
+    );
+    expect(t.sessions()).toEqual([]);
+    expect(heard).toEqual([]);
   });
 
   it('T125: sessionShape leaves neither folder it made when it throws', () => {
@@ -2945,6 +2960,78 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       ok: false,
       reason: 'claude is not installed',
     });
+  });
+});
+
+describe('/proc, read once per launch and fail closed (T061, deferred (1) and (2))', () => {
+  const BOOT = 'b00t';
+  /** A /proc of the test's own: its boot id and `pid` → [state, group, start]. */
+  function proc(processes: Record<number, [string, number, string]>, boot: string | null = BOOT) {
+    const root = tempDir('proc-');
+    if (boot !== null) {
+      mkdirSync(join(root, 'sys', 'kernel', 'random'), { recursive: true });
+      writeFileSync(join(root, 'sys', 'kernel', 'random', 'boot_id'), `${boot}\n`);
+    }
+    for (const [pid, [state, pgid, start]] of Object.entries(processes)) {
+      mkdirSync(join(root, pid));
+      const fields = [state, '1', String(pgid), ...Array<string>(16).fill('0'), start];
+      writeFileSync(join(root, pid, 'stat'), `${pid} (a b) ${fields.join(' ')} 0\n`);
+    }
+    return root;
+  }
+  /** Session folders whose group.json alone names `pgid`, started at 7 on BOOT. */
+  function sessions(...pgids: number[]) {
+    const home = tempDir('home-');
+    return {
+      home,
+      ids: pgids.map((pgid, n) => {
+        const id = `s${String(n)}`;
+        const dir = join(home, '.factory', 'sessions', id);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'group.json'), JSON.stringify({ pgid, start: '7', boot: BOOT }));
+        return id;
+      }),
+    };
+  }
+  const asRoot = process.getuid?.() === 0;
+
+  it('scans every process once for all the folders a launch checks', () => {
+    const { home, ids } = sessions(100, 200, 300);
+    const scan = new ProcScan(proc({ 5: ['S', 9, '1'] }));
+    for (const id of ids) expect(sessionRunning(home, id, scan)).toBeUndefined();
+    expect(scan.scans).toBe(1);
+    // A live member of a group whose leader has gone still counts, from that one scan.
+    const live = new ProcScan(proc({ 5: ['S', 200, '1'] }));
+    expect(sessionRunning(home, 's1', live)).toMatch(/processes 5 of its process group 200/);
+  });
+
+  it.skipIf(asRoot)(
+    "skips another user's process it cannot read, and names a leader it cannot read",
+    () => {
+      const root = proc({ 5: ['S', 100, '1'], 100: ['S', 100, '7'] });
+      const { home } = sessions(100, 300);
+      chmodSync(join(root, '5', 'stat'), 0);
+      expect(sessionRunning(home, 's1', new ProcScan(root))).toBeUndefined();
+      chmodSync(join(root, '100', 'stat'), 0);
+      expect(() => sessionRunning(home, 's0', new ProcScan(root))).toThrow(
+        new RegExp(
+          `${root}/100/stat cannot be read \\(EACCES\\), as under a /proc mounted with hidepid.*mount /proc so the Owner's processes can be read`,
+        ),
+      );
+    },
+  );
+
+  it('refuses a stat with no ) or too few fields, and a boot id it cannot read', () => {
+    const root = proc({});
+    mkdirSync(join(root, '100'));
+    writeFileSync(join(root, '100', 'stat'), '100 (no end S 1 100\n');
+    const { home } = sessions(100);
+    expect(() => sessionRunning(home, 's0', new ProcScan(root))).toThrow(
+      /100\/stat cannot be parsed: 100 \(no end S 1 100/,
+    );
+    expect(() => sessionRunning(home, 's0', new ProcScan(proc({}, null)))).toThrow(
+      /boot_id cannot be read \(ENOENT\), so no session's process group can be told from a later one/,
+    );
   });
 });
 
