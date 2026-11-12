@@ -1,15 +1,18 @@
 // The session's commits, read out of its clone (T086, slice 28-5a). No factory git runs in the
 // clone, whose `.git/` the session can change: git reads it only inside the factory's bubblewrap
-// sandbox, with no network and nothing of home but the clone, read-only, and writes the session's
-// new objects as a pack into a folder of the session's own under `~/.factory/`, which no session
-// reaches. The factory's own clone, the record's `project`, indexes that pack with
+// sandbox, with no network, `protocol.allow=never`, nothing of home but the clone, read-only, and
+// nothing writable at all, and sends the session's new objects as a full pack on its stdout, which
+// the factory counts and stops past `MAX_PACK`. The factory indexes that pack with
 // `index-pack --strict`, which checks each object as `transfer.fsckObjects` does on a fetch (git
-// 2.39.5's fetch from a bundle checks none: Owner decision 2026-11-12), then checks that the
-// history from the new commit back to the record's head is whole, and keeps the commit under
-// `refs/factory/sessions/<id>`, where the station checks read it. The head the session's clone
-// claims is never trusted: the commit must be one the factory indexed.
+// 2.39.5's fetch from a bundle checks none: Owner decision 2026-11-12), into a quarantine under the
+// session's own folder, the factory's clone's objects its alternate; there the head must be a
+// commit of that pack, its history back to the record's head whole and that head its ancestor.
+// Only then does the pack move into the factory's clone, the record's `project`, and the commit
+// go under `refs/factory/sessions/<id>`, where the station checks read it. A refused pack leaves
+// nothing there, and the head the session's clone claims is never trusted on its own.
 import { spawnSync } from 'node:child_process';
-import { closeSync, mkdtempSync, openSync, rmSync, statSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { probeBwrap, sandboxArgs } from '../ci/sandbox.js';
 import { EnvironmentError } from '../cli/env.js';
@@ -30,10 +33,13 @@ export interface SessionOutput {
   branch: string;
 }
 
-/** Each git run in the sandbox; the Stop hook's own timeout is 28-5c's. */
-const READ_TIMEOUT = 120_000;
-/** The largest pack of new objects a session may add. */
-export const MAX_PACK = 256 * 1024 * 1024;
+/**
+ * Each git run, in the sandbox or the factory's own, killed with SIGKILL past it; the Stop hook's
+ * own overall timeout is 28-5c's.
+ */
+const GIT_TIMEOUT = 120_000;
+/** The largest pack of new objects a session may add; the factory holds it in memory. */
+export const MAX_PACK = 64 * 1024 * 1024;
 const OID = /^[0-9a-f]{40}$/;
 
 /** The ref a session's head is kept under, in the factory's own clone. */
@@ -42,96 +48,201 @@ export const sessionRef = (session: string) => `refs/factory/sessions/${session}
 /** Why the session's head cannot be taken, for the session to fix: its clone is its own. */
 export class UnreadableHead extends Error {}
 
-/**
- * What the sandbox read from the clone: the head the clone claims and, when it differs from the
- * record's head, the pack of the objects since, written to `pack`.
- */
+/** What the sandbox read from the clone: the head it claims, and past the record's, its pack. */
+export interface CloneRead {
+  tip: string;
+  pack?: Buffer;
+}
 export type ReadClone = (
   clone: string,
   head: string,
-  pack: string,
-  work: string,
+  box: string,
   env: NodeJS.ProcessEnv,
-) => string;
+  limit: number,
+) => CloneRead;
 
-/** Git in the clone, inside the factory's sandbox: the clone read-only, `work` the one folder writable. */
+/**
+ * Bubblewrap's arguments for git in the clone: the clone read-only, and nothing writable, the
+ * sandbox's own folder, /tmp and /dev/shm remounted read-only after they are made.
+ */
+export const readOnlyBox = (box: string, clone: string) => [
+  ...sandboxArgs(box, clone, [clone]),
+  ...['--remount-ro', box, '--remount-ro', '/tmp', '--remount-ro', '/dev/shm'],
+];
+
 function inSandbox(
   args: readonly string[],
   clone: string,
-  work: string,
+  box: string,
   env: NodeJS.ProcessEnv,
-  io: { input?: string; stdout?: number } = {},
-) {
-  const box = sandboxArgs(work, clone, [clone]);
+  io: { input?: string; limit?: number } = {},
+): Buffer {
+  const argv = readOnlyBox(box, clone);
   const outer = probeBwrap(
-    box,
+    argv,
     env,
     "the session's clone is read only inside bubblewrap, which failed (install it with: sudo apt install bubblewrap)",
   );
-  const result = spawnSync('bwrap', [...box, 'git', '-c', 'core.hooksPath=/dev/null', ...args], {
+  const git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', ...args];
+  const result = spawnSync('bwrap', [...argv, ...git], {
     env: outer,
-    encoding: 'utf8',
-    timeout: READ_TIMEOUT,
+    timeout: GIT_TIMEOUT,
+    killSignal: 'SIGKILL',
+    maxBuffer: io.limit ?? 1024 * 1024,
     ...(io.input === undefined ? {} : { input: io.input }),
-    stdio: ['pipe', io.stdout ?? 'pipe', 'pipe'],
   });
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  if (code === 'ENOBUFS')
+    throw new UnreadableHead(
+      `its commits since the head it was issued hold more than the ${String(io.limit ?? 0)} bytes a session may add`,
+    );
   if (result.error !== undefined || result.status !== 0)
     throw new UnreadableHead(
-      `git ${args[0] ?? ''} in its clone failed: ${visible(result.error?.message ?? result.stderr.trim())}`,
+      `git ${args[0] ?? ''} in its clone failed: ${visible(result.error?.message ?? result.stderr.toString().trim())}`,
     );
-  // Null when its output went to a file.
-  return (result.stdout as string | null) ?? '';
+  return result.stdout;
 }
 
-/** The clone's HEAD and, past the record's head, the pack of what it adds: git in the sandbox. */
-export const sandboxRead: ReadClone = (clone, head, pack, work, env) => {
+/** The clone's HEAD and, past the record's head, a full pack of what it adds: git in the sandbox. */
+export const sandboxRead: ReadClone = (clone, head, box, env, limit) => {
   const tip = inSandbox(
     ['rev-parse', '--verify', '--end-of-options', 'HEAD^{commit}'],
     clone,
-    work,
+    box,
     env,
-  ).trim();
+  )
+    .toString()
+    .trim();
   if (!OID.test(tip)) throw new UnreadableHead(`its HEAD reads as ${visible(tip)}, not a commit`);
-  if (tip === head) return tip;
-  const out = openSync(pack, 'wx', 0o600);
-  try {
-    inSandbox(['pack-objects', '--revs', '--thin', '--stdout', '-q'], clone, work, env, {
-      input: `${tip}\n^${head}\n`,
-      stdout: out,
-    });
-  } finally {
-    closeSync(out);
-  }
-  return tip;
+  if (tip === head) return { tip };
+  const pack = inSandbox(['pack-objects', '--revs', '--stdout', '-q'], clone, box, env, {
+    input: `${tip}\n^${head}\n`,
+    limit,
+  });
+  return { tip, pack };
 };
 
-/** The objects of the pack index-pack wrote, by the pack's name in its output. */
-function packObjects(repo: string, out: string, env: NodeJS.ProcessEnv): Set<string> {
-  const name = /^pack\t([0-9a-f]{40})$/.exec(out.trim())?.[1];
-  if (name === undefined)
-    throw new EnvironmentError(`git index-pack in ${repo} named no pack: ${visible(out)}`);
-  const at = safeGit(repo, ['rev-parse', '--git-path', `objects/pack/pack-${name}.idx`], env);
-  if (at.status !== 0) throw new EnvironmentError(`git rev-parse in ${repo} failed: ${at.stderr}`);
-  const idx = openSync(resolve(repo, at.stdout.toString().trim()), 'r');
+/** Git of the factory's own, bounded: a run that fails to finish is the factory's error. */
+function own(
+  repo: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  more: Parameters<typeof safeGit>[5] = {},
+  input?: Buffer,
+) {
+  let result: ReturnType<typeof safeGit>;
   try {
-    const listed = safeGit(repo, ['show-index'], env, idx);
-    if (listed.status !== 0)
-      throw new EnvironmentError(`git show-index in ${repo} failed: ${listed.stderr}`);
-    return new Set(
-      listed.stdout
-        .toString()
-        .split('\n')
-        .map((line) => line.split(' ')[1] ?? ''),
-    );
-  } finally {
-    closeSync(idx);
+    result = safeGit(repo, args, env, input, undefined, { timeout: GIT_TIMEOUT, ...more });
+  } catch (err) {
+    throw new EnvironmentError(`git ${args[0] ?? ''} in ${repo} did not finish: ${String(err)}`);
+  }
+  return { status: result.status, out: result.stdout.toString().trim(), err: result.stderr };
+}
+
+/** As `own`, but anything other than success is the factory's error. */
+function ownOk(
+  repo: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+  more?: Parameters<typeof safeGit>[5],
+) {
+  const result = own(repo, args, env, more);
+  if (result.status !== 0)
+    throw new EnvironmentError(`git ${args[0] ?? ''} in ${repo} failed: ${result.err}`);
+  return result.out;
+}
+
+/** Moves a file into `folder`, by rename, or by copy and rename across filesystems. */
+function moveInto(file: string, folder: string) {
+  const to = join(folder, file.split('/').at(-1) ?? '');
+  try {
+    renameSync(file, to);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+    copyFileSync(file, `${to}.moving`);
+    renameSync(`${to}.moving`, to);
   }
 }
 
 /**
- * The session's head, taken into the factory's own clone and kept under its session ref: a commit
- * the factory indexed itself (or the record's head, when the session added nothing), whose history
- * back to the record's head is whole and has that head in it; else an `UnreadableHead`.
+ * Indexes the session's pack in a quarantine whose alternate is the factory's clone, checks it
+ * there and moves it in only when every check passes; the commit it names, else an
+ * `UnreadableHead`.
+ */
+function quarantined(
+  repo: string,
+  claimed: string,
+  head: string,
+  pack: Buffer,
+  work: string,
+  env: NodeJS.ProcessEnv,
+) {
+  const objects = resolve(repo, ownOk(repo, ['rev-parse', '--git-path', 'objects'], env));
+  const held = join(work, 'objects');
+  mkdirSync(join(held, 'pack'), { recursive: true });
+  const more = { env: { GIT_OBJECT_DIRECTORY: held, GIT_ALTERNATE_OBJECT_DIRECTORIES: objects } };
+  // A full pack: every object checked is one the session sent.
+  const indexed = own(repo, ['index-pack', '--strict', '--stdin'], env, more, pack);
+  if (indexed.status !== 0)
+    throw new UnreadableHead(
+      `its commits do not pass git's object checks: ${visible(indexed.err)}`,
+    );
+  const name = /^pack\t([0-9a-f]{40})$/.exec(indexed.out)?.[1];
+  if (name === undefined)
+    throw new EnvironmentError(`git index-pack in ${repo} named no pack: ${visible(indexed.out)}`);
+  const files = readdirSync(join(held, 'pack')).filter((f) => f.startsWith(`pack-${name}.`));
+  const idx = readFileSync(join(held, 'pack', `pack-${name}.idx`));
+  const listed = own(repo, ['show-index'], env, {}, idx);
+  if (listed.status !== 0)
+    throw new EnvironmentError(`git show-index in ${repo} failed: ${listed.err}`);
+  const sent = new Set(listed.out.split('\n').map((line) => line.split(' ')[1] ?? ''));
+  if (!sent.has(claimed))
+    throw new UnreadableHead(
+      `its head ${visible(claimed.slice(0, 12))} is not an object its own commits hold`,
+    );
+  // An object of the pack: a failure to read its type is the factory's.
+  const type = ownOk(repo, ['cat-file', '-t', claimed], env, more);
+  if (type !== 'commit')
+    throw new UnreadableHead(
+      `its head ${claimed.slice(0, 12)} is a ${visible(type)}, not a commit`,
+    );
+  const whole = own(
+    repo,
+    ['rev-list', '--objects', '--missing=error', claimed, `^${head}`],
+    env,
+    more,
+  );
+  if (whole.status !== 0)
+    throw new UnreadableHead(
+      `its history back to ${head.slice(0, 12)} is not whole: ${visible(whole.err)}`,
+    );
+  follows(repo, head, claimed, env, more);
+  // Every check passed: the pack, then its index, which makes git see it.
+  for (const f of files.sort((a, b) => Number(a.endsWith('.idx')) - Number(b.endsWith('.idx'))))
+    moveInto(join(held, 'pack', f), join(objects, 'pack'));
+}
+
+/** The record's head must be an ancestor of the head: exit 1 alone means it is not. */
+function follows(
+  repo: string,
+  head: string,
+  claimed: string,
+  env: NodeJS.ProcessEnv,
+  more?: Parameters<typeof safeGit>[5],
+) {
+  const ancestor = own(repo, ['merge-base', '--is-ancestor', head, claimed], env, more);
+  if (ancestor.status === 1)
+    throw new UnreadableHead(
+      `its head ${claimed.slice(0, 12)} does not follow ${head.slice(0, 12)}, the commit it was issued: add commits, never rewrite`,
+    );
+  if (ancestor.status !== 0)
+    throw new EnvironmentError(`git merge-base in ${repo} failed: ${ancestor.err}`);
+}
+
+/**
+ * The session's head, taken into the factory's own clone and kept under its session ref: the
+ * record's head when the session added nothing, else a commit of the pack the factory indexed and
+ * checked in quarantine; else an `UnreadableHead`.
  */
 export function sessionOutput(
   record: SessionRecord,
@@ -139,55 +250,25 @@ export function sessionOutput(
   session: string,
   env: NodeJS.ProcessEnv = process.env,
   read: ReadClone = sandboxRead,
+  limit = MAX_PACK,
 ): SessionOutput {
   const { project: repo, clone, head } = record;
   const work = mkdtempSync(join(sessionFolder(home, session), 'read-'));
   try {
-    const pack = join(work, 'session.pack');
-    const claimed = read(clone, head, pack, work, env);
-    if (claimed !== head) {
-      const size = statSync(pack).size;
-      if (size > MAX_PACK)
+    const box = join(work, 'box');
+    mkdirSync(box);
+    const { tip, pack } = read(clone, head, box, env, limit);
+    if (tip !== head) {
+      if (pack === undefined)
+        throw new EnvironmentError(`no pack was read for ${tip.slice(0, 12)}`);
+      if (pack.length > limit)
         throw new UnreadableHead(
-          `its commits since ${head.slice(0, 12)} hold ${String(size)} bytes, past the ${String(MAX_PACK)} a session may add`,
+          `its commits since the head it was issued hold more than the ${String(limit)} bytes a session may add`,
         );
-      const into = openSync(pack, 'r');
-      let indexed: ReturnType<typeof safeGit>;
-      try {
-        indexed = safeGit(repo, ['index-pack', '--strict', '--fix-thin', '--stdin'], env, into);
-      } finally {
-        closeSync(into);
-      }
-      if (indexed.status !== 0)
-        throw new UnreadableHead(
-          `its commits do not pass git's object checks: ${visible(indexed.stderr)}`,
-        );
-      if (!packObjects(repo, indexed.stdout.toString(), env).has(claimed))
-        throw new UnreadableHead(
-          `its head ${visible(claimed.slice(0, 12))} is not a commit its own commits hold`,
-        );
-      const whole = safeGit(
-        repo,
-        ['rev-list', '--objects', '--missing=error', claimed, `^${head}`],
-        env,
-      );
-      if (whole.status !== 0)
-        throw new UnreadableHead(
-          `its history back to ${head.slice(0, 12)} is not whole: ${visible(whole.stderr)}`,
-        );
+      quarantined(repo, tip, head, pack, work, env);
     }
-    // Exit 1 alone means not an ancestor; any other failure is the factory's clone's.
-    const ancestor = safeGit(repo, ['merge-base', '--is-ancestor', head, claimed], env);
-    if (ancestor.status === 1)
-      throw new UnreadableHead(
-        `its head ${claimed.slice(0, 12)} does not follow ${head.slice(0, 12)}, the commit it was issued: add commits, never rewrite`,
-      );
-    if (ancestor.status !== 0)
-      throw new EnvironmentError(`git merge-base in ${repo} failed: ${ancestor.stderr}`);
-    const ref = safeGit(repo, ['update-ref', sessionRef(session), claimed], env);
-    if (ref.status !== 0)
-      throw new EnvironmentError(`git update-ref in ${repo} failed: ${ref.stderr}`);
-    return { repo, commit: claimed, head, feature: record.feature, branch: record.branch };
+    ownOk(repo, ['update-ref', sessionRef(session), tip], env);
+    return { repo, commit: tip, head, feature: record.feature, branch: record.branch };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
