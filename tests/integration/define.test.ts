@@ -323,6 +323,22 @@ describe(
       );
     });
 
+    it.each(['/src/app.ts', '../app.ts', 'src/../app.ts', 'vendor/lib'])(
+      'reads a code tag of %s, which git cannot take or which is a gitlink, as not in the tree (T086)',
+      async (path) => {
+        const r = project();
+        ask(r);
+        answer(r);
+        output(r, { [BRIEF_PATH]: BRIEF.replace('[code:src/app.ts]', `[code:${path}]`) });
+        // A gitlink at vendor/lib: a submodule's commit, no file of the tree.
+        const at = r.revParse('HEAD');
+        r.git(['update-index', '--add', '--cacheinfo', `160000,${at},vendor/lib`]);
+        r.git(['commit', '-q', '--no-gpg-sign', '-m', 'Define: a gitlink']);
+        const result = await check(r);
+        expect(result.missing).toContain(`${BRIEF_PATH}:20: [code:${path}] is not in the tree`);
+      },
+    );
+
     it('AC-005: the brief has every section', async () => {
       const result = await fullRun(
         {},

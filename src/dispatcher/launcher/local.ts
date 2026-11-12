@@ -218,6 +218,13 @@ export const runProcess: Runner = (program, args, options) =>
         // The group has already ended.
       }
     };
+    const signalPid = (member: number, signal: NodeJS.Signals) => {
+      try {
+        process.kill(member, signal);
+      } catch {
+        // It has already ended.
+      }
+    };
     const stopGroup = () => {
       signalGroup('SIGKILL');
     };
@@ -225,7 +232,13 @@ export const runProcess: Runner = (program, args, options) =>
     const handlers = (Object.keys(SIGNALS) as (keyof typeof SIGNALS)[]).map((signal) => {
       const end = () => {
         ending = SIGNALS[signal];
-        signalGroup('SIGTERM');
+        // A contained run's leader is bwrap, which neither handles nor forwards SIGTERM: killed,
+        // it would end the namespace at once. Its group's other members get the SIGTERM, claude
+        // among them, and the whole group SIGKILL once the grace is over, at the factory's exit.
+        if (contain === undefined || pid === undefined) signalGroup('SIGTERM');
+        else
+          for (const member of new ProcScan().members(pid))
+            if (member !== pid) signalPid(member, 'SIGTERM');
         setTimeout(() => process.exit(ending), GRACE);
       };
       return [signal, end] as const;
@@ -498,24 +511,28 @@ export class ProcScan {
   /** How many times every process was read. */
   scans = 0;
   private groups: Map<string, number[]> | undefined;
-  constructor(readonly root = '/proc') {}
+  constructor(
+    readonly root = '/proc',
+    private readonly read = (file: string) => readFileSync(file, 'utf8'),
+  ) {}
 
   /**
    * The fields of `<pid>/stat` from the third on, read after the last `)`, since the command's
    * name may hold spaces: `[0]` its state, `[2]` its process group, `[19]` its start time in clock
    * ticks since boot. Undefined once the process has gone, and, when `others`, for a process whose
-   * stat cannot be read, as another user's under a /proc mounted with hidepid: a session's
-   * processes are all the Owner's. Any other failure, or a stat that cannot be parsed, is an error.
+   * stat cannot be read, as another user's under a /proc mounted with hidepid=1, EPERM (hidepid=2
+   * hides its folder): a session's processes are all the Owner's. Any other failure, or a stat that cannot be parsed, is an error.
    */
   stat(pid: number, others = false): string[] | undefined {
     const file = join(this.root, String(pid), 'stat');
     let text: string;
     try {
-      text = readFileSync(file, 'utf8');
+      text = this.read(file);
     } catch (err) {
       if (errno(err) === 'ENOENT' || errno(err) === 'ESRCH') return undefined;
-      if (others && errno(err) === 'EACCES') return undefined;
-      const hidepid = errno(err) === 'EACCES' ? ', as under a /proc mounted with hidepid' : '';
+      const denied = errno(err) === 'EPERM' || errno(err) === 'EACCES';
+      if (others && denied) return undefined;
+      const hidepid = denied ? ', as under a /proc mounted with hidepid' : '';
       throw new EnvironmentError(
         `${file} cannot be read (${visible(String(errno(err)))})${hidepid}, so no session's process group can be checked; mount /proc so the Owner's processes can be read`,
       );
@@ -1939,7 +1956,8 @@ export class LocalLauncher implements LocalSessionLauncher {
    * its sandbox.
    */
   private nested(env: NodeJS.ProcessEnv) {
-    const probe = spawnSync('bwrap', [...CONTAIN, 'bwrap', ...NESTED], {
+    const argv = [...CONTAIN, 'bwrap', ...NESTED];
+    const probe = spawnSync('bwrap', argv, {
       ...{ env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
       ...{ timeout: PROBE, killSignal: 'SIGKILL' },
     });
@@ -1948,7 +1966,7 @@ export class LocalLauncher implements LocalSessionLauncher {
       probe.error?.message ??
       (probe.signal === null ? probe.stderr.trim() : `ended by ${probe.signal}`);
     throw new LaunchRefused(
-      `no local session started: claude runs in a bubblewrap of the factory's, with Claude Code's own sandbox nested inside it, and that failed: ${visible(why)}; check that bwrap --dev-bind / / --proc /proc --unshare-pid -- bwrap --ro-bind / / --proc /proc true runs on this machine`,
+      `no local session started: claude runs in a bubblewrap of the factory's, with Claude Code's own sandbox nested inside it, and that failed: ${visible(why)}; check that bwrap ${argv.join(' ')} runs on this machine`,
     );
   }
 

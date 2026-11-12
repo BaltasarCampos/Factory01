@@ -70,6 +70,19 @@ const git = (cwd: string, args: readonly string[]) => answer({ repo: cwd }, args
 const show = (cwd: string, ref: string, path: string) =>
   committed({ repo: cwd, commit: ref }, path);
 
+/**
+ * Whether `path`, a code tag the session wrote, names an entry of `sha`'s tree by its exact name,
+ * a gitlink not counting: a path git would refuse, absolute or with an empty, `.` or `..` part, is
+ * not in the tree, never a git failure.
+ */
+function inTree(cwd: string, sha: string, path: string): boolean {
+  if (path.startsWith('/') || path.split('/').some((p) => p === '' || p === '.' || p === '..'))
+    return false;
+  const entry = git(cwd, ['--literal-pathspecs', 'ls-tree', '-z', sha, '--', path]).out;
+  const [head = '', name] = entry.split('\0')[0]?.split('\t') ?? [];
+  return name === path && !head.startsWith('160000 ');
+}
+
 /** Commits in `range` touching `path`, oldest first. */
 function commitsTouching(cwd: string, range: string, path: string): string[] {
   const out = git(cwd, ['rev-list', '--reverse', range, '--', path]).out;
@@ -250,14 +263,7 @@ export async function checkDefine(input: DefineCheck): Promise<DefineResult> {
 
   const brief = show(cwd, sha, BRIEF_PATH);
   if (brief === undefined) missing.push(`${BRIEF_PATH}: missing`);
-  else
-    missing.push(
-      ...checkBrief(
-        brief,
-        questions,
-        (p) => git(cwd, ['--literal-pathspecs', 'ls-tree', sha, '--', p]).out !== '',
-      ),
-    );
+  else missing.push(...checkBrief(brief, questions, (p) => inTree(cwd, sha, p)));
   missing.push(...skeletonProblems(cwd, sha));
 
   const listed = backlogIssues(show(cwd, sha, BACKLOG_PATH));

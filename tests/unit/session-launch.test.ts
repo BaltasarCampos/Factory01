@@ -610,6 +610,10 @@ describe('LocalLauncher (research R8, R9)', () => {
     await expect(refused).rejects.toThrow(
       "no local session started: claude runs in a bubblewrap of the factory's, with Claude Code's own sandbox nested inside it, and that failed: bwrap: no nesting",
     );
+    // The probe's own argv, exactly as it ran.
+    await expect(refused).rejects.toThrow(
+      `; check that bwrap ${[...CONTAIN, 'bwrap', '--new-session', '--die-with-parent', '--unshare-net', '--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', 'true'].join(' ')} runs on this machine`,
+    );
     expect(t.sessions()).toEqual([]);
     expect(heard).toEqual([]);
     expect(existsSync(join(t.home, '.factory', 'sessions', FIRST, 'not-spawned'))).toBe(true);
@@ -2993,7 +2997,6 @@ describe('/proc, read once per launch and fail closed (T061, deferred (1) and (2
       }),
     };
   }
-  const asRoot = process.getuid?.() === 0;
 
   it('scans every process once for all the folders a launch checks', () => {
     const { home, ids } = sessions(100, 200, 300);
@@ -3005,21 +3008,23 @@ describe('/proc, read once per launch and fail closed (T061, deferred (1) and (2
     expect(sessionRunning(home, 's1', live)).toMatch(/processes 5 of its process group 200/);
   });
 
-  it.skipIf(asRoot)(
-    "skips another user's process it cannot read, and names a leader it cannot read",
-    () => {
-      const root = proc({ 5: ['S', 100, '1'], 100: ['S', 100, '7'] });
-      const { home } = sessions(100, 300);
-      chmodSync(join(root, '5', 'stat'), 0);
-      expect(sessionRunning(home, 's1', new ProcScan(root))).toBeUndefined();
-      chmodSync(join(root, '100', 'stat'), 0);
-      expect(() => sessionRunning(home, 's0', new ProcScan(root))).toThrow(
-        new RegExp(
-          `${root}/100/stat cannot be read \\(EACCES\\), as under a /proc mounted with hidepid.*mount /proc so the Owner's processes can be read`,
-        ),
-      );
-    },
-  );
+  it("skips another user's process hidepid keeps from it, and names a leader it cannot read", () => {
+    const root = proc({ 5: ['S', 100, '1'], 100: ['S', 100, '7'] });
+    const { home } = sessions(100, 300);
+    /** A reader that gives `code` for the stat of each pid in `pids`, as hidepid=1 does with EPERM. */
+    const hidden =
+      (code: string, ...pids: number[]) =>
+      (file: string) => {
+        if (pids.some((pid) => file === join(root, String(pid), 'stat')))
+          throw Object.assign(new Error(code), { code });
+        return readFileSync(file, 'utf8');
+      };
+    for (const code of ['EPERM', 'EACCES'])
+      expect(sessionRunning(home, 's1', new ProcScan(root, hidden(code, 5)))).toBeUndefined();
+    expect(() => sessionRunning(home, 's0', new ProcScan(root, hidden('EPERM', 100)))).toThrow(
+      `${root}/100/stat cannot be read (EPERM), as under a /proc mounted with hidepid, so no session's process group can be checked; mount /proc so the Owner's processes can be read`,
+    );
+  });
 
   it('refuses a stat with no ) or too few fields, and a boot id it cannot read', () => {
     const root = proc({});

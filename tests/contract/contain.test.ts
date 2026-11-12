@@ -5,7 +5,14 @@
 // setsid background task and a nested bwrap included, and sessionRunning reads it as ended.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, onTestFinished, vi } from 'vitest';
@@ -96,6 +103,35 @@ describe("a session's claude in a PID namespace of its own (T061)", { timeout: 6
       { timeout: 5_000 },
     );
     expect(sessionRunning(home, id)).toBeUndefined();
+  });
+
+  it('gives claude its grace when the factory side is signalled: it traps TERM and finishes', async () => {
+    const id = randomUUID();
+    const done = join(realpathSync(tempDir()), 'done');
+    // A second after its TERM, as claude stops its commands, it writes a file.
+    const script = `trap 'sleep 1; echo > ${done}; exit 0' TERM; sleep 300 & wait`;
+    const vite = join(ROOT, 'node_modules', 'vite-node', 'vite-node.mjs');
+    const helper = join(ROOT, 'tests', 'helpers', 'contained.ts');
+    const factory = spawn(process.execPath, [vite, '--root', ROOT, helper], {
+      env: { PATH, SCRIPT: script, SESSION: id },
+      stdio: ['ignore', 'pipe', 'inherit'],
+    });
+    cleanup(id, factory);
+    await new Promise<void>((resolve) =>
+      factory.stdout.once('data', () => {
+        resolve();
+      }),
+    );
+    await vi.waitFor(() => {
+      expect(carrying(id).length).toBeGreaterThanOrEqual(3);
+    });
+    const exited = new Promise<number | null>((resolve) => factory.on('exit', resolve));
+
+    factory.kill('SIGTERM');
+
+    expect(await exited).toBe(143);
+    expect(existsSync(done)).toBe(true);
+    expect(carrying(id)).toEqual([]);
   });
 
   it('leaves nothing when the bwrap it started is SIGKILLed alone, its group untouched', async () => {
