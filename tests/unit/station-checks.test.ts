@@ -9,7 +9,14 @@ import { checkPlan } from '../../src/stations/checks/plan.js';
 import { parseAnswers } from '../../src/stations/checks/questions.js';
 import { checkSpec, criterionLines, specStopCheck } from '../../src/stations/checks/spec.js';
 import { makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
-import { recordSession, SESSION_ID } from '../helpers/session.js';
+import { dispatcherClone, recordSession, SESSION_ID } from '../helpers/session.js';
+
+const FOLDER = 'specs/42-add-login';
+/** What the Stop hook hands a station check: the session's head, here in the repository itself. */
+const outputAt = (r: TestRepo, head = r.revParse('HEAD')) => ({
+  ...{ repo: r.path, commit: r.revParse('HEAD'), head },
+  ...{ feature: FOLDER, branch: 'claude/42-add-login' },
+});
 
 const SPEC = `# Feature Specification: Add login
 
@@ -313,7 +320,7 @@ describe('questions in the Specify and Plan checks (T180, AC-033)', () => {
       files: { 'specs/42-add-login/spec.md': asking(SPEC, '- Q1: Which?') },
     });
     repo.checkout('claude/42-add-login', { create: true });
-    expect(specStopCheck(repo.path)).toMatchObject({ complete: false, waiting: true });
+    expect(specStopCheck(outputAt(repo))).toMatchObject({ complete: false, waiting: true });
   });
 });
 
@@ -430,6 +437,7 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
       files: { '.factory/config': config, [`.claude/agents/${agent}.md`]: role(agent) },
     });
     r.checkout('claude/42-add-login', { create: true });
+    const head = r.revParse('HEAD');
     const manifest = { item: 42, station, role: agent, branch: 'claude/42-add-login' };
     r.commit(
       {
@@ -438,7 +446,7 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
       },
       'station output',
     );
-    const { env } = recordSession({ role: agent, station, clone: r.path });
+    const { env } = recordSession({ role: agent, station, clone: r.path, head });
     const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
     return { r, stop: () => runStop(input, { cwd: r.path, now: () => new Date(), env }) };
   }
@@ -448,16 +456,20 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
     expect(await stop()).toEqual({ block: false });
   });
 
-  it('T170: the stop check reads the folder of the checked-out branch, ignoring .specify/feature.json', async () => {
+  it("T170: the stop check reads the session record's feature folder, ignoring .specify/feature.json", async () => {
     const other = { '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/9-x' }) };
     const { stop } = stationRun(2, 'spec', { ...other, [`${FEATURE}/spec.md`]: SPEC });
     expect(await stop()).toEqual({ block: false });
   });
 
-  it('T170: off a work-item branch the stop hook refuses', async () => {
-    const { r, stop } = stationRun(2, 'spec', { [`${FEATURE}/spec.md`]: SPEC });
-    r.checkout('main');
-    await expect(stop()).rejects.toThrow(/not on a work-item branch \(on main\)/);
+  it('T170: a record with no feature folder makes the stop hook refuse', async () => {
+    const r = makeRepo({ files: { [`${FEATURE}/spec.md`]: SPEC } });
+    const head = r.revParse('HEAD');
+    const record = { role: 'spec', station: 2, clone: r.path, head, feature: '', branch: 'main' };
+    const { env } = recordSession(record);
+    const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
+    const stop = runStop(input, { cwd: r.path, now: () => new Date(), env });
+    await expect(stop).rejects.toThrow(/not on a work-item branch \(on main\)/);
   });
 
   it('AC-063: a spec.md written but not committed does not count', async () => {
@@ -517,7 +529,7 @@ describe("Build's stop check for a task session (T174)", () => {
   const ROLE = '---\nname: builder\nmodel: sonnet\ntools: Read, Write\nversion: 1\n---\nBuild.\n';
 
   /** The item branch on origin, its tip the dispatcher's Build manifest commit. */
-  function issued(task: Record<string, unknown> = TASK): TestRepo {
+  function issued(task: Record<string, unknown> = TASK): TestRepo & { head: string } {
     const r = makeRepo({
       files: {
         ...{ '.factory/config': CONFIG, '.claude/agents/builder.md': ROLE, 'src/login.ts': 'a\n' },
@@ -531,20 +543,18 @@ describe("Build's stop check for a task session (T174)", () => {
       dispatcherMessage('station 4 (builder) manifest', '42-add-login'),
     );
     r.push();
-    return r;
+    return Object.assign(r, { head: r.revParse('HEAD') });
   }
-  /** The Builder's commit of `files`, pushed; returns it. */
-  const build = (r: TestRepo, files: Files = WORK, trailers: Record<string, string> = TRAILERS) => {
-    const sha = r.commit(files, 'Add login', { trailers });
-    r.push();
-    return sha;
-  };
+  /** The Builder's commit of `files`, in its clone alone: the launcher pushes after the session. */
+  const build = (r: TestRepo, files: Files = WORK, trailers: Record<string, string> = TRAILERS) =>
+    r.commit(files, 'Add login', { trailers });
 
-  it('T174: the Builder may stop once its commits on the manifest commit are pushed', async () => {
+  it("T174: the Builder may stop once its commits follow the manifest commit, the record's head", async () => {
     const r = issued();
     build(r);
     build(r, { 'tests/login.test.ts': 't2\n' });
-    const { env } = recordSession({ role: 'builder', station: 4, clone: r.path });
+    const record = { role: 'builder', station: 4, clone: r.path, head: r.head };
+    const { env } = recordSession({ ...record, project: dispatcherClone(r) });
     const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
 
     expect(await runStop(input, { cwd: r.path, now: () => new Date(), env })).toEqual({
@@ -554,15 +564,6 @@ describe("Build's stop check for a task session (T174)", () => {
 
   it.each<[string, (r: TestRepo) => void, RegExp]>([
     ['no commit after the manifest', () => undefined, /no commit after the dispatcher's manifest/],
-    ['work not pushed', (r) => r.commit(WORK, 'Add login', { trailers: TRAILERS }), /not pushed/],
-    [
-      'origin unreadable',
-      (r) => {
-        build(r);
-        return r.git(['remote', 'set-url', 'origin', join(r.path, 'gone.git')]);
-      },
-      /not pushed: origin's claude\/42-add-login is unreadable \(git ls-remote failed/,
-    ],
     ['no trailers', (r) => build(r, WORK, {}), /no Factory-Role: builder.*no Factory-Item/],
     [
       "another item's trailer",
@@ -582,16 +583,7 @@ describe("Build's stop check for a task session (T174)", () => {
     [
       'a .station.json the Builder wrote',
       (r) => build(r, { ...WORK, [MANIFEST]: '{}\n' }),
-      /the last commit to change specs\/42-add-login\/\.station\.json is not the dispatcher's/,
-    ],
-    [
-      'the manifest commit rewritten away',
-      (r) => {
-        r.git(['reset', '-q', '--hard', 'HEAD~1']);
-        r.commit(WORK, 'Add login', { trailers: TRAILERS });
-        r.push(undefined, { force: true });
-      },
-      /no dispatcher manifest commit/,
+      /specs\/42-add-login\/\.station\.json: not in T007's files/,
     ],
     [
       'a merge',
@@ -601,14 +593,13 @@ describe("Build's stop check for a task session (T174)", () => {
         r.checkout(BRANCH);
         const message = 'Merge side\n\nFactory-Role: builder\nFactory-Item: 42-add-login';
         r.git(['merge', '-q', '--no-ff', '--no-gpg-sign', '-m', message, 'side']);
-        r.push();
       },
       /is a merge; a task session only adds commits/,
     ],
   ])('T174: the Builder may not stop with %s', (_name, act, reason) => {
     const r = issued();
     act(r);
-    const result = buildStopCheck(r.path);
+    const result = buildStopCheck(outputAt(r, r.head));
 
     expect(result.complete).toBe(false);
     expect(result.missing?.join('\n')).toMatch(reason);
@@ -621,7 +612,7 @@ describe("Build's stop check for a conflict session (T174)", () => {
   const TRAILERS = { 'Factory-Role': 'builder', 'Factory-Item': '42-add-login' };
 
   /** The branch after Integrate's conflict: the conflict manifest on origin, and main moved. */
-  function conflicted(): TestRepo {
+  function conflicted(): TestRepo & { head: string } {
     const r = makeRepo({ files: { 'src/login.ts': 'a\n', 'src/other.ts': 'o\n' } });
     r.checkout(BRANCH, { create: true });
     r.commit({ 'src/login.ts': 'branch\n' }, 'Login', { trailers: TRAILERS });
@@ -635,7 +626,7 @@ describe("Build's stop check for a conflict session (T174)", () => {
     r.commit({ 'src/login.ts': 'main\n', 'src/other.ts': 'o2\n' }, 'Main moved');
     r.push('main');
     r.checkout(BRANCH);
-    return r;
+    return Object.assign(r, { head: r.revParse('HEAD') });
   }
   /** The Builder merges `theirs`, resolves with `files`, commits with `trailers` and pushes. */
   const resolve = (
@@ -663,7 +654,7 @@ describe("Build's stop check for a conflict session (T174)", () => {
     const r = conflicted();
     resolve(r);
 
-    expect(buildStopCheck(r.path)).toEqual({ complete: true });
+    expect(buildStopCheck(outputAt(r, r.head))).toEqual({ complete: true });
   });
 
   it.each<[string, (r: TestRepo) => unknown, RegExp]>([
@@ -703,6 +694,6 @@ describe("Build's stop check for a conflict session (T174)", () => {
     const r = conflicted();
     act(r);
 
-    expect(buildStopCheck(r.path).missing?.join('\n')).toMatch(reason);
+    expect(buildStopCheck(outputAt(r, r.head)).missing?.join('\n')).toMatch(reason);
   });
 });

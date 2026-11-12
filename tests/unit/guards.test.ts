@@ -7,7 +7,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { checkBash, WRAPPERS } from '../../src/guard/command-guard.js';
+import { checkBash, NPM_PINNED, WRAPPERS } from '../../src/guard/command-guard.js';
 import { checkWrite } from '../../src/guard/path-guard.js';
 import { checkRead, type ReadInput } from '../../src/guard/read-guard.js';
 import { loadPolicy } from '../../src/guard/policy.js';
@@ -247,6 +247,11 @@ describe("the command guard: nothing that shows a session's environment, where t
     expect(check(role, command)).toEqual({ allowed: true });
   });
 
+  it("reads npm's shorthand letters as the npm the release pins does (T061)", () => {
+    const tools = new URL('../../factory/profiles/typescript/ci/tools.json', import.meta.url);
+    expect((JSON.parse(readFileSync(tools, 'utf8')) as { npm: string }).npm).toBe(NPM_PINNED);
+  });
+
   it("refuses gh's --recover for a file outside the clone by its real path, and allows one in it", () => {
     const places = { cwd: clone, clone, home };
     const run = (command: string) => checkBash(policy, { role: 'intake', command, ...places });
@@ -339,6 +344,13 @@ describe('the command guard: the deny rules, and what to use instead (T084, T075
     ['builder', 'npm -prefix /x run test', /option: refused: the option -prefix, .*runs/],
     ['test', 'npx -prefix=/x vitest run', /^option: /],
     ['builder', 'npm -xC ../other test', /option: refused: the option -xC, /],
+    // Any run of dashes before a name of npm's shorthand letters alone is a cluster (T061).
+    ['builder', 'npm --C=/x run test', /option: refused: the option --C=\/x, .*runs/],
+    ['builder', 'npm ---C=/x run test', /option: refused: the option ---C=\/x, /],
+    ['builder', 'npm --gC=/x run test', /option: refused: the option --gC=\/x, /],
+    ['test', 'npx ---gc=x vitest run', /^option: /],
+    ['test', 'npx -C /x vitest run', /option: refused: the option -C, /],
+    ['builder', 'npm test --silent', /^allowed$/],
     ['builder', 'npm run x --node-options=--require=y', /^option: /],
     ['builder', 'git grep -O x', /^option: /],
     ['builder', 'git grep --open-files-in-pager=x y', /^option: /],

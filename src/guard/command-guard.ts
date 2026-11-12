@@ -98,7 +98,15 @@ const RUNS = [
  * Short options that write a file or run a program, by program, `o` for every program; any letter
  * of a cluster such as `-qo` counts, an attached argument such as `-O<program>` with it.
  */
-const SHORT: Record<string, string> = { git: 'O', gitleaks: 'r', npm: 'cC' };
+const SHORT: Record<string, string> = { git: 'O', gitleaks: 'r', npm: 'cC', npx: 'cC' };
+/**
+ * npm's single-letter shorthands in the npm the release pins (`factory/profiles/typescript/ci/
+ * tools.json`): nopt reads a name made of these letters alone as a cluster after any run of
+ * dashes, so `--gC=/x` and `---C=/x` set the prefix. Its long options spelled with them, `all`,
+ * `ca` and `call`, hold no refused letter or are refused as `--call` already.
+ */
+export const NPM_PINNED = '11.11.0';
+const NPM_SINGLES = '?BCDEHLOPSacdfghlmnpqsvwy';
 const EXCLUDES = [':(exclude)*events.jsonl', ':(exclude).factory/events'];
 /** What to use instead of a command off the role's list, by its first words. */
 const BRANCH = 'nothing: the session stays on the branch the factory checked out';
@@ -255,10 +263,19 @@ function checkOptions(words: string[]) {
     const long = name.startsWith('--') && name.length >= 4;
     if ((long && WRITES.test(name)) || (long && '--output'.startsWith(name)))
       refuse('option', `the option ${word}, which writes a file; write files with the Write tool`);
-    const at = cluster(word)
+    const letters = (word.split('=')[0] ?? '').replace(/^-+/, '');
+    const split =
+      nopt &&
+      word.startsWith('--') &&
+      /^[?A-Za-z]+$/.test(letters) &&
+      letters.split('').every((letter) => NPM_SINGLES.includes(letter));
+    const at = (split ? letters : cluster(word))
       .split('')
       .findIndex((letter) => refused.includes(letter));
-    if ((long && RUNS.some((run) => run.startsWith(name))) || (!word.startsWith('--') && at >= 0))
+    if (
+      (long && RUNS.some((run) => run.startsWith(name))) ||
+      ((split || !word.startsWith('--')) && at >= 0)
+    )
       refuse(
         'option',
         `the option ${word}, which writes a file or runs a program; ${at > 0 ? "if this is the option's value, put it in a separate word, such as git log -S foo; otherwise leave the option out" : 'leave it out'}`,

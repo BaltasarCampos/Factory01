@@ -77,6 +77,7 @@ function setUp(record: Record<string, unknown> = {}, { passed = true } = {}) {
     inbox_issue: 1,
     branch: 'claude/42-add-login',
     head: 'c'.repeat(40),
+    project: clone,
     tests: [],
   };
   write(

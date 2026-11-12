@@ -189,6 +189,8 @@ function setup(
     stubs?: boolean;
     /** A cap's minute, the watchdog's silence and the heartbeat, in ms. */
     limits?: { minute?: number; silence?: number; heartbeat?: number };
+    /** Where the session's temporary folder is made, for a test that lists it. */
+    tmpRoot?: string;
     /** The clone's install, in place of the sandboxed npm ci. */
     install?: Installer;
   } = {},
@@ -228,6 +230,7 @@ function setup(
     ...(options.checkTimeout === undefined ? {} : { checkTimeout: options.checkTimeout }),
     ...options.limits,
     ...(options.install === undefined ? {} : { install: options.install }),
+    ...(options.tmpRoot === undefined ? {} : { tmpRoot: options.tmpRoot }),
   });
   const owner = () => [
     repo.git(['rev-parse', '--abbrev-ref', 'HEAD']),
@@ -535,6 +538,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(recordOf(t.home, id)).toEqual({
       ...{ role: 'spec', item: 42, station: 2, feature: 'specs/42-add-login' },
       ...{ files: ['specs/42-add-login/spec.md'], clone: work(t.home, '42-add-login') },
+      project: realpathSync(t.repo.path),
       ...{ model: 'sonnet', role_version: roleVersion('v1.0.0', roleFile('spec')) },
       ...{ repo: 'owner/project', inbox_issue: 1, branch: BRANCH },
       ...{ head: t.repo.revParse(`origin/${BRANCH}`), tests: ['tests/login.test.ts'] },
@@ -566,6 +570,17 @@ describe('LocalLauncher (research R8, R9)', () => {
     // It writes no record and starts nothing.
     expect(existsSync(shape.files.record)).toBe(false);
     expect(t.sessions()).toHaveLength(1);
+  });
+
+  it('T125: sessionShape leaves neither folder it made when it throws', () => {
+    const tmpRoot = tempDir();
+    const t = setup({ tmpRoot });
+
+    expect(() =>
+      t.launcher.sessionShape({ project: t.repo.path, ...REQUEST }, join(t.home, 'gone'), 'sonnet'),
+    ).toThrow();
+    expect(readdirSync(join(t.home, '.factory', 'sessions'))).toEqual([]);
+    expect(readdirSync(tmpRoot)).toEqual([]);
   });
 
   it("builds the session's environment from an allowlist, never from the Owner's", async () => {

@@ -506,7 +506,8 @@ describe('stop check (AC-063)', () => {
       },
       'manifest',
     );
-    const { env } = recordSession({ role: 'reviewer', station: 5, clone: r.path });
+    const head = r.revParse('HEAD');
+    const { env } = recordSession({ role: 'reviewer', station: 5, clone: r.path, head });
     const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
     const ctx = { cwd: r.path, now: () => new Date(), env };
     const stop = () => runStop(input, ctx);

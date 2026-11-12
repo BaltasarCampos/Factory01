@@ -1,7 +1,7 @@
 # Contract: local sessions
 
 The lifecycle of a session the local launcher starts (`agents: local` in main's `.factory/config`,
-T061), as the code on main stands after slice 28-4d. Every slice that changes it keeps this page
+T061), as the code on main stands after slice 28-5a. Every slice that changes it keeps this page
 current in its notes commit. Code: `src/dispatcher/failures.ts`, `evidence.ts` (`tipState`,
 `spentTip`, `intakeBound`), `dispatch.ts` (`startSession`, `held`, `hold`), `manifest.ts`
 (`testEnded`), `launcher/local.ts` (`launch`, `sessionRunning`, `stillRunning`),
@@ -22,7 +22,7 @@ No session can reach `~/.factory/` (T183).
 | File or ref | Written by, when | How | Deleted by |
 |---|---|---|---|
 | `~/.factory/sessions/<id>/` | Launcher, after the request, still-running, fetch, history, config and token checks, before the clone; `<id>` a fresh UUID | `mkdir` 0700, exclusive: an existing folder refuses the launch | Never by the factory. The Owner, only when an error names the folder, once `ps -eo pid,pgid,args` shows nothing of the session |
-| `session.json` | Launcher, after every check and `claude --version`, just before `starting()` and the spawn: role, item, station, feature, files, clone, model, `role_version`, repo, `inbox_issue`, branch, head, tests | Once, `wx` 0600, not by rename | With its folder |
+| `session.json` | Launcher, after every check and `claude --version`, just before `starting()` and the spawn: role, item, station, feature, files, clone, `project` (the real path of the project clone the launcher fetches from, the factory's own), model, `role_version`, repo, `inbox_issue`, branch, head, tests | Once, `wx` 0600, not by rename | With its folder |
 | `settings.json`, `mcp.json` | Launcher, in the same step, just before `session.json` | Once, `wx` 0600 | With its folder |
 | `group.json` | Launcher, when the runner reports claude's process group: `pgid`, the leader's start time, the boot id | `writeWhole`: a `wx` 0600 temporary file linked to its name, so whole and exclusive | With its folder |
 | `not-spawned` | Launcher, on any failure after the folder was made and before claude spawned, a `starting()` refusal included | `writeWhole`, empty; unwritten, the folder reads as below | With its folder |
@@ -36,6 +36,7 @@ No session can reach `~/.factory/` (T183).
 | `~/.factory/failures/<owner>/<repo>/<item>-<station>.json`, the failure record | Dispatcher: `recordIssued` before a new manifest's push; `recordSession`, the `starting()` callback the launcher calls just before the spawn, which makes Intake's (`<item>-1.json`) at its first count; `recordOutcome` after the launch returns | A `wx` 0600 temporary file renamed into place, folder 0700, checked with the reader's own checks first: a reader sees the old record or the new, never half | Never by the factory, but for Intake's, which the dispatcher deletes before any move out of `new`, a failed delete stopping the pass with the item still in `new`; `recordIssued` replaces it at a new manifest. The Owner, to start the count again |
 | `refs/factory/build/<branch>`, the issued ref | Dispatcher, in its own clone, after a Build manifest's push succeeds | `git update-ref` | Never by the factory. The Owner restores it with the command a `manifest-held` alert names |
 | `refs/factory/test/<branch>`, the Test ref | Dispatcher, in its own clone, after a Test manifest's push succeeds (T181) | `git update-ref` | Never by the factory. Verify's Test session has ended only when this commit is in the tip's history, is not the tip, and the issued ref, if any, is its ancestor, never by a commit subject; missing or older, Test runs once more; a git failure reading it, other than exit 1, stops the pass |
+| `refs/factory/sessions/<id>`, the session's head | The Stop hook, in the record's `project`, once the head passes the pack checks (slice 28-5a): git in the factory's bubblewrap, the clone read-only and nothing writable, with `protocol.allow=never`, sends a full pack of what the session added since the record's head on its stdout, read with a 64 MiB cap; `index-pack --strict` indexes it in a quarantine under the session's own folder, the factory's clone's objects its alternate; there the head must be a commit of that pack, its history back to the record's head whole (`rev-list --objects --missing=error`) and that head its ancestor; only then does the pack move into the factory's clone. Every git call is bounded at 120 s, killed with SIGKILL | `git update-ref`, written again at each stop, before the output check | Never yet: 28-6c's clean-up rule. It can name a failing or an old head: 28-5b records the passing head apart, and 28-6a never pushes this ref |
 
 The record's repo is exactly `owner/name` in GitHub's name characters, neither part `.` or `..`,
 both lower-cased; any other is an error. Its fields, and nothing else:

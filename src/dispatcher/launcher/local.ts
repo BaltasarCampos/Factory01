@@ -1564,6 +1564,7 @@ export class LocalLauncher implements LocalSessionLauncher {
           const record = {
             ...{ role: request.role, item: request.item, station: request.station },
             ...{ feature: request.feature, files: request.files, clone: cwd, model },
+            project: realpathSync(request.project),
             role_version: roleVersion(manifest.release, role),
             ...{
               repo,
@@ -1875,16 +1876,24 @@ export class LocalLauncher implements LocalSessionLauncher {
   /**
    * For T125's short run alone (Owner decision 2026-11-05): a session's folder, temporary folder,
    * environment, settings and MCP files and `claude` arguments, by the same steps `launch()`
-   * takes, for a role in `clone`. It writes no record, gives no gh token and starts nothing.
+   * takes, for a role in `clone`. It writes no record, gives no gh token and starts nothing; when
+   * it throws, it leaves neither folder it made.
    */
   sessionShape(request: LaunchRequest, clone: string, model: string) {
     const files = this.sessionFolder();
-    const tmp = this.tmpFolder(request.item);
-    const env = this.sessionEnv(request, files.id, tmp);
-    const folders = env.PATH.split(':').filter((folder) => folder !== '');
-    this.writeSettings(request, files, { clone, tmp, tests: this.testFiles(clone), folders });
-    const { caps } = factoryPolicy().roles[request.role];
-    return { files, tmp, env, argv: localInvocation(request, files, model, caps.turns) };
+    let tmp: string | undefined;
+    try {
+      tmp = this.tmpFolder(request.item);
+      const env = this.sessionEnv(request, files.id, tmp);
+      const folders = env.PATH.split(':').filter((folder) => folder !== '');
+      this.writeSettings(request, files, { clone, tmp, tests: this.testFiles(clone), folders });
+      const { caps } = factoryPolicy().roles[request.role];
+      return { files, tmp, env, argv: localInvocation(request, files, model, caps.turns) };
+    } catch (err) {
+      if (tmp !== undefined) rmSync(tmp, { recursive: true, force: true });
+      rmSync(dirname(files.record), { recursive: true, force: true });
+      throw err;
+    }
   }
 
   /** The session's environment, from the allowlist alone; no Spec Kit variables (T171). */

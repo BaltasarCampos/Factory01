@@ -29,6 +29,8 @@ export interface SessionRecord {
   files: string[];
   /** The session's clone, by its real path. */
   clone: string;
+  /** The factory's own clone of the project, the dispatcher's, by its real path. */
+  project: string;
   /** The role's model and role version as launched, for the session's events. */
   model: string;
   role_version: string;
@@ -81,6 +83,7 @@ export function readSessionRecord(home: string, given: unknown): SessionRecord {
     ['feature', typeof r.feature === 'string'],
     ['files', Array.isArray(r.files) && r.files.every((f) => typeof f === 'string')],
     ['clone', typeof r.clone === 'string' && isAbsolute(r.clone)],
+    ['project', typeof r.project === 'string' && isAbsolute(r.project)],
     ['model', sessionFields.model(r.model)],
     ['role_version', sessionFields.role_version(r.role_version)],
     ['repo', typeof r.repo === 'string' && REPO.test(r.repo)],

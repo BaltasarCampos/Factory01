@@ -250,8 +250,13 @@ describe('Define output check: questions first (AC-004, AC-056)', { timeout: 60_
     ask(r);
     r.push(DEFINE);
     const record = { role: 'define', station: 0, item: 0, feature: '', clone: r.path };
+    const issued = { branch: DEFINE, head: r.revParse('main') };
     const input = { session_id: SESSION_ID, hook_event_name: 'Stop' };
-    const ctx = { cwd: r.path, now: () => new Date(), env: recordSession(record).env };
+    const ctx = {
+      cwd: r.path,
+      now: () => new Date(),
+      env: recordSession({ ...record, ...issued }).env,
+    };
     expect(await runStop(input, ctx)).toEqual({ block: false });
     output(r);
     r.push(DEFINE);
