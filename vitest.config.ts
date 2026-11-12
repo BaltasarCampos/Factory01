@@ -1,14 +1,11 @@
-import { availableParallelism } from 'node:os';
 import { defineConfig } from 'vitest/config';
 
 const setupFiles = ['tests/helpers/setup.ts'];
 
 export default defineConfig({
   test: {
-    // On CI every core of the runner: the suite's total work now sets build-test's time, and
-    // Vitest's default leaves one core idle (Owner decision 2026-11-11, T174). The default
-    // elsewhere, so the laptop keeps its own caps.
-    ...(process.env.CI ? { maxWorkers: availableParallelism() } : {}),
+    // Vitest's default workers, on CI too: every core of the runner made build-test slower,
+    // 10m48s to 13m35s (Owner decision 2026-11-11, T174).
     reporters: ['default', 'json'],
     outputFile: { json: 'coverage/vitest-results.json' },
     coverage: {
