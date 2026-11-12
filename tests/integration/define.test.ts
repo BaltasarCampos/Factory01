@@ -1,5 +1,8 @@
+import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { beforeAll, describe, expect, it } from 'vitest';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import { dispatchOnce, type DispatchContext } from '../../src/dispatcher/dispatch.js';
@@ -266,6 +269,36 @@ describe('Define output check: questions first (AC-004, AC-056)', { timeout: 60_
     });
   });
 });
+
+describe(
+  'Define output check: a git failure throws, never reading as an answer (T086)',
+  { timeout: 60_000 },
+  () => {
+    it.each([
+      ['a file read', 'cat-file'],
+      ['an ancestry check', '--is-ancestor'],
+      ['a history walk', 'rev-list'],
+    ])('%s git cannot do stops the check', async (_name, word) => {
+      const r = project();
+      ask(r);
+      answer(r);
+      output(r);
+      r.push(DEFINE);
+      // A git that fails only that call, ahead of the real one on the PATH.
+      const bin = tempDir();
+      const real = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+      const script = `#!/bin/sh\ncase " $* " in *" ${word} "*) echo "fatal: planted failure" >&2; exit 128;; esac\nexec ${real} "$@"\n`;
+      writeFileSync(join(bin, 'git'), script, { mode: 0o755 });
+      vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
+      try {
+        const run = checkDefine({ workdir: r.path, repo: REPO, answersSignedBy: 'as-committed' });
+        await expect(run).rejects.toThrow(/planted failure/);
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+  },
+);
 
 describe(
   'Define output check: brief, skeleton, backlog (AC-004, AC-005)',

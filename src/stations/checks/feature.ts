@@ -18,7 +18,10 @@ export function answer(at: Pick<SessionOutput, 'repo'>, args: readonly string[])
  * A regular file at the session's head, or undefined when none is committed there; a git failure
  * throws, never reading as a missing file.
  */
-export function committed(at: SessionOutput, path: string): string | undefined {
+export function committed(
+  at: Pick<SessionOutput, 'repo' | 'commit'>,
+  path: string,
+): string | undefined {
   const entry = answer(at, ['--literal-pathspecs', 'ls-tree', '-z', at.commit, '--', path]);
   const [mode, type, oid] = entry.out.split('\t')[0]?.split(' ') ?? [];
   if (!entry.ok) throw new RefusedError(`git ls-tree ${at.commit.slice(0, 12)} failed`);
