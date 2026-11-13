@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { dispatcherMessage } from '../../src/dispatcher/branch.js';
@@ -431,34 +431,35 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
   const VERIFY = '| Check | Result |\n|---|---|\n| Review | pass |\n';
   const SECURITY = '## Scans\n\n- semgrep: none\n\n## Findings\n\n- none\n';
 
-  /** An item branch whose station manifest names `station` and `agent`, with `files` committed. */
-  function stationRun(station: number, agent: string, files: Files, config = CONFIG) {
+  /**
+   * An item branch whose station manifest names `station` and `agent`, with `base` committed: the
+   * session is issued that commit and writes `files`, which the Stop hook commits (28-5b).
+   */
+  function stationRun(station: number, agent: string, files: Files, config = CONFIG, base = {}) {
     const r = makeRepo({
       files: { '.factory/config': config, [`.claude/agents/${agent}.md`]: role(agent) },
     });
     r.checkout('claude/42-add-login', { create: true });
-    const head = r.revParse('HEAD');
     const manifest = { item: 42, station, role: agent, branch: 'claude/42-add-login' };
-    r.commit(
-      {
-        [`${FEATURE}/.station.json`]: JSON.stringify(manifest),
-        ...files,
-      },
-      'station output',
-    );
+    r.commit({ [`${FEATURE}/.station.json`]: JSON.stringify(manifest), ...base }, 'manifest');
+    const head = r.revParse('HEAD');
+    for (const [path, text] of Object.entries(files)) {
+      mkdirSync(dirname(join(r.path, path)), { recursive: true });
+      if (text !== null) writeFileSync(join(r.path, path), text);
+    }
     const { env } = recordSession({ role: agent, station, clone: r.path, head });
     const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
     return { r, stop: () => runStop(input, { cwd: r.path, now: () => new Date(), env }) };
   }
 
-  it('AC-063: Specify may stop once a complete spec.md is committed', async () => {
+  it('AC-063: Specify may stop once it has written a complete spec.md, which the factory commits', async () => {
     const { stop } = stationRun(2, 'spec', { [`${FEATURE}/spec.md`]: SPEC });
     expect(await stop()).toEqual({ block: false });
   });
 
   it("T170: the stop check reads the session record's feature folder, ignoring .specify/feature.json", async () => {
     const other = { '.specify/feature.json': JSON.stringify({ feature_directory: 'specs/9-x' }) };
-    const { stop } = stationRun(2, 'spec', { ...other, [`${FEATURE}/spec.md`]: SPEC });
+    const { stop } = stationRun(2, 'spec', { [`${FEATURE}/spec.md`]: SPEC }, CONFIG, other);
     expect(await stop()).toEqual({ block: false });
   });
 
@@ -472,22 +473,19 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
     await expect(stop).rejects.toThrow(/not on a work-item branch \(on main\)/);
   });
 
-  it('AC-063: a spec.md written but not committed does not count', async () => {
-    const { r, stop } = stationRun(2, 'spec', {});
-    writeFileSync(join(r.path, FEATURE, 'spec.md'), SPEC);
+  it('AC-063: a Spec that commits its spec.md itself is refused: the factory commits it (28-5b)', async () => {
+    const { r, stop } = stationRun(2, 'spec', { [`${FEATURE}/spec.md`]: SPEC });
+    r.commit({}, 'Spec', { allowEmpty: true });
     const result = await stop();
     expect(result.block).toBe(true);
-    expect(result.reason).toMatch(/specs\/42-add-login\/spec.md: not committed/);
+    expect(result.reason).toMatch(/a spec session commits nothing itself, but its clone's HEAD is/);
   });
 
   it('AC-063: Plan is held to the size limit in the project config', async () => {
-    const files = {
-      [`${FEATURE}/spec.md`]: SPEC,
-      [`${FEATURE}/plan.md`]: PLAN(),
-      [`${FEATURE}/tasks.md`]: TASKS,
-    };
-    expect(await stationRun(3, 'planner', files).stop()).toEqual({ block: false });
-    const lowered = stationRun(3, 'planner', files, `${CONFIG}size_limit_lines: 300\n`);
+    const files = { [`${FEATURE}/plan.md`]: PLAN(), [`${FEATURE}/tasks.md`]: TASKS };
+    const spec = { [`${FEATURE}/spec.md`]: SPEC };
+    expect(await stationRun(3, 'planner', files, CONFIG, spec).stop()).toEqual({ block: false });
+    const lowered = stationRun(3, 'planner', files, `${CONFIG}size_limit_lines: 300\n`, spec);
     expect((await lowered.stop()).reason).toMatch(/estimates 350 changed lines; the limit is 300/);
   });
 

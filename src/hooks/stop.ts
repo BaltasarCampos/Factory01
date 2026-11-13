@@ -9,7 +9,8 @@
 // The role, station, item, clone and repository come from the session's record
 // (src/hooks/session.ts), never from the clone, and a blocked stop is logged in the session's own
 // log, Define's and Intake's included. No factory git runs in the clone: its head is read inside
-// the factory's sandbox into the factory's own clone (session-commits.ts), and checked there.
+// the factory's sandbox into the factory's own clone (session-commits.ts), and checked there; for
+// the roles that commit nothing, the hook commits their output there itself (output-commit.ts).
 import { homedir } from 'node:os';
 import { STATIONS, type Station } from '../model/types.js';
 import { visible } from '../notify/summary.js';
@@ -21,6 +22,7 @@ import { securityStopCheck } from '../stations/checks/security.js';
 import { specStopCheck } from '../stations/checks/spec.js';
 import { verifyStopCheck } from '../stations/checks/verify.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
+import { HOOK_COMMITS, hookOutput } from './output-commit.js';
 import { sessionOutput, UnreadableHead, type SessionOutput } from './session-commits.js';
 import { logBlocked, readSessionRecord, sessionId, type SessionRecord } from './session.js';
 
@@ -58,7 +60,15 @@ export const CHECKERS: Partial<Record<Station, StationChecker>> = {
   2: (_r, at) => specStopCheck(at()),
   3: (_r, at) => planStopCheck(at()),
   4: (_r, at) => buildStopCheck(at()),
-  5: (r, at) => (r.role === 'security' ? securityStopCheck(at()) : verifyStopCheck(at())),
+  5: (r, at) => {
+    // What Test may commit is 28-5b-3's: until then its stop fails closed, as the Integrator's.
+    if (r.role === 'test')
+      return {
+        complete: false,
+        missing: ["Test's output, which the factory commits only from slice 28-5b-3"],
+      };
+    return r.role === 'security' ? securityStopCheck(at()) : verifyStopCheck(at());
+  },
 };
 
 export async function runStop(
@@ -79,7 +89,10 @@ export async function runStop(
     // Read once, when a checker asks: Intake's never does.
     const env = { ...process.env, ...ctx.env };
     let output: SessionOutput | undefined;
-    const at = () => (output ??= sessionOutput(record, home, session, env));
+    const at = () =>
+      (output ??= HOOK_COMMITS.includes(record.role)
+        ? hookOutput(record, home, session, env)
+        : sessionOutput(record, home, session, env));
     try {
       const result = await checker(record, at);
       if (!result.complete) {
