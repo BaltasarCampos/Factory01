@@ -1,13 +1,13 @@
-// The Stop hook's commit for the roles that commit nothing themselves (T086, slice 28-5b): their
-// output read in the read-only sandbox, committed in the factory's own clone with plumbing; with
-// the real bwrap and git.
+// The Stop hook's commit for the roles that commit nothing themselves (T086, slices 28-5b and
+// 28-5b-2): their output read in the read-only sandbox, committed in the factory's own clone with
+// plumbing, the passing head recorded apart, and the second stop; with the real bwrap and git.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { hookOutput, readOutput } from '../../src/hooks/output-commit.js';
-import { sessionRef, UnreadableHead } from '../../src/hooks/session-commits.js';
-import { readSessionRecord } from '../../src/hooks/session.js';
+import { passedRef, sessionRef, UnreadableHead } from '../../src/hooks/session-commits.js';
+import { passedPath, readSessionRecord } from '../../src/hooks/session.js';
 import { runStop } from '../../src/hooks/stop.js';
 import { visible } from '../../src/notify/summary.js';
 import { makeRepo, runGit } from '../helpers/git-repo.js';
@@ -28,7 +28,7 @@ function issued(role = 'reviewer', station = 5) {
   r.push();
   const head = r.revParse('HEAD');
   const project = dispatcherClone(r);
-  const { home, env } = recordSession({ role, station, clone: r.path, head, project });
+  const { home, env, log } = recordSession({ role, station, clone: r.path, head, project });
   const write = (path: string, text: string) => {
     mkdirSync(dirname(join(r.path, path)), { recursive: true });
     writeFileSync(join(r.path, path), text);
@@ -36,12 +36,20 @@ function issued(role = 'reviewer', station = 5) {
   const record = () => readSessionRecord(home, SESSION_ID);
   const output = () => hookOutput(record(), home, SESSION_ID, { ...process.env, ...env });
   const ref = (name: string) => runGit(project, ['for-each-ref', '--format=%(objectname)', name]);
-  const stop = () =>
+  const stop = (again = false) =>
     runStop(
-      { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' },
+      { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop', stop_hook_active: again },
       { cwd: r.path, now: () => new Date(), env },
     );
-  return { r, head, home, env, project, write, record, output, ref, stop };
+  const passed = () => {
+    writeFileSync(passedPath(home, SESSION_ID), '{}\n');
+  };
+  const events = () =>
+    readFileSync(log, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as { kind: string; input_summary: string });
+  return { r, head, home, env, project, write, record, output, ref, stop, passed, events };
 }
 
 describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", () => {
@@ -61,12 +69,13 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
       'Factory-Role: reviewer\nFactory-Item: 42-add-login',
     );
     expect(t.ref(sessionRef(SESSION_ID))).toBe(out.commit);
+    expect(out.outside).toEqual([]);
     // Nothing written in the session's clone, its HEAD and index as they were.
     expect(t.r.revParse('HEAD')).toBe(t.head);
     expect(t.r.git(['status', '--porcelain'])).toBe(`?? ${FEATURE}/reports/`);
   });
 
-  it("never commits a change outside its paths, with no global or system config, and the commit's encoding pinned", () => {
+  it("names a change outside its paths and never commits it, with no global or system config, and the commit's encoding pinned", () => {
     const t = issued();
     const latin1 = '[i18n]\n\tcommitEncoding = ISO-8859-1\n';
     writeFileSync(
@@ -78,6 +87,7 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
     t.write('src/login.ts', 'changed\n');
     t.write('src/new.ts', 'x\n');
     const out = t.output();
+    expect(out.outside.sort()).toEqual(['src/login.ts', 'src/new.ts']);
     expect(
       runGit(t.project, ['diff-tree', '--name-only', '-r', '--no-commit-id', out.commit]),
     ).toBe(REPORT);
@@ -176,15 +186,88 @@ function rmFeature(t: ReturnType<typeof issued>) {
   execFileSync('rm', ['-rf', join(t.r.path, FEATURE)]);
 }
 
-describe('the Stop hook on a committed output (T086, 28-5b)', () => {
-  it('ends once the check passes on the commit, keeps going while it fails, and refuses Test until 28-5b-3', async () => {
+describe('the passing head and the second stop (T086, 28-5b-2)', () => {
+  it('records the passing head only for a session whose start passed, and never for a failing check', async () => {
     const t = issued();
     t.write(REPORT, VERIFY.replace('pass', 'fail'));
-    expect((await t.stop()).reason).toMatch(/Review: fail/);
+    t.passed();
+    expect((await t.stop()).block).toBe(true);
+    expect(t.ref(passedRef(SESSION_ID))).toBe('');
     t.write(REPORT, VERIFY);
     expect(await t.stop()).toEqual({ block: false });
-    expect(runGit(t.project, ['show', `${t.ref(sessionRef(SESSION_ID))}:${REPORT}`])).toBe(
-      VERIFY.trim(),
+    expect(t.ref(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
+
+    const u = issued();
+    u.write(REPORT, VERIFY);
+    expect(await u.stop()).toEqual({ block: false });
+    expect(u.ref(sessionRef(SESSION_ID))).not.toBe('');
+    expect(u.ref(passedRef(SESSION_ID))).toBe('');
+  });
+
+  it('checks again at the second stop, recording a passing head, and never blocks it', async () => {
+    const t = issued();
+    t.passed();
+    t.write(REPORT, VERIFY.replace('pass', 'fail'));
+    expect(await t.stop(true)).toEqual({ block: false });
+    expect(t.ref(passedRef(SESSION_ID))).toBe('');
+    expect(t.events().at(-1)).toMatchObject({
+      kind: 'alert',
+      input_summary: expect.stringMatching(
+        /^second stop, ended with no passing head: .*Review: fail/,
+      ) as string,
+    });
+    t.write(REPORT, VERIFY);
+    expect(await t.stop(true)).toEqual({ block: false });
+    expect(t.ref(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
+  });
+
+  it("logs a failure of the factory's own at the second stop, never reading it as passing", async () => {
+    const t = issued();
+    t.passed();
+    t.write(REPORT, VERIFY);
+    execFileSync('rm', ['-rf', t.project]);
+    expect(await t.stop(true)).toEqual({ block: false });
+    expect(t.events().at(-1)).toMatchObject({
+      kind: 'alert',
+      input_summary: expect.stringMatching(
+        /^second stop, ended with no passing head: the factory's own check failed: git /,
+      ) as string,
+    });
+  });
+
+  it("runs no fsmonitor command the clone's config names, and no git status in a submodule", () => {
+    const t = issued();
+    t.write(REPORT, VERIFY);
+    t.r.git(['update-index', '--add', '--cacheinfo', `160000,${t.head},sub`]);
+    // A submodule whose own config fails a git status run inside it.
+    const sub = join(t.r.path, 'sub');
+    execFileSync('git', ['init', '-q', sub]);
+    const who = ['-c', 'user.name=x', '-c', 'user.email=x@x'];
+    execFileSync('git', ['-C', sub, ...who, 'commit', '-q', '--allow-empty', '-m', 's']);
+    execFileSync('git', ['-C', sub, 'config', 'status.showUntrackedFiles', 'bogus']);
+    // Set last: the test's own git would run it too; git appends its arguments after the `:`.
+    t.r.git(['config', 'core.fsmonitor', 'kill -9 $PPID; :']);
+    expect(t.output().outside).toEqual([]);
+  });
+
+  it("logs a change outside the role's paths as an alert, and Test's stop fails closed until 28-5b-3", async () => {
+    const t = issued();
+    t.write(REPORT, VERIFY);
+    t.write('src/login.ts', 'changed\n');
+    expect(await t.stop()).toEqual({ block: false });
+    expect(t.events()).toEqual([
+      expect.objectContaining({
+        kind: 'alert',
+        input_summary: "changed outside the reviewer's paths, never committed: src/login.ts",
+      }),
+    ]);
+    const u = issued();
+    u.write(REPORT, VERIFY);
+    u.r.git(['mv', 'src/login.ts', 'src/moved.ts']);
+    u.write('src/a\u001bb.ts', 'x\n');
+    expect(await u.stop()).toEqual({ block: false });
+    expect(u.events().at(-1)?.input_summary).toBe(
+      "changed outside the reviewer's paths, never committed: src/login.ts, src/moved.ts, src/a\\u{1b}b.ts",
     );
     const test = issued('test');
     test.write('tests/new.test.ts', 'x\n');

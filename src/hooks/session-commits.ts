@@ -44,6 +44,11 @@ const OID = /^[0-9a-f]{40}$/;
 
 /** The ref a session's head is kept under, in the factory's own clone. */
 export const sessionRef = (session: string) => `refs/factory/sessions/${session}`;
+/**
+ * The ref of the head whose output check passed, for a session whose start passed: written by the
+ * Stop hook only then, and only what the launcher pushes (28-6), which checks it again.
+ */
+export const passedRef = (session: string) => `refs/factory/passed/${session}`;
 
 /** Why the session's head cannot be taken, for the session to fix: its clone is its own. */
 export class UnreadableHead extends Error {}
@@ -109,10 +114,10 @@ export const inSandbox = (
   clone: string,
   box: string,
   env: NodeJS.ProcessEnv,
-  io: { input?: string; limit?: number } = {},
+  io: { input?: string; limit?: number; name?: string } = {},
 ): Buffer => {
   const git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', ...args];
-  return inBox(git, clone, box, env, { ...io, name: `git ${args[0] ?? ''}` });
+  return inBox(git, clone, box, env, { name: `git ${args[0] ?? ''}`, ...io });
 };
 
 /** The clone's HEAD and, past the record's head, a full pack of what it adds: git in the sandbox. */

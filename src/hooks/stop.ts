@@ -3,14 +3,16 @@
 // (Define in slice 12, T045; the others in slice 14, T057; Intake in slice 16b; Build in slice
 // 26e-1, T174); a station without one fails closed (Owner decision, slice 7 note B).
 //
-// After one forced continuation (`stop_hook_active`) the session may end: the dispatcher reads
-// the station output from the branch, so a session that stops early still advances nothing.
+// After one forced continuation (`stop_hook_active`) the session may end: the check runs again
+// and a passing head is still recorded, but the stop is never blocked twice. Only a session whose
+// start passed gets a passing head, under `refs/factory/passed/<id>` (slice 28-5b-2).
 //
 // The role, station, item, clone and repository come from the session's record
 // (src/hooks/session.ts), never from the clone, and a blocked stop is logged in the session's own
 // log, Define's and Intake's included. No factory git runs in the clone: its head is read inside
 // the factory's sandbox into the factory's own clone (session-commits.ts), and checked there; for
 // the roles that commit nothing, the hook commits their output there itself (output-commit.ts).
+import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { STATIONS, type Station } from '../model/types.js';
 import { visible } from '../notify/summary.js';
@@ -23,8 +25,23 @@ import { specStopCheck } from '../stations/checks/spec.js';
 import { verifyStopCheck } from '../stations/checks/verify.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
 import { HOOK_COMMITS, hookOutput } from './output-commit.js';
-import { sessionOutput, UnreadableHead, type SessionOutput } from './session-commits.js';
-import { logBlocked, readSessionRecord, sessionId, type SessionRecord } from './session.js';
+import {
+  ownOk,
+  passedRef,
+  sessionOutput,
+  UnreadableHead,
+  type SessionOutput,
+} from './session-commits.js';
+import {
+  logBlocked,
+  passedPath,
+  readSessionRecord,
+  recordEvent,
+  sessionEvents,
+  sessionId,
+  type SessionRecord,
+} from './session.js';
+import { appendEvent } from '../events/append.js';
 
 export interface CheckResult {
   complete: boolean;
@@ -76,36 +93,90 @@ export async function runStop(
   ctx: HookContext,
   checkers: Partial<Record<Station, StationChecker>> = CHECKERS,
 ): Promise<HookResult> {
-  if (input.stop_hook_active === true) return { block: false };
+  const again = input.stop_hook_active === true;
   const home = ctx.env?.HOME ?? homedir();
-  const session = sessionId(input.session_id);
-  const record = readSessionRecord(home, session);
-  const checker = checkers[record.station];
-  const name = STATIONS[record.station];
+  if (!again) {
+    const session = sessionId(input.session_id);
+    const record = readSessionRecord(home, session);
+    const reason = await check(checkers, record, home, session, ctx);
+    if (reason === undefined) return { block: false };
+    const fields = { tool: 'Stop', input_summary: reason };
+    const unlogged = await logBlocked(record, home, session, fields, ctx.now);
+    // The check's text can quote the clone's files.
+    return { block: true, reason: visible(reason) + visible(unlogged) };
+  }
+  // The second stop is never blocked, the forced continuation having had its chance: the check
+  // runs again so output fixed meanwhile still gets its passing head, and what keeps it from one,
+  // a failure of the factory's own included, is logged, never read as passing.
+  let record: SessionRecord | undefined;
   let reason: string | undefined;
-  if (checker === undefined) {
-    reason = `no output checker for station ${String(record.station)} (${name}) in this build; the session cannot confirm its output`;
-  } else {
-    // Read once, when a checker asks: Intake's never does.
-    const env = { ...process.env, ...ctx.env };
-    let output: SessionOutput | undefined;
-    const at = () =>
-      (output ??= HOOK_COMMITS.includes(record.role)
-        ? hookOutput(record, home, session, env)
-        : sessionOutput(record, home, session, env));
+  let session = '';
+  try {
+    session = sessionId(input.session_id);
+    record = readSessionRecord(home, session);
+    reason = await check(checkers, record, home, session, ctx);
+  } catch (err) {
+    reason = `the factory's own check failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+  if (record !== undefined && reason !== undefined) {
+    const summary = `second stop, ended with no passing head: ${visible(reason)}`;
+    const event = recordEvent(record, session, {
+      kind: 'alert',
+      tool: 'Stop',
+      input_summary: summary,
+    });
     try {
-      const result = await checker(record, at);
-      if (!result.complete) {
-        reason = `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
-      }
-    } catch (err) {
-      if (!(err instanceof UnreadableHead)) throw err;
-      reason = `station ${name} output cannot be read: ${err.message}`;
+      await appendEvent(sessionEvents(home, session), event, ctx.now);
+    } catch {
+      // The session ends either way; its log cannot be written.
     }
   }
-  if (reason === undefined) return { block: false };
-  const fields = { tool: 'Stop', input_summary: reason };
-  const unlogged = await logBlocked(record, home, session, fields, ctx.now);
-  // The check's text can quote the clone's files.
-  return { block: true, reason: visible(reason) + visible(unlogged) };
+  return { block: false };
+}
+
+/** The station's check of the session's output; undefined when it passes, else why not. */
+async function check(
+  table: Partial<Record<Station, StationChecker>>,
+  record: SessionRecord,
+  home: string,
+  session: string,
+  ctx: HookContext,
+): Promise<string | undefined> {
+  const checker = table[record.station];
+  const name = STATIONS[record.station];
+  if (checker === undefined)
+    return `no output checker for station ${String(record.station)} (${name}) in this build; the session cannot confirm its output`;
+  // Read once, when a checker asks: Intake's never does.
+  const env = { ...process.env, ...ctx.env };
+  let output: (SessionOutput & { outside?: string[] }) | undefined;
+  const at = () =>
+    (output ??= HOOK_COMMITS.includes(record.role)
+      ? hookOutput(record, home, session, env)
+      : sessionOutput(record, home, session, env));
+  let result: CheckResult;
+  try {
+    result = await checker(record, at);
+  } catch (err) {
+    if (!(err instanceof UnreadableHead)) throw err;
+    return `station ${name} output cannot be read: ${err.message}`;
+  }
+  const outside = output?.outside ?? [];
+  if (outside.length > 0) {
+    // The session names its own files.
+    const shown =
+      visible(outside.slice(0, 10).join(', ')) +
+      (outside.length > 10 ? `, and ${String(outside.length - 10)} more` : '');
+    const event = recordEvent(record, session, {
+      kind: 'alert',
+      tool: 'Stop',
+      input_summary: `changed outside the ${record.role}'s paths, never committed: ${shown}`,
+    });
+    await appendEvent(sessionEvents(home, session), event, ctx.now);
+  }
+  if (!result.complete)
+    return `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
+  // Passed: the head is recorded only for a session whose start passed, and only once read.
+  if (output !== undefined && existsSync(passedPath(home, session)))
+    ownOk(output.repo, ['update-ref', passedRef(session), output.commit], env);
+  return undefined;
 }

@@ -4,7 +4,7 @@
 // committed in the factory's own clone with plumbing: a temporary index on the head the session
 // was issued, a fixed factory author per role, the `Factory-Role` and `Factory-Item` trailers and
 // none of the Owner's git config. Only the role's own paths, from the installed `roles.yaml`, are
-// ever read, so a change anywhere else is never committed.
+// ever read; a change anywhere else is never committed and is named in the session's log.
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { EnvironmentError } from '../cli/env.js';
@@ -24,7 +24,7 @@ import {
 } from './session-commits.js';
 import { sessionFolder, type SessionRecord } from './session.js';
 
-/** The roles whose output the Stop hook commits; Test's comes with 28-5b-2. */
+/** The roles whose output the Stop hook commits; Test's comes with 28-5b-3. */
 export const HOOK_COMMITS: readonly RoleName[] = ['spec', 'planner', 'reviewer', 'security'];
 
 /** The most a role's output may hold, in bytes, all its files together. */
@@ -160,6 +160,35 @@ export function readOutput(
   );
 }
 
+/**
+ * The paths git sees changed in the clone outside the role's own, from its status in the sandbox:
+ * the session's own git can lie here, so this only names them, and nothing is committed from it.
+ */
+export function outsideChanges(record: SessionRecord, box: string, env: NodeJS.ProcessEnv) {
+  const { files, folders } = outputPaths(record);
+  // The clone's config can name a command for git to run, and a submodule folder has its own.
+  const off = ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'];
+  const args = [
+    'status',
+    '--porcelain=v1',
+    '-z',
+    '--untracked-files=all',
+    '--no-renames',
+    '--ignore-submodules=all',
+  ];
+  const status = inSandbox(['--no-optional-locks', ...off, ...args], record.clone, box, env, {
+    name: 'git status',
+  });
+  const changed = status
+    .toString()
+    .split('\0')
+    .filter((entry) => entry.length > 3)
+    .map((entry) => entry.slice(3));
+  const own = (path: string) =>
+    files.includes(path) || folders.some((folder) => matchesPath(`${folder}/**`, path));
+  return changed.filter((path) => !own(path));
+}
+
 /** The factory's own name for a role's commits, never the Owner's. */
 const author = (role: RoleName) => ({ name: `Factory ${role}`, email: `${role}@factory.invalid` });
 
@@ -207,14 +236,15 @@ function ownBlob(repo: string, bytes: Buffer, env: NodeJS.ProcessEnv): string {
 /**
  * A hook-committing role's output, committed in the factory's own clone and kept under the
  * session ref, as `sessionOutput` keeps a session's own commits; the clone's HEAD must still be
- * the head it was issued, since the role commits nothing itself.
+ * the head it was issued, since the role commits nothing itself. `outside` names what changed
+ * elsewhere.
  */
 export function hookOutput(
   record: SessionRecord,
   home: string,
   session: string,
   env: NodeJS.ProcessEnv = process.env,
-): SessionOutput {
+): SessionOutput & { outside: string[] } {
   const { project: repo, clone, head } = record;
   const work = mkdtempSync(join(sessionFolder(home, session), 'commit-'));
   try {
@@ -227,9 +257,10 @@ export function hookOutput(
         `a ${record.role} session commits nothing itself, but its clone's HEAD is ${visible(tip.slice(0, 12))}, not ${head.slice(0, 12)}, the commit it was issued; this session cannot fix it, so it ends as a failure`,
       );
     const files = readOutput(record, box, env);
+    const outside = outsideChanges(record, box, env);
     const commit = commitOutput(record, files, work, env);
     ownOk(repo, ['update-ref', sessionRef(session), commit], env);
-    return { repo, commit, head, feature: record.feature, branch: record.branch };
+    return { repo, commit, head, feature: record.feature, branch: record.branch, outside };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
