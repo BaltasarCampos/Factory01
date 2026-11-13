@@ -4,6 +4,7 @@
 // is the session record's, from the branch the dispatcher issued (T170).
 import { RefusedError } from '../../cli/env.js';
 import { safeGit } from '../../git/diff.js';
+import { visible } from '../../notify/summary.js';
 import type { SessionOutput } from '../../hooks/session-commits.js';
 
 /** Git in the factory's own clone, without the Owner's config: its exit, 0 or 1, and output. */
@@ -11,14 +12,18 @@ export function answer(at: Pick<SessionOutput, 'repo'>, args: readonly string[])
   const result = safeGit(at.repo, args, process.env);
   if (result.status === 0 || result.status === 1)
     return { ok: result.status === 0, out: result.stdout.toString().trim() };
-  throw new RefusedError(`git ${args[0] ?? ''} failed: ${result.stderr}`);
+  const command = args.find((arg) => !arg.startsWith('-')) ?? '';
+  throw new RefusedError(`git ${command} failed: ${visible(result.stderr)}`);
 }
 
 /**
  * A regular file at the session's head, or undefined when none is committed there; a git failure
  * throws, never reading as a missing file.
  */
-export function committed(at: SessionOutput, path: string): string | undefined {
+export function committed(
+  at: Pick<SessionOutput, 'repo' | 'commit'>,
+  path: string,
+): string | undefined {
   const entry = answer(at, ['--literal-pathspecs', 'ls-tree', '-z', at.commit, '--', path]);
   const [mode, type, oid] = entry.out.split('\t')[0]?.split(' ') ?? [];
   if (!entry.ok) throw new RefusedError(`git ls-tree ${at.commit.slice(0, 12)} failed`);

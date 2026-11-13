@@ -14,10 +14,10 @@ import { listPrs } from '../../github/prs.js';
 import { DEFINE_BRANCH } from '../../install/project.js';
 import type { ReleaseKeys } from '../../approvals/keys.js';
 import { signedAnswers } from '../../git/answers.js';
-import { safeGit } from '../../git/diff.js';
 import type { SessionOutput } from '../../hooks/session-commits.js';
 import type { SessionRecord } from '../../hooks/session.js';
 import type { CheckResult } from '../../hooks/stop.js';
+import { answer, committed } from './feature.js';
 import { BRIEF_PATH } from '../../install/manifest.js';
 
 export const QUESTIONS_PATH = '.factory/define/questions.md';
@@ -60,16 +60,27 @@ export interface DefineCheck {
   answersSignedBy: ReleaseKeys | 'as-committed';
 }
 
-/** Git without the Owner's config, as every factory read of branch content runs. */
-function git(cwd: string, args: readonly string[]): { ok: boolean; out: string } {
-  const result = safeGit(cwd, args, process.env);
-  return { ok: result.status === 0, out: result.stdout.toString().trim() };
-}
+/**
+ * Git without the Owner's config, as every factory read of branch content runs: its exit, 0 or
+ * 1, and output; any other failure throws, never reading as an answer.
+ */
+const git = (cwd: string, args: readonly string[]) => answer({ repo: cwd }, args);
 
 /** A file at a commit, or undefined when it is not there. */
-function show(cwd: string, ref: string, path: string): string | undefined {
-  const result = git(cwd, ['show', `${ref}:${path}`]);
-  return result.ok ? `${result.out}\n` : undefined;
+const show = (cwd: string, ref: string, path: string) =>
+  committed({ repo: cwd, commit: ref }, path);
+
+/**
+ * Whether `path`, a code tag the session wrote, names an entry of `sha`'s tree by its exact name,
+ * a gitlink not counting: a path git would refuse, absolute or with an empty, `.` or `..` part, is
+ * not in the tree, never a git failure.
+ */
+function inTree(cwd: string, sha: string, path: string): boolean {
+  if (path.startsWith('/') || path.split('/').some((p) => p === '' || p === '.' || p === '..'))
+    return false;
+  const entry = git(cwd, ['--literal-pathspecs', 'ls-tree', '-z', sha, '--', path]).out;
+  const [head = '', name] = entry.split('\0')[0]?.split('\t') ?? [];
+  return name === path && !head.startsWith('160000 ');
 }
 
 /** Commits in `range` touching `path`, oldest first. */
@@ -252,10 +263,7 @@ export async function checkDefine(input: DefineCheck): Promise<DefineResult> {
 
   const brief = show(cwd, sha, BRIEF_PATH);
   if (brief === undefined) missing.push(`${BRIEF_PATH}: missing`);
-  else
-    missing.push(
-      ...checkBrief(brief, questions, (p) => git(cwd, ['cat-file', '-e', `${sha}:${p}`]).ok),
-    );
+  else missing.push(...checkBrief(brief, questions, (p) => inTree(cwd, sha, p)));
   missing.push(...skeletonProblems(cwd, sha));
 
   const listed = backlogIssues(show(cwd, sha, BACKLOG_PATH));

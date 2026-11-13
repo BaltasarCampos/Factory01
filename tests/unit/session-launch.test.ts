@@ -26,7 +26,9 @@ import * as deps from '../../src/dispatcher/launcher/deps.js';
 import { installArgs, installs, type Installer } from '../../src/dispatcher/launcher/deps.js';
 import {
   guardrailCheck,
+  CONTAIN,
   LocalLauncher,
+  ProcScan,
   groupRecord,
   localInvocation,
   MAX_LINE,
@@ -193,6 +195,8 @@ function setup(
     tmpRoot?: string;
     /** The clone's install, in place of the sandboxed npm ci. */
     install?: Installer;
+    /** A /proc of the test's own. */
+    proc?: string;
   } = {},
 ) {
   const repo = makeRepo({ files: { '.factory/config': CONFIG, ...GUARDED } });
@@ -231,6 +235,7 @@ function setup(
     ...options.limits,
     ...(options.install === undefined ? {} : { install: options.install }),
     ...(options.tmpRoot === undefined ? {} : { tmpRoot: options.tmpRoot }),
+    ...(options.proc === undefined ? {} : { proc: options.proc }),
   });
   const owner = () => [
     repo.git(['rev-parse', '--abbrev-ref', 'HEAD']),
@@ -570,6 +575,59 @@ describe('LocalLauncher (research R8, R9)', () => {
     // It writes no record and starts nothing.
     expect(existsSync(shape.files.record)).toBe(false);
     expect(t.sessions()).toHaveLength(1);
+  });
+
+  it("starts claude alone in the factory's bubblewrap, in a PID namespace of its own (T061)", async () => {
+    const run = vi.fn(fakeRunner().run);
+    const t = setup({ run });
+    await t.launch(REQUEST);
+    const contained = run.mock.calls.filter(([, , options]) => options.contain !== undefined);
+    expect(contained.map(([program, args]) => [program, args[0]])).toEqual([['claude', '-p']]);
+    expect(contained[0]?.[2].contain).toEqual(CONTAIN);
+    expect(CONTAIN).toEqual(expect.arrayContaining(['--unshare-pid', '--die-with-parent']));
+    // T125's kit runs what the launcher runs.
+    const clone = work(t.home, '42-add-login');
+    const shape = t.launcher.sessionShape({ project: t.repo.path, ...REQUEST }, clone, 'sonnet');
+    expect(shape.contain).toEqual(CONTAIN);
+  });
+
+  it("refuses a launch, counting nothing, when Claude Code's sandbox cannot start inside the factory's bubblewrap (T061)", async () => {
+    const heard: string[] = [];
+    const t = setup({
+      stubs: false,
+      path: (home) => {
+        const dir = join(home, 'broken-bwrap');
+        mkdirSync(dir);
+        writeFileSync(join(dir, 'bwrap'), '#!/bin/sh\necho "bwrap: no nesting" >&2\nexit 1\n', {
+          mode: 0o755,
+        });
+        writeFileSync(join(dir, 'socat'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+        return `${dir}:${standIns('gh')}:${launchFolder()}`;
+      },
+    });
+    const refused = t.launch({ ...REQUEST, starting: (id) => heard.push(id) });
+    await expect(refused).rejects.toThrow(LaunchRefused);
+    await expect(refused).rejects.toThrow(
+      "no local session started: claude runs in a bubblewrap of the factory's, with Claude Code's own sandbox nested inside it, and that failed: bwrap: no nesting",
+    );
+    // The probe's own argv, exactly as it ran.
+    await expect(refused).rejects.toThrow(
+      `; check that bwrap ${[...CONTAIN, 'bwrap', '--new-session', '--die-with-parent', '--unshare-net', '--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', 'true'].join(' ')} runs on this machine`,
+    );
+    expect(t.sessions()).toEqual([]);
+    expect(heard).toEqual([]);
+    expect(existsSync(join(t.home, '.factory', 'sessions', FIRST, 'not-spawned'))).toBe(true);
+  });
+
+  it('reads the boot id before the spawn: one it cannot read refuses, counting nothing (T061)', async () => {
+    const heard: string[] = [];
+    const t = setup({ proc: tempDir('proc-') });
+    const refused = t.launch({ ...REQUEST, starting: (id) => heard.push(id) });
+    await expect(refused).rejects.toThrow(
+      /no local session started: reading the kernel's boot id: .*boot_id cannot be read \(ENOENT\)/,
+    );
+    expect(t.sessions()).toEqual([]);
+    expect(heard).toEqual([]);
   });
 
   it('T125: sessionShape leaves neither folder it made when it throws', () => {
@@ -1902,8 +1960,11 @@ describe('LocalLauncher (research R8, R9)', () => {
           // The child is started first, so its pid is on record before any line is read.
           const left = 'sleep 30 & echo $! > left.pid; ';
           const script = at.ends === true ? 'cat stream.jsonl' : `${left}cat stream.jsonl; wait`;
-          // The stand-in's own PATH: the session's holds no cat or sleep.
-          return runProcess('bash', ['-c', script], { ...options, cwd: dir, env: gitEnv });
+          // The stand-in's own PATH: the session's holds no cat or sleep. Uncontained, so its
+          // pids are the host's (tests/contract/contain.test.ts runs CONTAIN).
+          const host = { ...options };
+          delete host.contain;
+          return runProcess('bash', ['-c', script], { ...host, cwd: dir, env: gitEnv });
         };
         const t = setup({ run });
         home = t.home;
@@ -1962,8 +2023,10 @@ describe('LocalLauncher (research R8, R9)', () => {
         const run: Runner = (program, args, options) => {
           if (args[0] !== '-p') return base.run(program, args, options);
           const dir = join(home, '.factory', 'sessions', FIRST);
+          const host = { ...options };
+          delete host.contain;
           return runProcess('bash', ['-c', script], {
-            ...{ ...options, cwd: dir, env: gitEnv },
+            ...{ ...host, cwd: dir, env: gitEnv },
             started: (pid) => {
               started?.(pid, dir);
               options.started?.(pid);
@@ -2102,7 +2165,7 @@ describe('LocalLauncher (research R8, R9)', () => {
           await expect(refused).rejects.toMatchObject({ urgent: true, kind: 'session-running' });
           await expect(refused).rejects.toThrow(
             new RegExp(
-              `claude has ended, but processes ${left} of its process group .*ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}`,
+              `bubblewrap has ended, but processes ${left} of its process group .*ps -o pid,pgid,lstart,args -g ${String(pgid)}, stop them with kill -TERM -${String(pgid)}`,
             ),
           );
         } finally {
@@ -2901,6 +2964,79 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       ok: false,
       reason: 'claude is not installed',
     });
+  });
+});
+
+describe('/proc, read once per launch and fail closed (T061, deferred (1) and (2))', () => {
+  const BOOT = 'b00t';
+  /** A /proc of the test's own: its boot id and `pid` → [state, group, start]. */
+  function proc(processes: Record<number, [string, number, string]>, boot: string | null = BOOT) {
+    const root = tempDir('proc-');
+    if (boot !== null) {
+      mkdirSync(join(root, 'sys', 'kernel', 'random'), { recursive: true });
+      writeFileSync(join(root, 'sys', 'kernel', 'random', 'boot_id'), `${boot}\n`);
+    }
+    for (const [pid, [state, pgid, start]] of Object.entries(processes)) {
+      mkdirSync(join(root, pid));
+      const fields = [state, '1', String(pgid), ...Array<string>(16).fill('0'), start];
+      writeFileSync(join(root, pid, 'stat'), `${pid} (a b) ${fields.join(' ')} 0\n`);
+    }
+    return root;
+  }
+  /** Session folders whose group.json alone names `pgid`, started at 7 on BOOT. */
+  function sessions(...pgids: number[]) {
+    const home = tempDir('home-');
+    return {
+      home,
+      ids: pgids.map((pgid, n) => {
+        const id = `s${String(n)}`;
+        const dir = join(home, '.factory', 'sessions', id);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'group.json'), JSON.stringify({ pgid, start: '7', boot: BOOT }));
+        return id;
+      }),
+    };
+  }
+
+  it('scans every process once for all the folders a launch checks', () => {
+    const { home, ids } = sessions(100, 200, 300);
+    const scan = new ProcScan(proc({ 5: ['S', 9, '1'] }));
+    for (const id of ids) expect(sessionRunning(home, id, scan)).toBeUndefined();
+    expect(scan.scans).toBe(1);
+    // A live member of a group whose leader has gone still counts, from that one scan.
+    const live = new ProcScan(proc({ 5: ['S', 200, '1'] }));
+    expect(sessionRunning(home, 's1', live)).toMatch(/processes 5 of its process group 200/);
+  });
+
+  it("skips another user's process hidepid keeps from it, and names a leader it cannot read", () => {
+    const root = proc({ 5: ['S', 100, '1'], 100: ['S', 100, '7'] });
+    const { home } = sessions(100, 300);
+    /** A reader that gives `code` for the stat of each pid in `pids`, as hidepid=1 does with EPERM. */
+    const hidden =
+      (code: string, ...pids: number[]) =>
+      (file: string) => {
+        if (pids.some((pid) => file === join(root, String(pid), 'stat')))
+          throw Object.assign(new Error(code), { code });
+        return readFileSync(file, 'utf8');
+      };
+    for (const code of ['EPERM', 'EACCES'])
+      expect(sessionRunning(home, 's1', new ProcScan(root, hidden(code, 5)))).toBeUndefined();
+    expect(() => sessionRunning(home, 's0', new ProcScan(root, hidden('EPERM', 100)))).toThrow(
+      `${root}/100/stat cannot be read (EPERM), as under a /proc mounted with hidepid, so no session's process group can be checked; mount /proc so the Owner's processes can be read`,
+    );
+  });
+
+  it('refuses a stat with no ) or too few fields, and a boot id it cannot read', () => {
+    const root = proc({});
+    mkdirSync(join(root, '100'));
+    writeFileSync(join(root, '100', 'stat'), '100 (no end S 1 100\n');
+    const { home } = sessions(100);
+    expect(() => sessionRunning(home, 's0', new ProcScan(root))).toThrow(
+      /100\/stat cannot be parsed: 100 \(no end S 1 100/,
+    );
+    expect(() => sessionRunning(home, 's0', new ProcScan(proc({}, null)))).toThrow(
+      /boot_id cannot be read \(ENOENT\), so no session's process group can be told from a later one/,
+    );
   });
 });
 

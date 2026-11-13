@@ -11,7 +11,7 @@
 // go under `refs/factory/sessions/<id>`, where the station checks read it. A refused pack leaves
 // nothing there, and the head the session's clone claims is never trusted on its own.
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readdirSync, readFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readdirSync } from 'node:fs';
 import { renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { probeBwrap, sandboxArgs } from '../ci/sandbox.js';
@@ -191,17 +191,17 @@ function quarantined(
   if (name === undefined)
     throw new EnvironmentError(`git index-pack in ${repo} named no pack: ${visible(indexed.out)}`);
   const files = readdirSync(join(held, 'pack')).filter((f) => f.startsWith(`pack-${name}.`));
-  const idx = readFileSync(join(held, 'pack', `pack-${name}.idx`));
-  const listed = own(repo, ['show-index'], env, {}, idx);
-  if (listed.status !== 0)
-    throw new EnvironmentError(`git show-index in ${repo} failed: ${listed.err}`);
-  const sent = new Set(listed.out.split('\n').map((line) => line.split(' ')[1] ?? ''));
-  if (!sent.has(claimed))
+  // Asked of the quarantine alone, with no alternate, so an object only the factory's clone holds
+  // reads as missing; git looks up the one object, holding no list of the pack in memory.
+  const alone = { env: { GIT_OBJECT_DIRECTORY: held } };
+  const asked = own(repo, ['cat-file', '--batch-check'], env, alone, Buffer.from(`${claimed}\n`));
+  if (asked.status !== 0)
+    throw new EnvironmentError(`git cat-file in ${repo} failed: ${visible(asked.err)}`);
+  const [oid, type = ''] = asked.out.split(' ');
+  if (oid !== claimed || type === 'missing')
     throw new UnreadableHead(
       `its head ${visible(claimed.slice(0, 12))} is not an object its own commits hold`,
     );
-  // An object of the pack: a failure to read its type is the factory's.
-  const type = ownOk(repo, ['cat-file', '-t', claimed], env, more);
   if (type !== 'commit')
     throw new UnreadableHead(
       `its head ${claimed.slice(0, 12)} is a ${visible(type)}, not a commit`,

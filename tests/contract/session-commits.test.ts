@@ -143,6 +143,19 @@ describe("the session's head, read from its clone only inside the sandbox (T086,
     expect(ref()).toBe('');
   });
 
+  it("refuses a claimed head the factory's clone already holds but the pack does not: the quarantine is asked alone", () => {
+    const { r, project, read, ref, objects } = issued();
+    const before = objects();
+    const work = r.commit({ 'src/login.ts': 'b\n' }, 'Add login');
+    const blob = r.git(['rev-parse', `${work}:src/login.ts`]);
+    // A commit of main, in the factory's clone, never sent by the session.
+    const owners = runGit(project, ['rev-parse', 'origin/main']);
+
+    expect(read(packing(r.path, [blob], owners))).toThrow(/is not an object its own commits hold/);
+    expect(ref()).toBe('');
+    expect(objects()).toEqual(before);
+  });
+
   it('refuses a claimed head that is a tag or a tree, never a commit', () => {
     const { r, head, read, ref } = issued();
     const work = r.commit({ 'src/login.ts': 'b\n' }, 'Add login');
