@@ -10,6 +10,7 @@ import { factorySource, laptopKeys } from '../approvals/keys.js';
 import { assertPassphraseTerminal, ownerKeyPath } from '../approvals/sign.js';
 import type { CommandContext } from '../cli/commands.js';
 import { EnvironmentError, ExitCode, RefusedError, UsageError } from '../cli/env.js';
+import { snapshotFactory } from '../dispatcher/launcher/local.js';
 import { selectLauncher } from '../dispatcher/launcher/select.js';
 import { SessionCapped, SessionFailed } from '../dispatcher/launcher/types.js';
 import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
@@ -140,6 +141,9 @@ export async function startDefine(
   pitch?: string,
 ): Promise<number> {
   try {
+    // The installed factory read once, as `factory dispatch` does: the launcher reads its policy,
+    // role files and settings only from that copy (T061, deferred (17)).
+    snapshotFactory();
     const release = pinnedRelease(factorySource(ctx.env), config.factory_release.sha, ctx.env);
     // Define works for the project, not for a work item.
     const prompt = stationPrompt(release, {

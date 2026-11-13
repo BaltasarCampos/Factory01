@@ -35,6 +35,7 @@ import {
   serialiseManifest,
 } from '../../src/install/manifest.js';
 import { installLabels } from '../../src/install/labels.js';
+import { installedHash } from '../../src/dispatcher/launcher/local.js';
 import { SessionCapped, SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { createDefineBranch, installProject } from '../../src/install/project.js';
 import { parseConfig } from '../../src/model/config.js';
@@ -598,6 +599,8 @@ describe('factory new (AC-001, AC-003)', { timeout: 120_000 }, () => {
     expect(made.launchers.local.launches).toMatchObject([
       { project: work, role: 'define', station: 0, branch: 'claude/define' },
     ]);
+    // Taken by Define's start, since the local launcher reads factory/ only from it (T061).
+    expect(installedHash()).toMatch(/^[0-9a-f]{64}$/);
   });
 
   it('AC-003: Define gets the release’s Station 0 prompt, with the pitch in its fence (T159)', () => {
