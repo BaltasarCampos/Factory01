@@ -258,6 +258,16 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
       `context-full #2 holds: Intake session fake-local-1 filled its context, so the item is too big for one session: split it; it failed: claude exited 1; delete ${file} to reset`,
     ]);
 
+    // An unknown context, null as a session with no log reads: an ordinary failure, started again.
+    const v = setup({ labels: ['tier:2'] });
+    v.local.failure = new SessionFailed('claude exited 1', false);
+    await passes(v, 2);
+    expect(v.local.launches).toHaveLength(2);
+    expect(readFailureRecord(failureFile(v.home, REPO, ISSUE, 1))).toMatchObject({
+      ...{ count: 2, outcome: 'failed', context_full: null },
+    });
+    expect(holds(v)).toEqual([]);
+
     // A factory stopped after session.json was written: never read as ended.
     const u = setup({ labels: ['tier:2'] });
     writeFailureRecord(failureFile(u.home, REPO, ISSUE, 1), {

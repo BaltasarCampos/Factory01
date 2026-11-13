@@ -247,6 +247,10 @@ export const runProcess: Runner = (program, args, options) =>
       process.off('exit', stopGroup);
       for (const [signal, handler] of handlers) process.off(signal, handler);
     };
+    // A run that never started: a signal caught during the spawn is read in the next poll
+    // phase, and only the second check phase from here is sure to come after it, so the
+    // handlers stay until then and the signal still ends the factory (T061, deferred (5)).
+    const abandon = () => setImmediate(() => setImmediate(unwatch));
     // Before the spawn: a signal that came before its handler would end the factory at once,
     // leaving the group running; once handled, it waits for the event loop, by when `pid` is set.
     if (grouped) {
@@ -263,11 +267,21 @@ export const runProcess: Runner = (program, args, options) =>
           detached: grouped,
         });
       } catch (error) {
-        unwatch();
+        abandon();
         throw error;
       }
     })();
     pid = child.pid;
+    // Out of file descriptors (EMFILE, ENFILE), the child may have no pipes: its own error, if
+    // any, is the one this rejects with.
+    const pipes: { stdout: unknown; stderr: unknown } = child;
+    if (pipes.stdout === null || pipes.stderr === null) {
+      child.on('error', () => undefined);
+      if (pid !== undefined) signalPid(grouped ? -pid : pid, 'SIGKILL');
+      abandon();
+      reject(new Error(`${program} has no output pipes, most likely out of file descriptors`));
+      return;
+    }
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     const take = (text: string) => {
@@ -296,6 +310,8 @@ export const runProcess: Runner = (program, args, options) =>
       if (silence === undefined) return;
       clearTimeout(quiet);
       quiet = setTimeout(() => {
+        // The program has exited and its output drains: it settles as the drain does.
+        if (drain !== undefined) return;
         silent = true;
         settle(null);
       }, silence);
@@ -305,6 +321,7 @@ export const runProcess: Runner = (program, args, options) =>
       timeout === undefined
         ? undefined
         : setTimeout(() => {
+            if (drain !== undefined) return;
             timedOut = true;
             settle(null);
           }, timeout);
@@ -416,16 +433,21 @@ const ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 /** The folder the code runs from, below the root: `dist/` installed, `src/` under the tests. */
 const CODE = relative(ROOT, fileURLToPath(import.meta.url)).split(sep)[0] ?? '';
 let installed: (() => string) | undefined;
+/** The installed `factory/`'s files, read with the hash, by their path from the root. */
+let installedFiles: ReadonlyMap<string, Buffer> = new Map();
 /**
- * At `factory dispatch` or `factory run`'s start, the installed factory's hash, so a release
- * installed while it runs never gives the code it started with the new release's hash. Code that
+ * At `factory dispatch` or `factory run`'s start, the installed factory's hash, and `factory/`
+ * read in the same walk, so a release installed while it runs never gives the code it started
+ * with the new release's hash, policy, role files or settings (T061, deferred (17)). Code that
  * runs from neither `dist/` nor `src/` has no hash; like any failure to take it, that is an error
- * only when a local pass asks for it.
+ * only when a local pass asks for it. `root` is the tests' own, for a factory they set up.
  */
-export function snapshotFactory(): void {
+export function snapshotFactory(root = ROOT): void {
+  const files = new Map<string, Buffer>();
+  installedFiles = files;
   installed =
     CODE === 'dist' || CODE === 'src'
-      ? hashOnce(ROOT, [CODE, 'factory'])
+      ? hashOnce(root, [CODE, 'factory'], files)
       : () => {
           throw new EnvironmentError(
             `the installed factory cannot be hashed: its code runs from ${visible(CODE)} below ${ROOT}, not dist/ or src/; reinstall the pinned release`,
@@ -440,8 +462,19 @@ export const installedHash = (): string => {
     );
   return installed();
 };
-/** A file of the installed factory, never the release a branch pins. */
-const factoryFile = (path: string) => readFileSync(join(ROOT, 'factory', path), 'utf8');
+/**
+ * A file of the installed factory as the start read it, never the release a branch pins, nor
+ * one installed since; with no snapshot taken, or one that failed, an error.
+ */
+export const factoryFile = (path: string): string => {
+  installedHash();
+  const bytes = installedFiles.get(`factory/${path}`);
+  if (bytes === undefined)
+    throw new EnvironmentError(
+      `the installed factory has no file factory/${path}; reinstall the pinned release`,
+    );
+  return bytes.toString('utf8');
+};
 const factoryPolicy = () => loadPolicy(factoryFile('policy/roles.yaml'));
 
 /**
@@ -993,11 +1026,13 @@ const mismatch = (problems: readonly string[]) =>
  */
 function blocked(log: string, tool: string) {
   let text = '';
+  let missing = false;
   try {
     text = readFileSync(log, 'utf8');
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code !== 'ENOENT')
       return { error: visible(err instanceof Error ? err.message : String(err)) };
+    missing = true;
   }
   const unread: number[] = [];
   const refusals = text.split('\n').flatMap((line, at) => {
@@ -1012,7 +1047,7 @@ function blocked(log: string, tool: string) {
       return [];
     }
   });
-  return { refusals, unread };
+  return { refusals, unread, missing };
 }
 
 /** The lines of a log that do not parse: the first few, then how many more. */
@@ -1027,12 +1062,13 @@ function unparsed(unread: readonly number[]): string {
  * Whether the session's PreCompact hook blocked a compaction, from its own log, by any blocked
  * event, with a summary or none: its context was full, so its item is too big for one session
  * (T061). Until T125's part (7) tells a subagent's compaction apart, a subagent's counts too.
- * Null when the log cannot tell, unreadable
+ * Null when the log cannot tell: missing, since a start that passed always leaves one, unreadable,
  * or with a line that does not parse.
  */
 function contextFull(home: string, id: string): boolean | null {
   const read = blocked(sessionEvents(home, id), 'PreCompact');
-  if ('error' in read) return null;
+  // A start that passed leaves a log, empty or not: none means the hooks never ran, so unknown.
+  if ('error' in read || read.missing) return null;
   if (read.refusals.length > 0) return true;
   return read.unread.length === 0 ? false : null;
 }
@@ -2145,7 +2181,9 @@ export class LocalLauncher implements LocalSessionLauncher {
     const paths = { home, clone: at.clone, tmp: at.tmp, tools };
     const { role, feature, files: task } = request;
     const input = { role, paths, feature, files: task, tests: at.tests, factory, mcp };
-    const settings = renderSessionSettings(policy, input);
+    // The Bash cap in the settings' env as well as the session's, so either alone still sets it.
+    const env = { BASH_MAX_TIMEOUT_MS: String(BASH_MAX_TIMEOUT) };
+    const settings = { ...renderSessionSettings(policy, input), env };
     writeFileSync(files.settings, `${JSON.stringify(settings, null, 2)}\n`, WRITE_ONCE);
     writeFileSync(files.mcp, MCP_JSON, WRITE_ONCE);
   }

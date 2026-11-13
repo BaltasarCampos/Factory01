@@ -9,7 +9,7 @@
 // record is written to a temporary file in the same folder and renamed into place, so a guard
 // never reads one half written.
 import { randomUUID } from 'node:crypto';
-import { realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { closeSync, openSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { visible } from '../notify/summary.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
@@ -17,6 +17,7 @@ import {
   logBlocked,
   passedPath,
   readSessionRecord,
+  sessionEvents,
   sessionId,
   type SessionRecord,
 } from './session.js';
@@ -85,6 +86,20 @@ export async function runSessionStart(input: HookInput, ctx: HookContext): Promi
     const unlogged = await logBlocked(record, home, session, fields, ctx.now);
     const reason = `refused: ${why}; no tool call of this session runs`;
     return { block: true, reason: visible(reason) + visible(unlogged) };
+  }
+  // The session's log, empty until its first event: a session whose start passed always has one,
+  // so a missing log means the start never passed, and reads as unknown (T061, deferred (13)).
+  const log = sessionEvents(home, session);
+  try {
+    closeSync(openSync(log, 'a', 0o600));
+  } catch (err) {
+    const why = err instanceof Error ? err.message : String(err);
+    return {
+      block: true,
+      reason: visible(
+        `refused: its log ${log} cannot be created: ${why}; no tool call of this session runs`,
+      ),
+    };
   }
   const source = typeof input.source === 'string' ? input.source : 'unknown';
   const checked = { session, source, checked_at: ctx.now().toISOString() };

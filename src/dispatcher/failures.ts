@@ -9,7 +9,10 @@
 // dispatcher deletes it when the item leaves `new`.
 import { createHash, randomUUID } from 'node:crypto';
 import {
+  closeSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readdirSync,
   readFileSync,
   readlinkSync,
@@ -137,8 +140,22 @@ export function writeFailureRecord(file: string, record: FailureRecord): void {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx', mode: 0o600 });
+    // Whole on disk before the rename, and the rename itself on disk after: a power cut leaves
+    // the old record or the new, never an empty one (T061, deferred (14)).
+    const fd = openSync(temp, 'wx', 0o600);
+    try {
+      writeFileSync(fd, `${JSON.stringify(record, null, 2)}\n`);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
     renameSync(temp, file);
+    const folder = openSync(dirname(file), 'r');
+    try {
+      fsyncSync(folder);
+    } finally {
+      closeSync(folder);
+    }
   } catch (err) {
     try {
       rmSync(temp, { force: true });
@@ -298,7 +315,11 @@ export function tipState(
  * hashed as its link, never followed. Anything else, or anything that cannot be read, throws,
  * naming it: never an empty or partial hash.
  */
-export function factoryHash(root: string, folders: readonly string[]): string {
+export function factoryHash(
+  root: string,
+  folders: readonly string[],
+  keep?: Map<string, Buffer>,
+): string {
   const hash = createHash('sha256');
   const named = <T>(path: string, read: () => T): T => {
     try {
@@ -321,6 +342,7 @@ export function factoryHash(root: string, folders: readonly string[]): string {
       } else if (entry.isFile()) {
         const bytes = named(at, () => readFileSync(join(root, at)));
         hash.update(`${JSON.stringify(['file', at, bytes.length])}\n`).update(bytes);
+        keep?.set(at, bytes);
       } else
         named(at, () => {
           throw new Error('it is not a regular file, a folder or a symlink');
@@ -333,11 +355,16 @@ export function factoryHash(root: string, folders: readonly string[]): string {
 
 /**
  * The factory's hash under `root`, taken now, once: what a long run records is the release it
- * started with. A failure to take it is raised only when the hash is needed.
+ * started with. A failure to take it is raised only when the hash is needed. `keep` gets every
+ * file's bytes by its path from `root`, read in the same walk.
  */
-export function hashOnce(root: string, folders: readonly string[]): () => string {
+export function hashOnce(
+  root: string,
+  folders: readonly string[],
+  keep?: Map<string, Buffer>,
+): () => string {
   try {
-    const hash = factoryHash(root, folders);
+    const hash = factoryHash(root, folders, keep);
     return () => hash;
   } catch (err) {
     return () => {

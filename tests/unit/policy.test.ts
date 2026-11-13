@@ -238,6 +238,17 @@ describe('loadPolicy refuses a table it does not expect (T082)', () => {
       /intake: caps: turns is not a whole number above 0/,
     ],
     [
+      'a wall-clock cap above a day',
+      swap('caps: { turns: 30, minutes: 15 }', 'caps: { turns: 30, minutes: 1441 }'),
+      /intake: caps: minutes is above 1440, one day/,
+    ],
+    ['a role with no caps', swap('\n    caps: { turns: 30, minutes: 15 }', ''), /intake: no caps/],
+    [
+      'a caps key of its own',
+      swap('caps: { turns: 30, minutes: 15 }', 'caps: { turns: 30, minutes: 15, tokens: 9 }'),
+      /intake: caps: unknown key tokens/,
+    ],
+    [
       'a blank entry',
       swap('shell: [gh issue]', "shell: ['gh issue', ' ']"),
       /intake: shell has a blank or padded entry/,
