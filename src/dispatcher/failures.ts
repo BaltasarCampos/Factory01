@@ -309,17 +309,19 @@ export function tipState(
   return { state: live ? 'running' : 'spent', count, record, file };
 }
 
+/** The files of one folder the hash's walk keeps: `under` is its path from the root. */
+export interface Kept {
+  files: Map<string, Buffer>;
+  under: string;
+}
+
 /**
  * A SHA-256 over every file of `folders` under `root`, each by its path from `root` and its
  * contents, in a fixed sorted order, so a renamed or moved file changes it too; a symlink is
  * hashed as its link, never followed. Anything else, or anything that cannot be read, throws,
  * naming it: never an empty or partial hash.
  */
-export function factoryHash(
-  root: string,
-  folders: readonly string[],
-  keep?: Map<string, Buffer>,
-): string {
+export function factoryHash(root: string, folders: readonly string[], keep?: Kept): string {
   const hash = createHash('sha256');
   const named = <T>(path: string, read: () => T): T => {
     try {
@@ -342,7 +344,7 @@ export function factoryHash(
       } else if (entry.isFile()) {
         const bytes = named(at, () => readFileSync(join(root, at)));
         hash.update(`${JSON.stringify(['file', at, bytes.length])}\n`).update(bytes);
-        keep?.set(at, bytes);
+        if (keep !== undefined && at.startsWith(`${keep.under}/`)) keep.files.set(at, bytes);
       } else
         named(at, () => {
           throw new Error('it is not a regular file, a folder or a symlink');
@@ -355,14 +357,10 @@ export function factoryHash(
 
 /**
  * The factory's hash under `root`, taken now, once: what a long run records is the release it
- * started with. A failure to take it is raised only when the hash is needed. `keep` gets every
- * file's bytes by its path from `root`, read in the same walk.
+ * started with. A failure to take it is raised only when the hash is needed. `keep` gets the
+ * bytes of every file under its folder, by its path from `root`, read in the same walk.
  */
-export function hashOnce(
-  root: string,
-  folders: readonly string[],
-  keep?: Map<string, Buffer>,
-): () => string {
+export function hashOnce(root: string, folders: readonly string[], keep?: Kept): () => string {
   try {
     const hash = factoryHash(root, folders, keep);
     return () => hash;

@@ -37,6 +37,7 @@ export async function appendEvent(
   // A last line cut short (no newline) stays as it is; the new line starts on its own.
   const text = existsSync(path) ? readFileSync(path) : Buffer.alloc(0);
   const lead = text.length > 0 && text[text.length - 1] !== 0x0a ? '\n' : '';
-  await appendFile(path, `${lead}${JSON.stringify(event)}\n`);
+  // Readable by the Owner alone, whoever creates the log first (T061).
+  await appendFile(path, `${lead}${JSON.stringify(event)}\n`, { mode: 0o600 });
   return event;
 }
