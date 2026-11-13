@@ -1,5 +1,6 @@
 // runProcess when the spawn itself fails (T061, deferred (5)): spawn is replaced in this file
 // alone, so a throw or a child with no pipes can be made on demand.
+import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 const spawned = vi.hoisted(() => ({ next: (): unknown => undefined }));
@@ -46,18 +47,29 @@ describe('runProcess when the spawn fails', () => {
     expect(listeners()).toEqual(before);
   });
 
-  it('rejects, kills the child and keeps no handler when it has no output pipes (EMFILE)', async () => {
+  // As Node gives it on EMFILE: no pid, no pipes, the error on the next tick.
+  const piped = (error?: Error) => () => {
+    const child = Object.assign(new EventEmitter(), { pid: undefined, stdout: null, stderr: null });
+    if (error !== undefined) process.nextTick(() => child.emit('error', error));
+    return child;
+  };
+
+  it("rejects with the child's own error when it has no output pipes (EMFILE), keeping no handler", async () => {
     const before = listeners();
-    const kill = vi.spyOn(process, 'kill').mockImplementation(() => true);
-    const on = vi.fn();
-    spawned.next = () => ({ pid: 4242, stdout: null, stderr: null, on });
+    const kill = vi.spyOn(process, 'kill');
+    const emfile = Object.assign(new Error('spawn EMFILE'), { code: 'EMFILE' });
+    spawned.next = piped(emfile);
+    await expect(runProcess('claude', [], GROUPED)).rejects.toBe(emfile);
+    // No pid, so nothing to kill.
+    expect(kill).not.toHaveBeenCalled();
+    await turn();
+    expect(listeners()).toEqual(before);
+  });
+
+  it('rejects naming the cause when a child with no output pipes gives no error', async () => {
+    spawned.next = piped();
     await expect(runProcess('claude', [], GROUPED)).rejects.toThrow(
       'claude has no output pipes, most likely out of file descriptors',
     );
-    expect(kill).toHaveBeenCalledWith(-4242, 'SIGKILL');
-    // Its error event, if one comes, is handled, never an uncaught one.
-    expect(on).toHaveBeenCalledWith('error', expect.any(Function));
-    await turn();
-    expect(listeners()).toEqual(before);
   });
 });

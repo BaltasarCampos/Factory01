@@ -70,12 +70,13 @@ export const readOnlyBox = (box: string, clone: string) => [
   ...['--remount-ro', box, '--remount-ro', '/tmp', '--remount-ro', '/dev/shm'],
 ];
 
-function inSandbox(
-  args: readonly string[],
+/** `command` in the read-only sandbox over the clone, its stdout capped at `io.limit` bytes. */
+export function inBox(
+  command: readonly string[],
   clone: string,
   box: string,
   env: NodeJS.ProcessEnv,
-  io: { input?: string; limit?: number } = {},
+  io: { input?: string; limit?: number; name?: string } = {},
 ): Buffer {
   const argv = readOnlyBox(box, clone);
   const outer = probeBwrap(
@@ -83,8 +84,7 @@ function inSandbox(
     env,
     "the session's clone is read only inside bubblewrap, which failed (install it with: sudo apt install bubblewrap)",
   );
-  const git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', ...args];
-  const result = spawnSync('bwrap', [...argv, ...git], {
+  const result = spawnSync('bwrap', [...argv, ...command], {
     env: outer,
     timeout: GIT_TIMEOUT,
     killSignal: 'SIGKILL',
@@ -98,10 +98,22 @@ function inSandbox(
     );
   if (result.error !== undefined || result.status !== 0)
     throw new UnreadableHead(
-      `git ${args[0] ?? ''} in its clone failed: ${visible(result.error?.message ?? result.stderr.toString().trim())}`,
+      `${io.name ?? command[0] ?? ''} in its clone failed: ${visible(result.error?.message ?? result.stderr.toString().trim())}`,
     );
   return result.stdout;
 }
+
+/** Git in the read-only sandbox over the clone: no hooks, no transport. */
+export const inSandbox = (
+  args: readonly string[],
+  clone: string,
+  box: string,
+  env: NodeJS.ProcessEnv,
+  io: { input?: string; limit?: number } = {},
+): Buffer => {
+  const git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', ...args];
+  return inBox(git, clone, box, env, { ...io, name: `git ${args[0] ?? ''}` });
+};
 
 /** The clone's HEAD and, past the record's head, a full pack of what it adds: git in the sandbox. */
 export const sandboxRead: ReadClone = (clone, head, box, env, limit) => {
@@ -123,7 +135,7 @@ export const sandboxRead: ReadClone = (clone, head, box, env, limit) => {
 };
 
 /** Git of the factory's own, bounded: a run that fails to finish is the factory's error. */
-function own(
+export function own(
   repo: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,
@@ -140,7 +152,7 @@ function own(
 }
 
 /** As `own`, but anything other than success is the factory's error. */
-function ownOk(
+export function ownOk(
   repo: string,
   args: readonly string[],
   env: NodeJS.ProcessEnv,

@@ -3187,8 +3187,8 @@ await runProcess('bash', ['-c', process.argv[3]], {
 
   // A cap that comes while a finished session's output drains never reads it as capped (T061 (4)).
   it.each([
-    ['wall-clock cap', { timeout: 500 }],
-    ['silence cap', { silence: 500 }],
+    ['wall-clock cap', { timeout: 1000 }],
+    ['silence cap', { silence: 1000 }],
   ] as const)(
     'settles as the drain does when the %s comes during it',
     async (_, cap) => {

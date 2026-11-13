@@ -356,4 +356,13 @@ describe("the installed factory's hash (T061)", () => {
     const broken = hashOnce(t.root, ['dist', 'missing']);
     expect(broken).toThrow(/cannot be hashed: .*missing: .*ENOENT/);
   });
+
+  it("keeps, from the hash's walk, the files of factory/ alone, never the code's (T061)", () => {
+    const t = installed();
+    const files = new Map<string, Buffer>();
+    const hash = hashOnce(t.root, ['dist', 'factory'], { files, under: 'factory' });
+    expect(hash()).toBe(t.hash());
+    expect([...files.keys()]).toEqual(['factory/policy/roles.yaml']);
+    expect(files.get('factory/policy/roles.yaml')?.toString()).toBe('roles: {}\n');
+  });
 });

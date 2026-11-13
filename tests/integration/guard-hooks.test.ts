@@ -713,6 +713,8 @@ describe('the session-start hook: its clone and its write (T086)', () => {
         input_summary: expect.stringMatching(/^cwd: /) as string,
       }),
     ]);
+    // Created by the refusal's own event, the log is the Owner's alone, as a passing start's is.
+    expect(statSync(sessionLog(at.home)).mode & 0o777).toBe(0o600);
     expect((await start(at, { cwd: undefined })).stderr).toMatch(/cwd unset is not the session's/);
     expect((await start(at, { cwd: join(at.home, 'missing') })).code).toBe(2);
     expect(existsSync(passedRecord(at.home))).toBe(false);

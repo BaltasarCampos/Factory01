@@ -272,14 +272,20 @@ export const runProcess: Runner = (program, args, options) =>
       }
     })();
     pid = child.pid;
-    // Out of file descriptors (EMFILE, ENFILE), the child may have no pipes: its own error, if
-    // any, is the one this rejects with.
+    // Out of file descriptors (EMFILE, ENFILE), Node returns from spawn with neither a pid nor
+    // pipes and emits the error on the next tick: the run rejects with that error, or with the
+    // text below if none comes. Only a child that has a pid is killed.
     const pipes: { stdout: unknown; stderr: unknown } = child;
     if (pipes.stdout === null || pipes.stderr === null) {
-      child.on('error', () => undefined);
+      const none = setImmediate(() => {
+        reject(new Error(`${program} has no output pipes, most likely out of file descriptors`));
+      });
+      child.on('error', (error) => {
+        clearImmediate(none);
+        reject(error);
+      });
       if (pid !== undefined) signalPid(grouped ? -pid : pid, 'SIGKILL');
       abandon();
-      reject(new Error(`${program} has no output pipes, most likely out of file descriptors`));
       return;
     }
     child.stdout.setEncoding('utf8');
@@ -447,7 +453,7 @@ export function snapshotFactory(root = ROOT): void {
   installedFiles = files;
   installed =
     CODE === 'dist' || CODE === 'src'
-      ? hashOnce(root, [CODE, 'factory'], files)
+      ? hashOnce(root, [CODE, 'factory'], { files, under: 'factory' })
       : () => {
           throw new EnvironmentError(
             `the installed factory cannot be hashed: its code runs from ${visible(CODE)} below ${ROOT}, not dist/ or src/; reinstall the pinned release`,
