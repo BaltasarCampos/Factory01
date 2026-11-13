@@ -38,6 +38,8 @@ export interface Policy {
   assignments: Record<string, string>;
 }
 
+/** The longest wall-clock cap a role may have, in minutes. */
+export const MAX_MINUTES = 1440;
 const ROW_KEYS = ['tools', 'write', 'shell', 'blocked', 'network', 'branch', 'caps'];
 /** Names Claude Code defines as shell functions of its own in some sessions (T081). */
 const CLAUDE_FUNCTIONS = ['find', 'grep', 'rg', 'pkill'];
@@ -93,6 +95,10 @@ function rolePolicy(role: RoleName, value: unknown): RolePolicy {
   for (const cap of ['turns', 'minutes'])
     if (!Number.isSafeInteger(caps[cap]) || (caps[cap] as number) < 1)
       throw refuse(`${role}: caps: ${cap} is not a whole number above 0`);
+  // A day at most, so the wall-clock timer can never overflow setTimeout's 2^31 - 1 ms
+  // (Owner decision 2026-11-13).
+  if ((caps.minutes as number) > MAX_MINUTES)
+    throw refuse(`${role}: caps: minutes is above ${String(MAX_MINUTES)}, one day`);
   return {
     ...{ tools: tools as RolePolicy['tools'], write, shell },
     blocked: strings(row.blocked, `${role}: blocked`),

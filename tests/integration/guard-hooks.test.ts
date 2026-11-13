@@ -10,6 +10,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -724,7 +725,26 @@ describe('the session-start hook: its clone and its write (T086)', () => {
     const at = setUp({}, { passed: false });
     expect((await start(at)).code).toBe(0);
     const folder = join(at.home, '.factory/sessions', SESSION);
-    expect(readdirSync(folder).sort()).toEqual(['passed.json', 'session.json']);
+    expect(readdirSync(folder).sort()).toEqual(['events.jsonl', 'passed.json', 'session.json']);
+  });
+
+  // A start that passed always leaves the session's log, so a missing one reads as unknown (T061).
+  it('creates the empty log on a passing start, keeps what it holds after a compaction, and blocks when it cannot', async () => {
+    const at = setUp({}, { passed: false });
+    expect((await start(at)).code).toBe(0);
+    expect(readFileSync(sessionLog(at.home), 'utf8')).toBe('');
+    expect(statSync(sessionLog(at.home)).mode & 0o777).toBe(0o600);
+    writeFileSync(sessionLog(at.home), '{"kind":"tool_call"}\n');
+    expect((await start(at, { source: 'compact' })).code).toBe(0);
+    expect(readFileSync(sessionLog(at.home), 'utf8')).toBe('{"kind":"tool_call"}\n');
+
+    const u = setUp({}, { passed: false });
+    mkdirSync(sessionLog(u.home));
+    const refused = await start(u);
+    expect(refused.code).toBe(2);
+    expect(refused.stderr).toMatch(/refused: its log .*events\.jsonl cannot be created: EISDIR/);
+    expect(refused.stderr).toContain('no tool call of this session runs');
+    expect(existsSync(passedRecord(u.home))).toBe(false);
   });
 
   it('writes no passed record, and leaves no temporary file, when the rename fails', async () => {
@@ -738,7 +758,10 @@ describe('the session-start hook: its clone and its write (T086)', () => {
     }
     expect(result.code).toBe(2);
     expect(result.stderr).toMatch(/EXDEV: rename failed/);
-    expect(readdirSync(join(at.home, '.factory/sessions', SESSION))).toEqual(['session.json']);
+    expect(readdirSync(join(at.home, '.factory/sessions', SESSION)).sort()).toEqual([
+      'events.jsonl',
+      'session.json',
+    ]);
     expect((await hook('command-guard', at, 'Bash', { command: 'npm test' })).code).toBe(2);
   });
 });

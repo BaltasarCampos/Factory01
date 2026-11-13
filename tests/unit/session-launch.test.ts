@@ -2,6 +2,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   readdirSync,
   mkdirSync,
@@ -37,6 +38,7 @@ import {
   sessionTools,
   type Runner,
   sessionRunning,
+  snapshotFactory,
   UNINSTALLED,
   writeWhole,
 } from '../../src/dispatcher/launcher/local.js';
@@ -81,6 +83,8 @@ const UNCOUNTED = {
 } as const;
 /** Where the dispatcher writes the session's id into its failure record (T061). */
 const REQUEST = { ...UNCOUNTED, starting: () => undefined };
+// The installed factory read once, as factory dispatch and factory run do at their start (T061).
+snapshotFactory();
 const STATION_ROLE = { 2: 'spec', 4: 'builder', 6: 'integrator' } as const;
 const CONFIG = `factory_release: v1.0.0@${'a'.repeat(40)}\nrepo: owner/project\ninbox_issue: 1\n`;
 /** The session id `claude` was launched with, which its JSON output reports back. */
@@ -308,6 +312,34 @@ describe('LocalLauncher (research R8, R9)', () => {
     expect(t.sessions()).toEqual([]);
   });
 
+  // A release installed while the factory runs changes nothing it reads (T061, deferred (17)).
+  it("keeps the installed factory's policy as the start read it, whatever changes on disk after", async () => {
+    const root = tempDir('installed-');
+    const FACTORY = fileURLToPath(new URL('../../factory', import.meta.url));
+    cpSync(FACTORY, join(root, 'factory'), { recursive: true });
+    mkdirSync(join(root, 'src'));
+    writeFileSync(join(root, 'src', 'index.ts'), '\n');
+    const roles = join(root, 'factory', 'policy', 'roles.yaml');
+    const turns = (from: string, to: string) => {
+      writeFileSync(
+        roles,
+        readFileSync(roles, 'utf8').replaceAll(`turns: ${from}`, `turns: ${to}`),
+      );
+    };
+    try {
+      turns('80', '7');
+      snapshotFactory(root);
+      turns('7', '9');
+      const t = setup();
+      await t.launch(REQUEST);
+      expect(t.sessions()[0]?.args.slice(5, 7)).toEqual(['--max-turns', '7']);
+      rmSync(join(root, 'factory'), { recursive: true });
+      await setup().launch(REQUEST);
+    } finally {
+      snapshotFactory();
+    }
+  });
+
   it('runs claude in a fresh clone of its own on the item branch, never in the Owner’s working copy', async () => {
     const t = setup();
     const before = t.owner();
@@ -364,6 +396,7 @@ describe('LocalLauncher (research R8, R9)', () => {
     const clone = work(at.home, '42-add-login');
     expect(settings.sandbox.filesystem.allowRead.slice(0, 2)).toEqual([clone, tmp]);
     expect(settings.permissions.allow).toContain(`Edit(/${clone}/specs/42-add-login/spec.md)`);
+    expect((settings as { env?: unknown }).env).toEqual({ BASH_MAX_TIMEOUT_MS: '600000' });
     expect(settings.hooks).toEqual(
       (JSON.parse(readFileSync(FACTORY_SETTINGS, 'utf8')) as SessionSettings).hooks,
     );
@@ -1544,7 +1577,8 @@ describe('LocalLauncher (research R8, R9)', () => {
           cache_read: { total: 30, source: 'result' },
           cache_creation: { total: 0 + 1 + 0 + 0, source: 'stream' },
         },
-        context_full: false,
+        // No log: the fake runner runs no hooks, so the start never passed and the log cannot tell.
+        context_full: null,
       });
     });
 
@@ -1613,6 +1647,16 @@ describe('LocalLauncher (research R8, R9)', () => {
             return Promise.resolve();
           },
           null,
+        ],
+        // Nor a missing one: a start that passed leaves its log, empty or not (deferred (13)).
+        [() => Promise.resolve(), null],
+        // An empty log, a start that passed and nothing logged since: not full.
+        [
+          (home: string) => {
+            writeFileSync(events(home), '');
+            return Promise.resolve();
+          },
+          false,
         ],
       ] as const;
       for (const [write, full] of cases) {
@@ -3139,6 +3183,25 @@ await runProcess('bash', ['-c', process.argv[3]], {
       await gone(pid);
     },
     30_000,
+  );
+
+  // A cap that comes while a finished session's output drains never reads it as capped (T061 (4)).
+  it.each([
+    ['wall-clock cap', { timeout: 500 }],
+    ['silence cap', { silence: 500 }],
+  ] as const)(
+    'settles as the drain does when the %s comes during it',
+    async (_, cap) => {
+      const dir = tempDir('run-');
+      const script = 'sleep 30 & echo $! > left.pid; echo done; exit 0';
+      const options = { cwd: dir, env: gitEnv, group: true, ...cap };
+      const result = await runProcess('bash', ['-c', script], options);
+      expect(result).toMatchObject({ status: 0, stdout: 'done\n' });
+      expect(result).not.toHaveProperty('timedOut');
+      expect(result).not.toHaveProperty('silent');
+      await gone(left(dir));
+    },
+    15_000,
   );
 
   it("stops what is left of a grouped run's process group once the program exits", async () => {
