@@ -1,6 +1,6 @@
 // The Stop hook's commit for the roles that commit nothing themselves (T086, slice 28-5b): their
-// output read in the read-only sandbox, committed in the factory's own clone with plumbing, the
-// passing head recorded apart, and the second stop; with the real bwrap and git.
+// output read in the read-only sandbox, committed in the factory's own clone with plumbing; with
+// the real bwrap and git.
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -9,6 +9,7 @@ import { hookOutput, readOutput } from '../../src/hooks/output-commit.js';
 import { sessionRef, UnreadableHead } from '../../src/hooks/session-commits.js';
 import { readSessionRecord } from '../../src/hooks/session.js';
 import { runStop } from '../../src/hooks/stop.js';
+import { visible } from '../../src/notify/summary.js';
 import { makeRepo, runGit } from '../helpers/git-repo.js';
 import { tempDir } from '../helpers/keys.js';
 import { dispatcherClone, recordSession, SESSION_ID } from '../helpers/session.js';
@@ -65,12 +66,14 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
     expect(t.r.git(['status', '--porcelain'])).toBe(`?? ${FEATURE}/reports/`);
   });
 
-  it("never commits a change outside its paths, and reads none of the Owner's git config", () => {
+  it("never commits a change outside its paths, with no global or system config, and the commit's encoding pinned", () => {
     const t = issued();
+    const latin1 = '[i18n]\n\tcommitEncoding = ISO-8859-1\n';
     writeFileSync(
       join(t.home, '.gitconfig'),
-      '[user]\n\tname = Owner\n\temail = owner@example.com\n',
+      `[user]\n\tname = Owner\n\temail = owner@example.com\n${latin1}`,
     );
+    runGit(t.project, ['config', 'i18n.commitEncoding', 'ISO-8859-1']);
     t.write(REPORT, VERIFY);
     t.write('src/login.ts', 'changed\n');
     t.write('src/new.ts', 'x\n');
@@ -79,6 +82,7 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
       runGit(t.project, ['diff-tree', '--name-only', '-r', '--no-commit-id', out.commit]),
     ).toBe(REPORT);
     expect(runGit(t.project, ['log', '-1', '--format=%an', out.commit])).toBe('Factory reviewer');
+    expect(runGit(t.project, ['cat-file', '-p', out.commit])).not.toMatch(/^encoding /m);
   });
 
   it('walks a folder its write column names, and gives the head itself when nothing changed', () => {
@@ -136,6 +140,24 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
     const p = issued('planner', 3);
     p.write(`${FEATURE}/contracts/.gitattributes`, '* -diff\n');
     expect(p.output).toThrow(/contracts\/\.gitattributes \(a protected path\)/);
+  });
+
+  // CLAUDE.MD documents existing behaviour: isProtected lower-cases the path.
+  it.each([
+    ['.git/HEAD', 'a path no role may write'],
+    ['.GIT/x', 'a path no role may write'],
+    ['.station.json', 'a path no role may write'],
+    ['CLAUDE.MD', 'a protected path'],
+    ['.git./HEAD', 'a path git refuses'],
+    ['notes./x', 'a path git refuses'],
+    ['git~1/x', 'not a plain path'],
+    ['.g\u200cit/x', 'not a plain path'],
+  ])('refuses the Planner a %s under its contracts/ folder: %s', (path, why) => {
+    const p = issued('planner', 3);
+    p.write(`${FEATURE}/contracts/${path}`, 'x\n');
+    expect(p.output).toThrow(UnreadableHead);
+    expect(p.output).toThrow(visible(`contracts/${path} (${why})`));
+    expect(p.ref(sessionRef(SESSION_ID))).toBe('');
   });
 
   it('refuses output past its cap, reading none of it into the commit', () => {

@@ -8,7 +8,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { EnvironmentError } from '../cli/env.js';
-import { loadPolicy } from '../guard/policy.js';
+import { deniedWrites, loadPolicy, matchesPath } from '../guard/policy.js';
 import { isProtected } from '../install/manifest.js';
 import { isPlainPath } from '../model/naming.js';
 import type { RoleName } from '../model/types.js';
@@ -31,10 +31,28 @@ export const HOOK_COMMITS: readonly RoleName[] = ['spec', 'planner', 'reviewer',
 export const MAX_OUTPUT = 8 * 1024 * 1024;
 
 const POLICY = new URL('../../factory/policy/roles.yaml', import.meta.url);
+const installedPolicy = () => loadPolicy(readFileSync(POLICY, 'utf8'));
+
+/** A part git's `verify_path` refuses: `.git` in any case and with dots after it, or a trailing dot. */
+const gitRefuses = (path: string) =>
+  path
+    .split('/')
+    .some((part) => /^\.git\.*$/i.test(part) || /^git~1$/i.test(part) || part.endsWith('.'));
+
+/** Why `path` cannot be committed for `role`, the path guard's rules lower-cased as it does; or none. */
+function refusal(path: string, denied: readonly string[]): string | undefined {
+  if (!isPlainPath(path)) return 'not a plain path';
+  if (isProtected(path)) return 'a protected path';
+  const lower = path.toLowerCase();
+  if (denied.some((pattern) => matchesPath(pattern.toLowerCase(), lower)))
+    return 'a path no role may write';
+  if (gitRefuses(path)) return 'a path git refuses';
+  return undefined;
+}
 
 /** The role's write column, the feature folder filled in: files, and folders a `/**` names. */
 export function outputPaths(record: SessionRecord): { files: string[]; folders: string[] } {
-  const policy = loadPolicy(readFileSync(POLICY, 'utf8'));
+  const policy = installedPolicy();
   const files: string[] = [];
   const folders: string[] = [];
   if (record.feature === '')
@@ -116,6 +134,7 @@ export function readOutput(
   max = MAX_OUTPUT,
 ): Map<string, Buffer> {
   const { files, folders } = outputPaths(record);
+  const denied = deniedWrites(installedPolicy(), record.role);
   const entries = [...files.map((f) => `f:${f}`), ...folders.map((d) => `d:${d}`)];
   const command = [process.execPath, '-e', READER, record.clone, String(max), ...entries];
   const out = inBox(command, record.clone, box, env, {
@@ -129,9 +148,10 @@ export function readOutput(
     );
   const bad = [
     ...read.refused.map(([path, why]) => `${path} (${why})`),
-    ...Object.keys(read.files)
-      .filter((path) => !isPlainPath(path) || isProtected(path))
-      .map((path) => `${path} (${isPlainPath(path) ? 'a protected path' : 'not a plain path'})`),
+    ...Object.keys(read.files).flatMap((path) => {
+      const why = refusal(path, denied);
+      return why === undefined ? [] : [`${path} (${why})`];
+    }),
   ];
   if (bad.length > 0)
     throw new UnreadableHead(`its output cannot be committed: ${visible(bad.join(', '))}`);
@@ -171,7 +191,9 @@ export function commitOutput(
   if (tree === ownOk(repo, ['rev-parse', `${head}^{tree}`], env)) return head;
   const item = basename(record.feature);
   const message = `${who.name}: station ${String(record.station)} output\n\nFactory-Role: ${role}\nFactory-Item: ${item}\n`;
-  return ownOk(repo, ['commit-tree', '--no-gpg-sign', tree, '-p', head, '-m', message], env, more);
+  // The clone's own config would set the commit's encoding header.
+  const commit = ['commit-tree', '--no-gpg-sign', tree, '-p', head, '-m', message];
+  return ownOk(repo, ['-c', 'i18n.commitEncoding=UTF-8', ...commit], env, more);
 }
 
 /** A blob of `bytes` in the factory's clone, as they are: no filters, no attributes. */
@@ -202,7 +224,7 @@ export function hookOutput(
     const tip = inSandbox(rev, clone, box, env).toString().trim();
     if (tip !== head)
       throw new UnreadableHead(
-        `a ${record.role} session commits nothing itself, but its clone's HEAD is ${visible(tip.slice(0, 12))}, not ${head.slice(0, 12)}, the commit it was issued: the factory commits its output`,
+        `a ${record.role} session commits nothing itself, but its clone's HEAD is ${visible(tip.slice(0, 12))}, not ${head.slice(0, 12)}, the commit it was issued; this session cannot fix it, so it ends as a failure`,
       );
     const files = readOutput(record, box, env);
     const commit = commitOutput(record, files, work, env);
