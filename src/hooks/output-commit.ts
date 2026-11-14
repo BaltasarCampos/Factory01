@@ -11,6 +11,7 @@ import { EnvironmentError } from '../cli/env.js';
 import { deniedWrites, loadPolicy, matchesPath } from '../guard/policy.js';
 import { isProtected } from '../install/manifest.js';
 import { isPlainPath } from '../model/naming.js';
+import { isTestFile } from '../stations/edges.js';
 import type { RoleName } from '../model/types.js';
 import { visible } from '../notify/summary.js';
 import {
@@ -24,14 +25,23 @@ import {
 } from './session-commits.js';
 import { sessionFolder, type SessionRecord } from './session.js';
 
-/** The roles whose output the Stop hook commits; Test's comes with 28-5b-3b. */
-export const HOOK_COMMITS: readonly RoleName[] = ['spec', 'planner', 'reviewer', 'security'];
+/** The roles whose output the Stop hook commits. */
+export const HOOK_COMMITS: readonly RoleName[] = [
+  'spec',
+  'planner',
+  'test',
+  'reviewer',
+  'security',
+];
 
 /** The most a role's output may hold, in bytes, all its files together. */
 export const MAX_OUTPUT = 8 * 1024 * 1024;
 
 const POLICY = new URL('../../factory/policy/roles.yaml', import.meta.url);
 const installedPolicy = () => loadPolicy(readFileSync(POLICY, 'utf8'));
+
+/** The most entries Test's walk of the clone reads. */
+export const MAX_WALK = 20_000;
 
 /** The most of git status's output the factory reads for the outside-changes alert. */
 export const MAX_STATUS = 4 * 1024 * 1024;
@@ -79,12 +89,14 @@ export function outputPaths(record: SessionRecord): { files: string[]; folders: 
  * Run with node inside the sandbox: every file named, and every file under every folder named,
  * as base64, each checked from the clone's root down with lstat, so a link anywhere on its path,
  * or anything but a regular file or folder, is refused rather than followed; a missing one is
- * left out. Past `max` bytes in all it stops.
+ * left out. Past `max` bytes in all it stops. A file named with `h:` gives only its blob id in the
+ * object format named, its bytes never leaving the box nor counting toward `max`.
  */
 const READER = `
 const fs = require('node:fs');
-const [clone, max, ...named] = process.argv.slice(1);
-const out = { files: {}, refused: [] };
+const crypto = require('node:crypto');
+const [clone, max, format, ...named] = process.argv.slice(1);
+const out = { files: {}, ids: {}, refused: [] };
 let total = 0;
 const kind = (rel) => {
   let at = clone, so = '';
@@ -108,6 +120,15 @@ const read = (rel) => {
     out.files[rel] = bytes.toString('base64');
   } finally { fs.closeSync(fd); }
 };
+const hash = (rel) => {
+  const fd = fs.openSync(clone + '/' + rel, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
+  try {
+    if (!fs.fstatSync(fd).isFile()) return out.refused.push([rel, 'not a regular file']);
+    const bytes = fs.readFileSync(fd);
+    const id = crypto.createHash(format).update('blob ' + bytes.length + '\\0').update(bytes);
+    out.ids[rel] = id.digest('hex');
+  } finally { fs.closeSync(fd); }
+};
 const walk = (rel) => {
   for (const name of fs.readdirSync(clone + '/' + rel).sort()) {
     const at = rel + '/' + name, k = kind(at);
@@ -118,14 +139,38 @@ for (const entry of named) {
   const [type, rel] = [entry.slice(0, 2), entry.slice(2)], k = kind(rel);
   if (k === 'missing') continue;
   if (type === 'f:' && k === 'file') read(rel);
+  else if (type === 'h:' && k === 'file') hash(rel);
   else if (type === 'd:' && k === 'folder') walk(rel);
   else out.refused.push([rel, k === 'folder' ? 'a folder' : k === 'file' ? 'not a folder' : k]);
 }
 process.stdout.write(JSON.stringify(out));
 `;
 
+/**
+ * Run with node inside the sandbox: every path in the clone but under the root `.git` and any
+ * `node_modules` folder, not following links, at most `max` entries.
+ */
+const WALKER = `
+const fs = require('node:fs');
+const [clone, max] = process.argv.slice(1);
+const out = { paths: [] };
+let count = 0;
+const walk = (rel) => {
+  for (const name of fs.readdirSync(rel === '' ? clone : clone + '/' + rel).sort()) {
+    if (name === 'node_modules' || (rel === '' && name === '.git')) continue;
+    if (++count > Number(max)) return void (out.over = true);
+    const at = rel === '' ? name : rel + '/' + name;
+    if (fs.lstatSync(clone + '/' + at).isDirectory()) walk(at); else out.paths.push(at);
+    if (out.over) return;
+  }
+};
+walk('');
+process.stdout.write(JSON.stringify(out));
+`;
+
 interface Read {
   files: Record<string, string>;
+  ids: Record<string, string>;
   refused: [string, string][];
   over?: boolean;
 }
@@ -138,14 +183,22 @@ export function readOutput(
   max = MAX_OUTPUT,
 ): Map<string, Buffer> {
   const { files, folders } = outputPaths(record);
-  const policy = installedPolicy();
-  const denied = deniedWrites(policy, record.role).concat(
-    policy.denyRead.filter((pattern) => !pattern.startsWith('~/')),
-  );
   const entries = [...files.map((f) => `f:${f}`), ...folders.map((d) => `d:${d}`)];
-  const command = [process.execPath, '-e', READER, record.clone, String(max), ...entries];
+  return committable(record, readClone(record, box, env, entries, 'sha1', max));
+}
+
+/** `entries` read in the sandbox by `READER`; past `max` bytes an `UnreadableHead`. */
+function readClone(
+  record: SessionRecord,
+  box: string,
+  env: NodeJS.ProcessEnv,
+  entries: readonly string[],
+  format: string,
+  max: number,
+): Read {
+  const command = [process.execPath, '-e', READER, record.clone, String(max), format, ...entries];
   const out = inBox(command, record.clone, box, env, {
-    limit: 2 * max,
+    limit: 2 * max + 8 * 1024 * 1024,
     name: 'reading its output',
   });
   const read = JSON.parse(out.toString()) as Read;
@@ -153,6 +206,15 @@ export function readOutput(
     throw new UnreadableHead(
       `its output holds more than the ${String(max)} bytes a role may write`,
     );
+  return read;
+}
+
+/** The files read, as they would be committed; any refusal an `UnreadableHead`. */
+function committable(record: SessionRecord, read: Read): Map<string, Buffer> {
+  const policy = installedPolicy();
+  const denied = deniedWrites(policy, record.role).concat(
+    policy.denyRead.filter((pattern) => !pattern.startsWith('~/')),
+  );
   const bad = [
     ...read.refused.map(([path, why]) => `${path} (${why})`),
     ...Object.keys(read.files).flatMap((path) => {
@@ -173,8 +235,12 @@ export function readOutput(
  * session can make its status lie, fail or slow down: it only names paths, nothing is committed
  * from it, and its failure never decides the output.
  */
-export function outsideChanges(record: SessionRecord, box: string, env: NodeJS.ProcessEnv) {
-  const { files, folders } = outputPaths(record);
+export function outsideChanges(
+  record: SessionRecord,
+  box: string,
+  env: NodeJS.ProcessEnv,
+  mine?: (path: string) => boolean,
+) {
   // The clone's config can name a command for git to run, and a submodule folder has its own.
   const off = ['-c', 'core.fsmonitor=false', '-c', 'core.untrackedCache=false'];
   const args = [
@@ -195,9 +261,84 @@ export function outsideChanges(record: SessionRecord, box: string, env: NodeJS.P
     .split('\0')
     .filter((entry) => entry.length > 3)
     .map((entry) => entry.slice(3));
-  const own = (path: string) =>
+  return changed.filter((path) => !(mine ?? ownPaths(record))(path));
+}
+
+/** Whether a path is one of the role's own, by its write column. */
+function ownPaths(record: SessionRecord) {
+  const { files, folders } = outputPaths(record);
+  return (path: string) =>
     files.includes(path) || folders.some((folder) => matchesPath(`${folder}/**`, path));
-  return changed.filter((path) => !own(path));
+}
+
+/** Every path in the clone Test's walk reads, in the sandbox; past `max` an `UnreadableHead`. */
+export function walkClone(
+  record: SessionRecord,
+  box: string,
+  env: NodeJS.ProcessEnv,
+  max = MAX_WALK,
+): string[] {
+  const command = [process.execPath, '-e', WALKER, record.clone, String(max)];
+  const out = inBox(command, record.clone, box, env, {
+    limit: 64 * 1024 * 1024,
+    name: 'walking its clone',
+    over: 'its clone lists more paths than the factory reads',
+  });
+  const walked = JSON.parse(out.toString()) as { paths: string[]; over?: boolean };
+  if (walked.over === true)
+    throw new UnreadableHead(
+      `its clone holds more than the ${String(max)} entries the factory walks for Test's output, outside .git and node_modules`,
+    );
+  return walked.paths;
+}
+
+/** Where vitest writes the snapshots of the test file at `path`. */
+const snapshotOf = (path: string) => {
+  const at = path.lastIndexOf('/');
+  return `${path.slice(0, at + 1)}__snapshots__/${path.slice(at + 1)}.snap`;
+};
+
+/**
+ * Test's output: the test files it added, by the installed patterns, absent from the head and the
+ * record's `tests`, with a snapshot only beside one. Existing test files are compared by blob id,
+ * computed in the sandbox, so their bytes never leave it; one changed or deleted is refused.
+ */
+export function testOutput(
+  record: SessionRecord,
+  box: string,
+  env: NodeJS.ProcessEnv,
+): Map<string, Buffer> {
+  const { project: repo, head } = record;
+  const tree = new Map<string, { mode: string; oid: string }>();
+  for (const entry of ownOk(repo, ['ls-tree', '-r', '-z', '--full-tree', head], env).split('\0')) {
+    const tab = entry.indexOf('\t');
+    const [mode = '', , oid = ''] = entry.slice(0, tab).split(' ');
+    if (tab > 0) tree.set(entry.slice(tab + 1), { mode, oid });
+  }
+  const unknown = record.tests.filter((path) => !tree.has(path));
+  if (unknown.length > 0)
+    throw new EnvironmentError(
+      `the session's record names tests its head ${head.slice(0, 12)} does not have, ${visible(unknown.join(', '))}: the factory's own error, which this session cannot fix`,
+    );
+  const existing = [...tree]
+    .filter(([path, e]) => (e.mode === '100644' || e.mode === '100755') && isTestFile(path))
+    .map(([path]) => path);
+  const walked = walkClone(record, box, env);
+  const here = new Set(walked);
+  const added = walked.filter((path) => isTestFile(path) && !tree.has(path));
+  const snapshots = added.map(snapshotOf).filter((path) => here.has(path) && !tree.has(path));
+  const format = ownOk(repo, ['rev-parse', '--show-object-format'], env);
+  const entries = [
+    ...existing.map((path) => `h:${path}`),
+    ...[...added, ...snapshots].map((path) => `f:${path}`),
+  ];
+  const read = readClone(record, box, env, entries, format, MAX_OUTPUT);
+  const restore = existing.filter((path) => read.ids[path] !== tree.get(path)?.oid);
+  if (restore.length > 0)
+    throw new UnreadableHead(
+      `an existing test file changed or deleted, never committed: ${visible(restore.join(', '))}; restore it; Test's output is only new test files`,
+    );
+  return committable(record, read);
 }
 
 /** What changed outside the role's paths, or why the factory could not list it. */
@@ -273,12 +414,14 @@ export function hookOutput(
       throw new UnreadableHead(
         `a ${record.role} session commits nothing itself, but its clone's HEAD is ${visible(tip.slice(0, 12))}, not ${head.slice(0, 12)}, the commit it was issued; this session cannot fix it, so it ends as a failure`,
       );
-    const files = readOutput(record, box, env);
+    const files =
+      record.role === 'test' ? testOutput(record, box, env) : readOutput(record, box, env);
     const commit = commitOutput(record, files, work, env);
     ownOk(repo, ['update-ref', sessionRef(session), commit], env);
     const output = { repo, commit, head, feature: record.feature, branch: record.branch };
     try {
-      return { ...output, outside: outsideChanges(record, box, env) };
+      const mine = record.role === 'test' ? (path: string) => files.has(path) : undefined;
+      return { ...output, outside: outsideChanges(record, box, env, mine) };
     } catch (err) {
       if (!(err instanceof UnreadableHead)) throw err;
       return { ...output, outside: [], unlisted: err.message };
