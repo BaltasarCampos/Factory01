@@ -30,7 +30,9 @@ import {
   ownOk,
   passedRef,
   sessionOutput,
+  STOP_DEADLINE,
   UnreadableHead,
+  withDeadline,
   type SessionOutput,
 } from './session-commits.js';
 import {
@@ -90,10 +92,19 @@ export const CHECKERS: Partial<Record<Station, StationChecker>> = {
   },
 };
 
-export async function runStop(
+export function runStop(
   input: HookInput,
   ctx: HookContext,
   checkers: Partial<Record<Station, StationChecker>> = CHECKERS,
+  limit = STOP_DEADLINE,
+): Promise<HookResult> {
+  return withDeadline(limit, () => stop(input, ctx, checkers));
+}
+
+async function stop(
+  input: HookInput,
+  ctx: HookContext,
+  checkers: Partial<Record<Station, StationChecker>>,
 ): Promise<HookResult> {
   const again = input.stop_hook_active === true;
   const home = ctx.env?.HOME ?? homedir();

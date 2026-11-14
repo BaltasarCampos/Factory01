@@ -206,6 +206,28 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
 });
 
 /** Removes the feature folder the manifest commit left in the clone's working tree. */
+describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
+  it("fails with its limit, never git's, when its git runs together pass it", async () => {
+    const t = issued();
+    t.write(REPORT, VERIFY);
+    const bin = tempDir('slow-git-');
+    const git = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nsleep 2\nexec ${git} "$@"\n`, { mode: 0o755 });
+    const env = { ...t.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
+    const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
+    const ctx = { cwd: t.r.path, now: () => new Date(), env };
+    await expect(runStop(input, ctx, undefined, 1000)).rejects.toThrow(
+      /^the Stop hook ran past its 1 s limit, so the factory could not check the session's output/,
+    );
+    // The second stop is never blocked, and logs the same reason.
+    expect(await runStop({ ...input, stop_hook_active: true }, ctx, undefined, 1000)).toEqual({
+      block: false,
+    });
+    expect(t.events().at(-1)?.input_summary).toMatch(/ran past its 1 s limit/);
+    expect(await runStop(input, { ...ctx, env: t.env })).toEqual({ block: false });
+  }, 60_000);
+});
+
 function rmFeature(t: ReturnType<typeof issued>) {
   execFileSync('rm', ['-rf', join(t.r.path, FEATURE)]);
 }
