@@ -79,12 +79,13 @@ export const CHECKERS: Partial<Record<Station, StationChecker>> = {
   3: (_r, at) => planStopCheck(at()),
   4: (_r, at) => buildStopCheck(at()),
   5: (r, at) => {
-    // What Test may commit is 28-5b-3b's: until then its stop fails closed, as the Integrator's.
-    if (r.role === 'test')
-      return {
-        complete: false,
-        missing: ["Test's output, which the factory commits only from slice 28-5b-3b"],
-      };
+    // Test's output is only new test files, so its head itself is no output.
+    if (r.role === 'test') {
+      const output = at();
+      return output.commit === output.head
+        ? { complete: false, missing: ['a new test file: this session added none'] }
+        : { complete: true };
+    }
     return r.role === 'security' ? securityStopCheck(at()) : verifyStopCheck(at());
   },
 };

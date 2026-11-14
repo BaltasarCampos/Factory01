@@ -2,10 +2,17 @@
 // 28-5b-2): their output read in the read-only sandbox, committed in the factory's own clone with
 // plumbing, the passing head recorded apart, and the second stop; with the real bwrap and git.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { hookOutput, readOutput } from '../../src/hooks/output-commit.js';
+import { hookOutput, readOutput, walkClone } from '../../src/hooks/output-commit.js';
 import { passedRef, sessionRef, UnreadableHead } from '../../src/hooks/session-commits.js';
 import { passedPath, readSessionRecord } from '../../src/hooks/session.js';
 import { runStop } from '../../src/hooks/stop.js';
@@ -21,14 +28,26 @@ const VERIFY = '| Check | Result |\n|---|---|\n| Review | pass |\n';
 const REPORT = `${FEATURE}/reports/verify.md`;
 
 /** The item branch issued on origin, the dispatcher's clone of it, and a session of `role`. */
-function issued(role = 'reviewer', station = 5) {
-  const r = makeRepo({ files: { '.factory/config': CONFIG, 'src/login.ts': 'a\n' } });
+function issued(
+  role = 'reviewer',
+  station = 5,
+  files: Record<string, string> = {},
+  tests: string[] = [],
+) {
+  const r = makeRepo({ files: { '.factory/config': CONFIG, 'src/login.ts': 'a\n', ...files } });
   r.checkout(BRANCH, { create: true });
   r.commit({ [`${FEATURE}/.station.json`]: '{}\n' }, 'manifest');
   r.push();
   const head = r.revParse('HEAD');
   const project = dispatcherClone(r);
-  const { home, env, log } = recordSession({ role, station, clone: r.path, head, project });
+  const { home, env, log } = recordSession({
+    role,
+    station,
+    clone: r.path,
+    head,
+    project,
+    tests,
+  });
   const write = (path: string, text: string) => {
     mkdirSync(dirname(join(r.path, path)), { recursive: true });
     writeFileSync(join(r.path, path), text);
@@ -45,7 +64,7 @@ function issued(role = 'reviewer', station = 5) {
     writeFileSync(passedPath(home, SESSION_ID), `${JSON.stringify({ session: SESSION_ID })}\n`);
   };
   const events = () =>
-    readFileSync(log, 'utf8')
+    (existsSync(log) ? readFileSync(log, 'utf8') : '')
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line) as { kind: string; input_summary: string });
@@ -321,7 +340,7 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     }
   });
 
-  it("logs a change outside the role's paths once, as an alert, and Test's stop fails closed until 28-5b-3b", async () => {
+  it("logs a change outside the role's paths once, as an alert", async () => {
     const t = issued();
     t.write(REPORT, VERIFY.replace('pass', 'fail'));
     t.write('src/login.ts', 'changed\n');
@@ -342,12 +361,100 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     expect(u.events().at(-1)?.input_summary).toBe(
       "changed outside the reviewer's paths, never committed: src/login.ts, src/moved.ts, src/a\\u{1b}b.ts",
     );
-    const test = issued('test');
-    test.write('tests/new.test.ts', 'x\n');
-    const refused = await test.stop();
-    expect(refused.block).toBe(true);
-    expect(refused.reason).toMatch(
-      /Test's output, which the factory commits only from slice 28-5b-3/,
+  });
+});
+
+const EXISTING = 'tests/login.test.ts';
+const NEW = 'tests/new.test.ts';
+const SNAPSHOT = 'tests/__snapshots__/new.test.ts.snap';
+
+/** A Test session on a branch whose head has one test file, `EXISTING`, its record's `tests`. */
+const tested = () => issued('test', 5, { [EXISTING]: 'it("a")\n' }, [EXISTING]);
+
+describe("Test's output: only new test files, and their snapshots (T086, 28-5b-3b)", () => {
+  it('commits an added test and the snapshot beside it, the existing test unchanged', async () => {
+    const t = tested();
+    t.passed();
+    t.write(NEW, 'it("b")\n');
+    t.write(SNAPSHOT, 'exports[`b`] = 1;\n');
+    expect(await t.stop()).toEqual({ block: false });
+    const commit = t.ref(passedRef(SESSION_ID));
+    const git = (args: string[]) => runGit(t.project, args);
+    expect(git(['diff-tree', '--no-commit-id', '--name-only', '-r', commit]).split('\n')).toEqual([
+      SNAPSHOT,
+      NEW,
+    ]);
+    expect(git(['log', '-1', '--format=%an|%(trailers:only,unfold)', commit])).toBe(
+      'Factory test|Factory-Role: test\nFactory-Item: 42-add-login',
+    );
+    expect(t.events()).toEqual([]);
+  });
+
+  it.each([
+    [
+      'changed',
+      (t: ReturnType<typeof tested>) => {
+        t.write(EXISTING, 'it("weaker")\n');
+      },
+    ],
+    [
+      'deleted',
+      (t: ReturnType<typeof tested>) => {
+        execFileSync('rm', [join(t.r.path, EXISTING)]);
+      },
+    ],
+  ])('blocks the stop when an existing test file is %s, committing nothing', async (_n, make) => {
+    const t = tested();
+    t.write(NEW, 'it("b")\n');
+    make(t);
+    const { block, reason } = await t.stop();
+    expect(block).toBe(true);
+    expect(reason).toContain(
+      `an existing test file changed or deleted, never committed: ${EXISTING}; restore it; Test's output is only new test files`,
+    );
+    expect(t.ref(sessionRef(SESSION_ID))).toBe('');
+  });
+
+  it('names a snapshot with no added test, a helper and other changes in the alert, never committing them', async () => {
+    const t = tested();
+    t.write(NEW, 'it("b")\n');
+    t.write('tests/__snapshots__/login.test.ts.snap', 'x\n');
+    t.write('tests/helper.ts', 'x\n');
+    t.write('src/login.ts', 'changed\n');
+    t.write('node_modules/x/a.test.ts', 'x\n');
+    t.write('tests/node_modules/b.test.ts', 'x\n');
+    expect(await t.stop()).toEqual({ block: false });
+    const commit = t.ref(sessionRef(SESSION_ID));
+    expect(runGit(t.project, ['diff-tree', '--no-commit-id', '--name-only', '-r', commit])).toBe(
+      NEW,
+    );
+    expect(t.events().at(-1)?.input_summary).toMatch(
+      /^changed outside the test's paths, never committed: .*tests\/__snapshots__\/login\.test\.ts\.snap/,
+    );
+    expect(t.events().at(-1)?.input_summary).toMatch(/tests\/helper\.ts/);
+  });
+
+  it('ends incomplete when it added no test file, and refuses a link named as one', async () => {
+    const t = tested();
+    expect((await t.stop()).reason).toMatch(/a new test file: this session added none/);
+    symlinkSync(join(t.r.path, EXISTING), join(t.r.path, NEW));
+    expect((await t.stop()).reason).toMatch(
+      /tests\/new\.test\.ts \(a link at tests\/new\.test\.ts\)/,
+    );
+  });
+
+  it("is the factory's error when the record names a test its head lacks", () => {
+    const t = issued('test', 5, {}, ['tests/gone.test.ts']);
+    t.write(NEW, 'it("b")\n');
+    expect(t.output).toThrow(/names tests its head .* does not have, tests\/gone\.test\.ts/);
+  });
+
+  it('refuses a clone past the entries it walks', () => {
+    const t = tested();
+    const box = join(t.home, 'box');
+    mkdirSync(box);
+    expect(() => walkClone(t.record(), box, { ...process.env, ...t.env }, 3)).toThrow(
+      /its clone holds more than the 3 entries the factory walks for Test's output/,
     );
   });
 });
