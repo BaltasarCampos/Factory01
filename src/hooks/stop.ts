@@ -13,6 +13,7 @@
 // the factory's sandbox into the factory's own clone (session-commits.ts), and checked there; for
 // the roles that commit nothing, the hook commits their output there itself (output-commit.ts).
 import { homedir } from 'node:os';
+import { EnvironmentError } from '../cli/env.js';
 import { STATIONS, type Station } from '../model/types.js';
 import { visible } from '../notify/summary.js';
 import { buildStopCheck } from '../stations/checks/build.js';
@@ -25,6 +26,7 @@ import { verifyStopCheck } from '../stations/checks/verify.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
 import { HOOK_COMMITS, hookOutput, type Outside } from './output-commit.js';
 import {
+  own,
   ownOk,
   passedRef,
   sessionOutput,
@@ -154,7 +156,7 @@ async function check(
   // that reads the output reads it first, so the passing head goes at the start of its check.
   let output: (SessionOutput & Partial<Outside>) | undefined;
   const read = () => {
-    ownOk(record.project, ['update-ref', '-d', passedRef(session)], env);
+    clearPassed(record.project, session, env);
     return HOOK_COMMITS.includes(record.role)
       ? hookOutput(record, home, session, env)
       : sessionOutput(record, home, session, env);
@@ -167,6 +169,11 @@ async function check(
     if (!(err instanceof UnreadableHead)) throw err;
     return `station ${name} output cannot be read: ${err.message}`;
   }
+  // A passing head needs the output read; Intake's, from GitHub, never has one.
+  if (result.complete && output === undefined && record.station !== 1)
+    throw new EnvironmentError(
+      `the station ${name} check passed without reading the session's output, so it has no passing head: the factory's own error`,
+    );
   // Once per session: at the stop that passes, or at the second, never blocked.
   if (output !== undefined && (result.complete || again)) {
     const summary = outsideSummary(record.role, output);
@@ -185,6 +192,21 @@ async function check(
   if (output !== undefined && hasPassed(home, session))
     ownOk(output.repo, ['update-ref', passedRef(session), output.commit], env);
   return undefined;
+}
+
+/**
+ * Removes the session's passing head, only when it exists: `update-ref -d` takes the packed-refs
+ * lock even for a ref that is absent, and a lock left in the factory's clone is not the session's.
+ */
+function clearPassed(repo: string, session: string, env: NodeJS.ProcessEnv) {
+  const ref = passedRef(session);
+  const found = own(repo, ['rev-parse', '--verify', '-q', ref], env);
+  if (found.status === 1) return;
+  const failed = found.status === 0 ? own(repo, ['update-ref', '-d', ref], env) : found;
+  if (failed.status !== 0)
+    throw new EnvironmentError(
+      `the factory could not remove its passing head ${ref} in ${repo}, which this session cannot fix: ${failed.err}`,
+    );
 }
 
 /** The alert for what changed outside the role's paths, or why it could not be listed; or none. */

@@ -231,6 +231,26 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     expect(t.ref(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
   });
 
+  it('passes with a stale packed-refs lock in the factory clone when there is no passing head to remove', async () => {
+    const t = issued();
+    t.passed();
+    t.write(REPORT, VERIFY);
+    const common = runGit(t.project, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    writeFileSync(join(common, 'packed-refs.lock'), '');
+    expect(await t.stop()).toEqual({ block: false });
+    expect(t.ref(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
+  });
+
+  it("is the factory's error when a check passes without reading the output, but Intake's", async () => {
+    const t = issued();
+    t.write(REPORT, VERIFY);
+    const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
+    const ctx = { cwd: t.r.path, now: () => new Date(), env: t.env };
+    await expect(runStop(input, ctx, { 5: () => ({ complete: true }) })).rejects.toThrow(
+      /the station verify check passed without reading the session's output/,
+    );
+  });
+
   it("logs a failure of the factory's own at the second stop, never reading it as passing", async () => {
     const t = issued();
     t.passed();

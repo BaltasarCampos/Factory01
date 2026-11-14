@@ -195,14 +195,15 @@ describe('factory hook stop (AC-063)', () => {
     cloneUntouched(dir);
   });
 
+  // Intake's, the one check that passes without the session's output (since 28-5b-3b).
   it("checks the record's station in the record's clone; ends when the check passes, keeps going when it fails", async () => {
     const dir = workingCopy();
-    const s = session(dir);
+    const s = session(dir, { role: 'intake', station: 1 });
     const ctx = { cwd: tempDir(), now: () => new Date(), env: s.env };
-    const pass: StationChecker = (r) => ({ complete: r.clone === dir && r.role === 'builder' });
+    const pass: StationChecker = (r) => ({ complete: r.clone === dir && r.role === 'intake' });
     const fail: StationChecker = () => ({ complete: false, missing: ['plan.md'] });
-    expect(await runStop(stop(dir), ctx, { 4: pass })).toEqual({ block: false });
-    expect(await runStop(stop(dir), ctx, { 4: fail })).toEqual({
+    expect(await runStop(stop(dir), ctx, { 1: pass })).toEqual({ block: false });
+    expect(await runStop(stop(dir), ctx, { 1: fail })).toEqual({
       block: true,
       reason: expect.stringContaining('plan.md') as string,
     });
