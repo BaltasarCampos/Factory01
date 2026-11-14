@@ -11,7 +11,7 @@ import { EnvironmentError } from '../cli/env.js';
 import { deniedWrites, loadPolicy, matchesPath } from '../guard/policy.js';
 import { isProtected } from '../install/manifest.js';
 import { isPlainPath } from '../model/naming.js';
-import { isTestFile } from '../stations/edges.js';
+import { isTestFile, TEST_CONFIG } from '../stations/edges.js';
 import type { RoleName } from '../model/types.js';
 import { visible } from '../notify/summary.js';
 import {
@@ -86,18 +86,23 @@ export function outputPaths(record: SessionRecord): { files: string[]; folders: 
 }
 
 /**
- * Run with node inside the sandbox: every file named, and every file under every folder named,
- * as base64, each checked from the clone's root down with lstat, so a link anywhere on its path,
- * or anything but a regular file or folder, is refused rather than followed; a missing one is
- * left out. Past `max` bytes in all it stops. A file named with `h:` gives only its blob id in the
- * object format named, its bytes never leaving the box nor counting toward `max`.
+ * Run with node inside the sandbox: every file named on its stdin, NUL-separated, and every file
+ * under every folder named, as base64, each checked from the clone's root down with lstat, so a
+ * link anywhere on its path, or anything but a regular file or folder, is refused rather than
+ * followed; a missing one is left out, and one that cannot be read is refused, naming the way out.
+ * Past `max` bytes in all it stops. A file named with `h:` gives only its blob id in the object
+ * format named, its bytes never leaving the box nor counting toward `max`.
  */
 const READER = `
 const fs = require('node:fs');
 const crypto = require('node:crypto');
-const [clone, max, format, ...named] = process.argv.slice(1);
+const [clone, max, format] = process.argv.slice(1);
+const named = fs.readFileSync(0, 'utf8').split('\\0').filter((e) => e !== '');
 const out = { files: {}, ids: {}, refused: [] };
 let total = 0;
+const unreadable = (e) => 'cannot be read (' + (e.code || String(e)) + '): ' +
+  (e.code === 'ENAMETOOLONG' ? 'shorten it, or remove it' : 'make it readable, or remove it');
+const guard = (rel, f) => { try { f(); } catch (e) { out.refused.push([rel, unreadable(e)]); } };
 const kind = (rel) => {
   let at = clone, so = '';
   for (const part of rel.split('/')) {
@@ -130,41 +135,79 @@ const hash = (rel) => {
   } finally { fs.closeSync(fd); }
 };
 const walk = (rel) => {
-  for (const name of fs.readdirSync(clone + '/' + rel).sort()) {
-    const at = rel + '/' + name, k = kind(at);
-    if (k === 'folder') walk(at); else if (k === 'file') read(at); else if (k !== 'missing') out.refused.push([at, k]);
+  let names;
+  try { names = fs.readdirSync(clone + '/' + rel).sort(); } catch (e) { return void out.refused.push([rel, unreadable(e)]); }
+  for (const name of names) {
+    const at = rel + '/' + name;
+    guard(at, () => {
+      const k = kind(at);
+      if (k === 'folder') walk(at); else if (k === 'file') read(at); else if (k !== 'missing') out.refused.push([at, k]);
+    });
   }
 };
 for (const entry of named) {
-  const [type, rel] = [entry.slice(0, 2), entry.slice(2)], k = kind(rel);
-  if (k === 'missing') continue;
-  if (type === 'f:' && k === 'file') read(rel);
-  else if (type === 'h:' && k === 'file') hash(rel);
-  else if (type === 'd:' && k === 'folder') walk(rel);
-  else out.refused.push([rel, k === 'folder' ? 'a folder' : k === 'file' ? 'not a folder' : k]);
+  const [type, rel] = [entry.slice(0, 2), entry.slice(2)];
+  guard(rel, () => {
+    const k = kind(rel);
+    if (k === 'missing') return;
+    if (type === 'f:' && k === 'file') read(rel);
+    else if (type === 'h:' && k === 'file') hash(rel);
+    else if (type === 'd:' && k === 'folder') walk(rel);
+    else out.refused.push([rel, k === 'folder' ? 'a folder' : k === 'file' ? 'not a folder' : k]);
+  });
 }
 process.stdout.write(JSON.stringify(out));
 `;
 
 /**
- * Run with node inside the sandbox: every path in the clone but under the root `.git` and any
- * `node_modules` folder, not following links, at most `max` entries.
+ * Run with node inside the sandbox: every path under the roots named on its stdin (`r:`, `` for
+ * the whole clone), NUL-separated, but under the root `.git` and any `node_modules` folder, not
+ * following links, at most `max` entries. A folder named with `s:`, a gitlink in the head, is
+ * never walked into: when it holds anything it is `held`. A folder or path that cannot be read
+ * stops the walk, `failed` naming it and the way out.
  */
 const WALKER = `
 const fs = require('node:fs');
 const [clone, max] = process.argv.slice(1);
-const out = { paths: [] };
+const given = fs.readFileSync(0, 'utf8').split('\\0').filter((e) => e !== '');
+const links = new Set(given.filter((e) => e.startsWith('s:')).map((e) => e.slice(2)));
+const out = { paths: [], held: [] };
 let count = 0;
+const fail = (at, e) => void (out.failed = [at, String(e.code || e),
+  e.code === 'ENAMETOOLONG' ? 'shorten it, or remove it' : 'make it readable, or remove it']);
+const stopped = () => out.over === true || out.failed !== undefined;
+const folder = (at) => {
+  if (!links.has(at)) return walk(at);
+  try { if (fs.readdirSync(clone + '/' + at).length > 0) out.held.push(at); } catch (e) { fail(at, e); }
+};
 const walk = (rel) => {
-  for (const name of fs.readdirSync(rel === '' ? clone : clone + '/' + rel).sort()) {
+  let names;
+  try { names = fs.readdirSync(rel === '' ? clone : clone + '/' + rel).sort(); } catch (e) { return fail(rel, e); }
+  for (const name of names) {
     if (name === 'node_modules' || (rel === '' && name === '.git')) continue;
     if (++count > Number(max)) return void (out.over = true);
     const at = rel === '' ? name : rel + '/' + name;
-    if (fs.lstatSync(clone + '/' + at).isDirectory()) walk(at); else out.paths.push(at);
-    if (out.over) return;
+    let dir;
+    try { dir = fs.lstatSync(clone + '/' + at).isDirectory(); } catch (e) { return fail(at, e); }
+    if (dir) folder(at); else out.paths.push(at);
+    if (stopped()) return;
   }
 };
-walk('');
+// A root is walked only when it, and every folder above it, is a folder, never a link.
+const root = (path) => {
+  let at = '';
+  for (const part of path.split('/')) {
+    at = at === '' ? part : at + '/' + part;
+    let st;
+    try { st = fs.lstatSync(clone + '/' + at); } catch (e) { return e.code === 'ENOENT' ? undefined : fail(at, e); }
+    if (!st.isDirectory()) return;
+  }
+  folder(path);
+};
+for (const r of given.filter((e) => e.startsWith('r:')).map((e) => e.slice(2))) {
+  if (r === '') walk(''); else root(r);
+  if (stopped()) break;
+}
 process.stdout.write(JSON.stringify(out));
 `;
 
@@ -196,8 +239,10 @@ function readClone(
   format: string,
   max: number,
 ): Read {
-  const command = [process.execPath, '-e', READER, record.clone, String(max), format, ...entries];
+  // On stdin: a head with many test files would pass the command line's limit.
+  const command = [process.execPath, '-e', READER, record.clone, String(max), format];
   const out = inBox(command, record.clone, box, env, {
+    input: entries.join('\0'),
     limit: 2 * max + 8 * 1024 * 1024,
     name: 'reading its output',
   });
@@ -271,25 +316,93 @@ function ownPaths(record: SessionRecord) {
     files.includes(path) || folders.some((folder) => matchesPath(`${folder}/**`, path));
 }
 
-/** Every path in the clone Test's walk reads, in the sandbox; past `max` an `UnreadableHead`. */
+/**
+ * Where Test's walk starts: each include pattern's fixed folders, before its first glob character,
+ * one inside another kept once; `` is the whole clone.
+ */
+export function walkRoots(include: readonly string[] = TEST_CONFIG.include): string[] {
+  const roots = include.map((pattern) => {
+    const parts = pattern.split('/').slice(0, -1);
+    const glob = parts.findIndex((part) => /[*?[\]{}!]/.test(part));
+    return parts.slice(0, glob < 0 ? parts.length : glob).join('/');
+  });
+  const inside = (r: string, o: string) => o !== r && (o === '' || r.startsWith(`${o}/`));
+  return [...new Set(roots)].filter((r) => !roots.some((o) => inside(r, o)));
+}
+
+/**
+ * Every path under the include patterns' roots Test's walk reads, in the sandbox, and the head's
+ * gitlink folders the session put anything in; past `max` entries, or a path it cannot read, an
+ * `UnreadableHead`.
+ */
 export function walkClone(
   record: SessionRecord,
   box: string,
   env: NodeJS.ProcessEnv,
   max = MAX_WALK,
-): string[] {
+  gitlinks: readonly string[] = [],
+  roots = walkRoots(),
+): { paths: string[]; held: string[] } {
   const command = [process.execPath, '-e', WALKER, record.clone, String(max)];
   const out = inBox(command, record.clone, box, env, {
+    input: [...roots.map((r) => `r:${r}`), ...gitlinks.map((g) => `s:${g}`)].join('\0'),
     limit: 64 * 1024 * 1024,
     name: 'walking its clone',
     over: 'its clone lists more paths than the factory reads',
   });
-  const walked = JSON.parse(out.toString()) as { paths: string[]; over?: boolean };
+  const walked = JSON.parse(out.toString()) as {
+    paths: string[];
+    held: string[];
+    over?: boolean;
+    failed?: [string, string, string];
+  };
   if (walked.over === true)
     throw new UnreadableHead(
-      `its clone holds more than the ${String(max)} entries the factory walks for Test's output, outside .git and node_modules`,
+      `its clone holds more than the ${String(max)} entries the factory walks for Test's output, under ${roots.map((r) => (r === '' ? '/' : `${r}/`)).join(', ')} outside .git and node_modules`,
     );
-  return walked.paths;
+  if (walked.failed !== undefined) {
+    const [path, code, way] = walked.failed;
+    throw new UnreadableHead(
+      `the factory could not read ${visible(path === '' ? '/' : path)} in its clone for Test's output (${visible(code)}): ${way}`,
+    );
+  }
+  return { paths: walked.paths, held: walked.held };
+}
+
+/**
+ * The paths git could not add on the head's tree: a file, folder or submodule there or above, the
+ * head's gitlink folders the session wrote in, and a path that differs from the head's only in
+ * letter case, which a case-folding file system would overwrite.
+ */
+function clashes(
+  paths: readonly string[],
+  tree: ReadonlyMap<string, unknown>,
+  held: readonly string[],
+): string[] {
+  const folders = new Set<string>();
+  const lower = new Map<string, string>();
+  for (const path of tree.keys()) {
+    lower.set(path.toLowerCase(), path);
+    for (let at = path.lastIndexOf('/'); at > 0; at = path.lastIndexOf('/', at - 1)) {
+      folders.add(path.slice(0, at));
+      lower.set(path.slice(0, at).toLowerCase(), path.slice(0, at));
+    }
+  }
+  const bad = held.map(
+    (folder) => `${folder} (the head has a submodule there; remove what is in it)`,
+  );
+  for (const path of paths) {
+    const parts = path.split('/');
+    const above = parts.slice(0, -1).some((_, i) => tree.has(parts.slice(0, i + 1).join('/')));
+    const other = lower.get(path.toLowerCase());
+    if (above || folders.has(path))
+      bad.push(`${path} (the head has a file, folder or submodule there; remove it)`);
+    else if (other !== undefined)
+      bad.push(
+        `${path} (the head has ${other}, which a case-folding file system would overwrite; rename it)`,
+      );
+  }
+  return bad;
 }
 
 /** Where vitest writes the snapshots of the test file at `path`. */
@@ -323,10 +436,15 @@ export function testOutput(
   const existing = [...tree]
     .filter(([path, e]) => (e.mode === '100644' || e.mode === '100755') && isTestFile(path))
     .map(([path]) => path);
-  const walked = walkClone(record, box, env);
+  const gitlinks = [...tree].filter(([, e]) => e.mode === '160000').map(([path]) => path);
+  const { paths: walked, held } = walkClone(record, box, env, MAX_WALK, gitlinks);
   const here = new Set(walked);
   const added = walked.filter((path) => isTestFile(path) && !tree.has(path));
   const snapshots = added.map(snapshotOf).filter((path) => here.has(path) && !tree.has(path));
+  // git's update-index would fail on these, as the factory's own error.
+  const clash = clashes([...added, ...snapshots], tree, held);
+  if (clash.length > 0)
+    throw new UnreadableHead(`its output cannot be committed: ${visible(clash.join(', '))}`);
   const format = ownOk(repo, ['rev-parse', '--show-object-format'], env);
   const entries = [
     ...existing.map((path) => `h:${path}`),
