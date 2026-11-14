@@ -2,7 +2,7 @@
 // 28-5b-2): their output read in the read-only sandbox, committed in the factory's own clone with
 // plumbing, the passing head recorded apart, and the second stop; with the real bwrap and git.
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { hookOutput, readOutput } from '../../src/hooks/output-commit.js';
@@ -42,7 +42,7 @@ function issued(role = 'reviewer', station = 5) {
       { cwd: r.path, now: () => new Date(), env },
     );
   const passed = () => {
-    writeFileSync(passedPath(home, SESSION_ID), '{}\n');
+    writeFileSync(passedPath(home, SESSION_ID), `${JSON.stringify({ session: SESSION_ID })}\n`);
   };
   const events = () =>
     readFileSync(log, 'utf8')
@@ -159,7 +159,8 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
     ['.station.json', 'a path no role may write'],
     ['CLAUDE.MD', 'a protected path'],
     ['.git./HEAD', 'a path git refuses'],
-    ['notes./x', 'a path git refuses'],
+    ['notes./x', 'a name ending in a dot'],
+    ['.env.example', 'a path no role may write'],
     ['git~1/x', 'not a plain path'],
     ['.g\u200cit/x', 'not a plain path'],
   ])('refuses the Planner a %s under its contracts/ folder: %s', (path, why) => {
@@ -196,6 +197,15 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     t.write(REPORT, VERIFY);
     expect(await t.stop()).toEqual({ block: false });
     expect(t.ref(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
+    // A later stop that fails removes it: the ref names the commit the last stop passed at.
+    t.write(REPORT, VERIFY.replace('pass', 'fail'));
+    expect((await t.stop()).block).toBe(true);
+    expect(t.ref(passedRef(SESSION_ID))).toBe('');
+    // A start record naming another session is not a passed start.
+    t.write(REPORT, VERIFY);
+    writeFileSync(passedPath(t.home, SESSION_ID), '{"session":"another"}\n');
+    expect(await t.stop()).toEqual({ block: false });
+    expect(t.ref(passedRef(SESSION_ID))).toBe('');
 
     const u = issued();
     u.write(REPORT, VERIFY);
@@ -247,15 +257,58 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     execFileSync('git', ['-C', sub, 'config', 'status.showUntrackedFiles', 'bogus']);
     // Set last: the test's own git would run it too; git appends its arguments after the `:`.
     t.r.git(['config', 'core.fsmonitor', 'kill -9 $PPID; :']);
-    expect(t.output().outside).toEqual([]);
+    expect(t.output()).toMatchObject({ outside: [] });
+    expect(t.output().unlisted).toBeUndefined();
   });
 
-  it("logs a change outside the role's paths as an alert, and Test's stop fails closed until 28-5b-3", async () => {
+  it('commits the output when git status fails, and says it could not list the outside changes', async () => {
+    const cases: [string, (t: ReturnType<typeof issued>) => void, RegExp][] = [
+      [
+        'a process filter that kills git',
+        (t) => {
+          mkdirSync(join(t.r.path, '.git', 'info'), { recursive: true });
+          writeFileSync(join(t.r.path, '.git', 'info', 'attributes'), '* filter=k\n');
+          t.r.git(['config', 'filter.k.process', 'kill -9 $PPID; :']);
+          // The same size, a new time: git re-reads the file through its filter.
+          t.write('src/login.ts', 'b\n');
+          utimesSync(join(t.r.path, 'src/login.ts'), new Date(0), new Date(0));
+        },
+        /git status in its clone failed/,
+      ],
+      [
+        "a submodule config git can't parse",
+        (t) => {
+          t.r.git(['update-index', '--add', '--cacheinfo', `160000,${t.head},sub`]);
+          execFileSync('git', ['init', '-q', join(t.r.path, 'sub')]);
+          writeFileSync(join(t.r.path, 'sub', '.git', 'config'), '[[[\n');
+        },
+        /bad config line 1/,
+      ],
+    ];
+    for (const [name, make, why] of cases) {
+      const t = issued();
+      t.write(REPORT, VERIFY);
+      make(t);
+      expect(await t.stop(), name).toEqual({ block: false });
+      const commit = t.ref(sessionRef(SESSION_ID));
+      expect(runGit(t.project, ['show', `${commit}:${REPORT}`]), name).toBe(VERIFY.trim());
+      const alerts = t.events().filter((e) => e.kind === 'alert');
+      expect(alerts, name).toHaveLength(1);
+      expect(alerts[0]?.input_summary, name).toMatch(
+        /^the factory could not list the changes outside the reviewer's paths: /,
+      );
+      expect(alerts[0]?.input_summary, name).toMatch(why);
+    }
+  });
+
+  it("logs a change outside the role's paths once, as an alert, and Test's stop fails closed until 28-5b-3b", async () => {
     const t = issued();
-    t.write(REPORT, VERIFY);
+    t.write(REPORT, VERIFY.replace('pass', 'fail'));
     t.write('src/login.ts', 'changed\n');
+    expect((await t.stop()).block).toBe(true);
+    t.write(REPORT, VERIFY);
     expect(await t.stop()).toEqual({ block: false });
-    expect(t.events()).toEqual([
+    expect(t.events().filter((e) => e.kind === 'alert')).toEqual([
       expect.objectContaining({
         kind: 'alert',
         input_summary: "changed outside the reviewer's paths, never committed: src/login.ts",

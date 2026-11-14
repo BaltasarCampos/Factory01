@@ -81,9 +81,10 @@ export function inBox(
   clone: string,
   box: string,
   env: NodeJS.ProcessEnv,
-  io: { input?: string; limit?: number; name?: string } = {},
+  io: { input?: string; limit?: number; name?: string; over?: string } = {},
 ): Buffer {
   const argv = readOnlyBox(box, clone);
+  const limit = io.limit ?? 1024 * 1024;
   const outer = probeBwrap(
     argv,
     env,
@@ -93,13 +94,14 @@ export function inBox(
     env: outer,
     timeout: GIT_TIMEOUT,
     killSignal: 'SIGKILL',
-    maxBuffer: io.limit ?? 1024 * 1024,
+    maxBuffer: limit,
     ...(io.input === undefined ? {} : { input: io.input }),
   });
   const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
   if (code === 'ENOBUFS')
     throw new UnreadableHead(
-      `its commits since the head it was issued hold more than the ${String(io.limit ?? 0)} bytes a session may add`,
+      io.over ??
+        `its commits since the head it was issued hold more than the ${String(limit)} bytes a session may add`,
     );
   if (result.error !== undefined || result.status !== 0)
     throw new UnreadableHead(
@@ -114,7 +116,7 @@ export const inSandbox = (
   clone: string,
   box: string,
   env: NodeJS.ProcessEnv,
-  io: { input?: string; limit?: number; name?: string } = {},
+  io: { input?: string; limit?: number; name?: string; over?: string } = {},
 ): Buffer => {
   const git = ['git', '-c', 'core.hooksPath=/dev/null', '-c', 'protocol.allow=never', ...args];
   return inBox(git, clone, box, env, { name: `git ${args[0] ?? ''}`, ...io });
