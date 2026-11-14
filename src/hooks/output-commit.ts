@@ -24,7 +24,7 @@ import {
 } from './session-commits.js';
 import { sessionFolder, type SessionRecord } from './session.js';
 
-/** The roles whose output the Stop hook commits; Test's comes with 28-5b-3. */
+/** The roles whose output the Stop hook commits; Test's comes with 28-5b-3b. */
 export const HOOK_COMMITS: readonly RoleName[] = ['spec', 'planner', 'reviewer', 'security'];
 
 /** The most a role's output may hold, in bytes, all its files together. */
@@ -33,20 +33,24 @@ export const MAX_OUTPUT = 8 * 1024 * 1024;
 const POLICY = new URL('../../factory/policy/roles.yaml', import.meta.url);
 const installedPolicy = () => loadPolicy(readFileSync(POLICY, 'utf8'));
 
-/** A part git's `verify_path` refuses: `.git` in any case and with dots after it, or a trailing dot. */
-const gitRefuses = (path: string) =>
-  path
-    .split('/')
-    .some((part) => /^\.git\.*$/i.test(part) || /^git~1$/i.test(part) || part.endsWith('.'));
+/** The most of git status's output the factory reads for the outside-changes alert. */
+export const MAX_STATUS = 4 * 1024 * 1024;
 
-/** Why `path` cannot be committed for `role`, the path guard's rules lower-cased as it does; or none. */
+/**
+ * Why `path` cannot be committed, by the path guard's rules, lower-cased as it matches them: the
+ * role's denied writes and the relative `deny_read` patterns; or none.
+ */
 function refusal(path: string, denied: readonly string[]): string | undefined {
   if (!isPlainPath(path)) return 'not a plain path';
   if (isProtected(path)) return 'a protected path';
   const lower = path.toLowerCase();
   if (denied.some((pattern) => matchesPath(pattern.toLowerCase(), lower)))
     return 'a path no role may write';
-  if (gitRefuses(path)) return 'a path git refuses';
+  const parts = path.split('/');
+  // git's `verify_path` refuses `.git` in any case, with dots after it.
+  if (parts.some((part) => /^\.git\.*$/i.test(part))) return 'a path git refuses';
+  // Stricter than git: on Windows `.gitattributes.` reads as `.gitattributes`.
+  if (parts.some((part) => part.endsWith('.'))) return 'a name ending in a dot';
   return undefined;
 }
 
@@ -134,7 +138,10 @@ export function readOutput(
   max = MAX_OUTPUT,
 ): Map<string, Buffer> {
   const { files, folders } = outputPaths(record);
-  const denied = deniedWrites(installedPolicy(), record.role);
+  const policy = installedPolicy();
+  const denied = deniedWrites(policy, record.role).concat(
+    policy.denyRead.filter((pattern) => !pattern.startsWith('~/')),
+  );
   const entries = [...files.map((f) => `f:${f}`), ...folders.map((d) => `d:${d}`)];
   const command = [process.execPath, '-e', READER, record.clone, String(max), ...entries];
   const out = inBox(command, record.clone, box, env, {
@@ -161,8 +168,10 @@ export function readOutput(
 }
 
 /**
- * The paths git sees changed in the clone outside the role's own, from its status in the sandbox:
- * the session's own git can lie here, so this only names them, and nothing is committed from it.
+ * The paths git sees changed in the clone outside the role's own, from its status in the sandbox.
+ * The clone's own attributes can still run a clean or process filter there, inside the box, so the
+ * session can make its status lie, fail or slow down: it only names paths, nothing is committed
+ * from it, and its failure never decides the output.
  */
 export function outsideChanges(record: SessionRecord, box: string, env: NodeJS.ProcessEnv) {
   const { files, folders } = outputPaths(record);
@@ -178,6 +187,8 @@ export function outsideChanges(record: SessionRecord, box: string, env: NodeJS.P
   ];
   const status = inSandbox(['--no-optional-locks', ...off, ...args], record.clone, box, env, {
     name: 'git status',
+    limit: MAX_STATUS,
+    over: `its git status lists more than the ${String(MAX_STATUS)} bytes the factory reads`,
   });
   const changed = status
     .toString()
@@ -187,6 +198,12 @@ export function outsideChanges(record: SessionRecord, box: string, env: NodeJS.P
   const own = (path: string) =>
     files.includes(path) || folders.some((folder) => matchesPath(`${folder}/**`, path));
   return changed.filter((path) => !own(path));
+}
+
+/** What changed outside the role's paths, or why the factory could not list it. */
+export interface Outside {
+  outside: string[];
+  unlisted?: string;
 }
 
 /** The factory's own name for a role's commits, never the Owner's. */
@@ -244,7 +261,7 @@ export function hookOutput(
   home: string,
   session: string,
   env: NodeJS.ProcessEnv = process.env,
-): SessionOutput & { outside: string[] } {
+): SessionOutput & Outside {
   const { project: repo, clone, head } = record;
   const work = mkdtempSync(join(sessionFolder(home, session), 'commit-'));
   try {
@@ -257,10 +274,15 @@ export function hookOutput(
         `a ${record.role} session commits nothing itself, but its clone's HEAD is ${visible(tip.slice(0, 12))}, not ${head.slice(0, 12)}, the commit it was issued; this session cannot fix it, so it ends as a failure`,
       );
     const files = readOutput(record, box, env);
-    const outside = outsideChanges(record, box, env);
     const commit = commitOutput(record, files, work, env);
     ownOk(repo, ['update-ref', sessionRef(session), commit], env);
-    return { repo, commit, head, feature: record.feature, branch: record.branch, outside };
+    const output = { repo, commit, head, feature: record.feature, branch: record.branch };
+    try {
+      return { ...output, outside: outsideChanges(record, box, env) };
+    } catch (err) {
+      if (!(err instanceof UnreadableHead)) throw err;
+      return { ...output, outside: [], unlisted: err.message };
+    }
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

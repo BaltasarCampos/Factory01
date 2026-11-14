@@ -12,7 +12,6 @@
 // log, Define's and Intake's included. No factory git runs in the clone: its head is read inside
 // the factory's sandbox into the factory's own clone (session-commits.ts), and checked there; for
 // the roles that commit nothing, the hook commits their output there itself (output-commit.ts).
-import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { STATIONS, type Station } from '../model/types.js';
 import { visible } from '../notify/summary.js';
@@ -24,7 +23,7 @@ import { securityStopCheck } from '../stations/checks/security.js';
 import { specStopCheck } from '../stations/checks/spec.js';
 import { verifyStopCheck } from '../stations/checks/verify.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
-import { HOOK_COMMITS, hookOutput } from './output-commit.js';
+import { HOOK_COMMITS, hookOutput, type Outside } from './output-commit.js';
 import {
   ownOk,
   passedRef,
@@ -34,7 +33,7 @@ import {
 } from './session-commits.js';
 import {
   logBlocked,
-  passedPath,
+  hasPassed,
   readSessionRecord,
   recordEvent,
   sessionEvents,
@@ -78,11 +77,11 @@ export const CHECKERS: Partial<Record<Station, StationChecker>> = {
   3: (_r, at) => planStopCheck(at()),
   4: (_r, at) => buildStopCheck(at()),
   5: (r, at) => {
-    // What Test may commit is 28-5b-3's: until then its stop fails closed, as the Integrator's.
+    // What Test may commit is 28-5b-3b's: until then its stop fails closed, as the Integrator's.
     if (r.role === 'test')
       return {
         complete: false,
-        missing: ["Test's output, which the factory commits only from slice 28-5b-3"],
+        missing: ["Test's output, which the factory commits only from slice 28-5b-3b"],
       };
     return r.role === 'security' ? securityStopCheck(at()) : verifyStopCheck(at());
   },
@@ -98,7 +97,7 @@ export async function runStop(
   if (!again) {
     const session = sessionId(input.session_id);
     const record = readSessionRecord(home, session);
-    const reason = await check(checkers, record, home, session, ctx);
+    const reason = await check(checkers, record, home, session, ctx, false);
     if (reason === undefined) return { block: false };
     const fields = { tool: 'Stop', input_summary: reason };
     const unlogged = await logBlocked(record, home, session, fields, ctx.now);
@@ -114,7 +113,7 @@ export async function runStop(
   try {
     session = sessionId(input.session_id);
     record = readSessionRecord(home, session);
-    reason = await check(checkers, record, home, session, ctx);
+    reason = await check(checkers, record, home, session, ctx, true);
   } catch (err) {
     reason = `the factory's own check failed: ${err instanceof Error ? err.message : String(err)}`;
   }
@@ -134,25 +133,33 @@ export async function runStop(
   return { block: false };
 }
 
-/** The station's check of the session's output; undefined when it passes, else why not. */
+/**
+ * The station's check of the session's output; undefined when it passes, else why not. The passing
+ * head is removed before the output is read, so it always names the commit the last stop passed at.
+ */
 async function check(
   table: Partial<Record<Station, StationChecker>>,
   record: SessionRecord,
   home: string,
   session: string,
   ctx: HookContext,
+  again: boolean,
 ): Promise<string | undefined> {
+  const env = { ...process.env, ...ctx.env };
   const checker = table[record.station];
   const name = STATIONS[record.station];
   if (checker === undefined)
     return `no output checker for station ${String(record.station)} (${name}) in this build; the session cannot confirm its output`;
-  // Read once, when a checker asks: Intake's never does.
-  const env = { ...process.env, ...ctx.env };
-  let output: (SessionOutput & { outside?: string[] }) | undefined;
-  const at = () =>
-    (output ??= HOOK_COMMITS.includes(record.role)
+  // Read once, when a checker asks: Intake's never does, and has no passing head. Every checker
+  // that reads the output reads it first, so the passing head goes at the start of its check.
+  let output: (SessionOutput & Partial<Outside>) | undefined;
+  const read = () => {
+    ownOk(record.project, ['update-ref', '-d', passedRef(session)], env);
+    return HOOK_COMMITS.includes(record.role)
       ? hookOutput(record, home, session, env)
-      : sessionOutput(record, home, session, env));
+      : sessionOutput(record, home, session, env);
+  };
+  const at = () => (output ??= read());
   let result: CheckResult;
   try {
     result = await checker(record, at);
@@ -160,23 +167,35 @@ async function check(
     if (!(err instanceof UnreadableHead)) throw err;
     return `station ${name} output cannot be read: ${err.message}`;
   }
-  const outside = output?.outside ?? [];
-  if (outside.length > 0) {
-    // The session names its own files.
-    const shown =
-      visible(outside.slice(0, 10).join(', ')) +
-      (outside.length > 10 ? `, and ${String(outside.length - 10)} more` : '');
-    const event = recordEvent(record, session, {
-      kind: 'alert',
-      tool: 'Stop',
-      input_summary: `changed outside the ${record.role}'s paths, never committed: ${shown}`,
-    });
-    await appendEvent(sessionEvents(home, session), event, ctx.now);
+  // Once per session: at the stop that passes, or at the second, never blocked.
+  if (output !== undefined && (result.complete || again)) {
+    const summary = outsideSummary(record.role, output);
+    if (summary !== undefined) {
+      const event = recordEvent(record, session, {
+        kind: 'alert',
+        tool: 'Stop',
+        input_summary: summary,
+      });
+      await appendEvent(sessionEvents(home, session), event, ctx.now);
+    }
   }
   if (!result.complete)
     return `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
   // Passed: the head is recorded only for a session whose start passed, and only once read.
-  if (output !== undefined && existsSync(passedPath(home, session)))
+  if (output !== undefined && hasPassed(home, session))
     ownOk(output.repo, ['update-ref', passedRef(session), output.commit], env);
   return undefined;
+}
+
+/** The alert for what changed outside the role's paths, or why it could not be listed; or none. */
+function outsideSummary(role: string, output: Partial<Outside>): string | undefined {
+  if (output.unlisted !== undefined)
+    return `the factory could not list the changes outside the ${role}'s paths: ${visible(output.unlisted)}`;
+  const outside = output.outside ?? [];
+  if (outside.length === 0) return undefined;
+  // The session names its own files.
+  const shown =
+    visible(outside.slice(0, 10).join(', ')) +
+    (outside.length > 10 ? `, and ${String(outside.length - 10)} more` : '');
+  return `changed outside the ${role}'s paths, never committed: ${shown}`;
 }
