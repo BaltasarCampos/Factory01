@@ -1,7 +1,7 @@
 # Contract: local sessions
 
 The lifecycle of a session the local launcher starts (`agents: local` in main's `.factory/config`,
-T061), as the code on main stands after slice 28-5c-1. Every slice that changes it keeps this page
+T061), as the code on main stands after slice 28-5c-2. Every slice that changes it keeps this page
 current in its notes commit. Code: `src/dispatcher/failures.ts`, `evidence.ts` (`tipState`,
 `spentTip`, `intakeBound`), `dispatch.ts` (`startSession`, `held`, `hold`), `manifest.ts`
 (`testEnded`), `launcher/local.ts` (`launch`, `sessionRunning`, `stillRunning`),
@@ -159,7 +159,7 @@ reads count 0 and relaunches on the same commit, though a `context-full` hold st
 | Intake | `R` + 1 sessions per item, whatever their outcome, main moving or not; a deleted record, a newly installed hash (but not a `context-full` hold) or a move out of `new` starts the count again |
 | Not counted | A `LaunchRefused`, a `StackRefused` hold, a prompt refusal and any error before step 9: no session ran, nothing was spent, and a fix outside the branch (PATH, pin, installed factory, token) takes effect with no new commit. Define, and cloud mode |
 | Counted with no session | A claude that fails to spawn after step 9: what was attempted, so the hold comes instead of a retry every pass |
-| Hooks | Each has a timeout, a tool call's hooks and the tool together under `SILENCE` (720 s); the Stop hook's git and sandbox runs share one 540 s deadline under its 600 s timeout (slice 28-5c-1) |
+| Hooks | Each has a timeout, a tool call's hooks and the tool together under `SILENCE` (720 s); every program one stop starts, git, `gh` and bubblewrap's probe, takes the time left on one 540 s deadline under its 600 s timeout, never 0, none started once it has passed; a test proves it over every station's stop in its rows (slices 28-5c-1, 28-5c-2) |
 | `factory run` | Stops on a failed session, a refusal, a halt, or a pass that starts nothing, and after 20 passes: a relaunch needs another `factory run` or `factory dispatch` |
 | One dispatcher | Assumed until 28b. The launcher's `running` flag is per process, the still-running scan sees another factory's session only from its `group.json`, and the cap is checked at step 1 while `recordSession` adds one without checking again: two processes can each relaunch one spent manifest, over the cap by at most the number of processes (deferred (29)). 28b's lock, from before the evidence is read, closes it |
 
