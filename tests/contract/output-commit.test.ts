@@ -233,6 +233,25 @@ function rmFeature(t: ReturnType<typeof issued>) {
 }
 
 describe('the passing head and the second stop (T086, 28-5b-2)', () => {
+  it.each([sessionRef(SESSION_ID), passedRef(SESSION_ID)])(
+    'fails, never overwriting it, when another hook moves %s under it',
+    async (ref) => {
+      const t = issued();
+      t.passed();
+      t.write(REPORT, VERIFY);
+      const bin = tempDir('racing-git-');
+      const git = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+      const race = `case " $* " in *" update-ref ${ref} "*) ${git} update-ref ${ref} ${t.head};; esac`;
+      writeFileSync(join(bin, 'git'), `#!/bin/sh\n${race}\nexec ${git} "$@"\n`, { mode: 0o755 });
+      const env = { ...t.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
+      const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
+      await expect(runStop(input, { cwd: t.r.path, now: () => new Date(), env })).rejects.toThrow(
+        /git update-ref .* failed: .*(already exists|but expected)/,
+      );
+      expect(t.ref(ref)).toBe(t.head);
+    },
+  );
+
   it('records the passing head only for a session whose start passed, and never for a failing check', async () => {
     const t = issued();
     t.write(REPORT, VERIFY.replace('pass', 'fail'));

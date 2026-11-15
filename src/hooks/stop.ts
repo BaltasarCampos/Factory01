@@ -202,7 +202,8 @@ async function check(
     return `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
   // Passed: the head is recorded only for a session whose start passed, and only once read.
   if (output !== undefined && hasPassed(home, session))
-    ownOk(output.repo, ['update-ref', passedRef(session), output.commit], env);
+    // Removed before the output was read: a ref there now is another hook's.
+    ownOk(output.repo, ['update-ref', passedRef(session), output.commit, ''], env);
   return undefined;
 }
 
@@ -214,7 +215,7 @@ function clearPassed(repo: string, session: string, env: NodeJS.ProcessEnv) {
   const ref = passedRef(session);
   const found = own(repo, ['rev-parse', '--verify', '-q', ref], env);
   if (found.status === 1) return;
-  const failed = found.status === 0 ? own(repo, ['update-ref', '-d', ref], env) : found;
+  const failed = found.status === 0 ? own(repo, ['update-ref', '-d', ref, found.out], env) : found;
   if (failed.status !== 0)
     throw new EnvironmentError(
       `the factory could not remove its passing head ${ref} in ${repo}, which this session cannot fix: ${failed.err}`,

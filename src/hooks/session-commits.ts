@@ -205,6 +205,18 @@ export function ownOk(
   return result.out;
 }
 
+/**
+ * Points `ref` at `to` with git's compare-and-swap, from what it names now, or from nothing: a
+ * second hook racing this one then fails instead of overwriting it. No lock file, which a killed
+ * hook would leave to block every later stop.
+ */
+export function swapRef(repo: string, ref: string, to: string, env: NodeJS.ProcessEnv) {
+  const now = own(repo, ['rev-parse', '--verify', '-q', ref], env);
+  if (now.status !== 0 && now.status !== 1)
+    throw new EnvironmentError(`git rev-parse in ${repo} failed: ${now.err}`);
+  ownOk(repo, ['update-ref', ref, to, now.status === 0 ? now.out : ''], env);
+}
+
 /** Moves a file into `folder`, by rename, or by copy and rename across filesystems. */
 function moveInto(file: string, folder: string) {
   const to = join(folder, file.split('/').at(-1) ?? '');
@@ -320,7 +332,7 @@ export function sessionOutput(
         );
       quarantined(repo, tip, head, pack, work, env);
     }
-    ownOk(repo, ['update-ref', sessionRef(session), tip], env);
+    swapRef(repo, sessionRef(session), tip, env);
     return { repo, commit: tip, head, feature: record.feature, branch: record.branch };
   } finally {
     rmSync(work, { recursive: true, force: true });

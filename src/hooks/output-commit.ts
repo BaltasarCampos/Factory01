@@ -20,6 +20,7 @@ import {
   own,
   ownOk,
   sessionRef,
+  swapRef,
   UnreadableHead,
   type SessionOutput,
 } from './session-commits.js';
@@ -535,7 +536,7 @@ export function hookOutput(
     const files =
       record.role === 'test' ? testOutput(record, box, env) : readOutput(record, box, env);
     const commit = commitOutput(record, files, work, env);
-    ownOk(repo, ['update-ref', sessionRef(session), commit], env);
+    swapRef(repo, sessionRef(session), commit, env);
     const output = { repo, commit, head, feature: record.feature, branch: record.branch };
     try {
       const mine = record.role === 'test' ? (path: string) => files.has(path) : undefined;
