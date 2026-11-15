@@ -4,6 +4,8 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { loadPolicy } from '../../src/guard/policy.js';
+import { BASH_MAX_TIMEOUT, SILENCE } from '../../src/dispatcher/launcher/local.js';
+import { STOP_DEADLINE } from '../../src/hooks/session-commits.js';
 import {
   CLAUDE_CODE_TOOLS,
   deniedTools,
@@ -79,6 +81,35 @@ describe('the generated settings (T082)', () => {
     // onFailure has no effect on Stop: a stop hook that cannot run lets the session end.
     expect(run('Stop')).toEqual(['factory hook stop -']);
     expect(run('PreCompact')).toEqual(['factory hook pre-compact block']);
+  });
+
+  it("bounds every hook, so no tool call or stop keeps the stream silent past the launcher's SILENCE (T061, T086)", () => {
+    const longest = (event: keyof Settings['hooks'], tool: string) =>
+      Math.max(
+        0,
+        ...settings.hooks[event]
+          .filter(
+            (g) =>
+              g.matcher === undefined || g.matcher === '*' || g.matcher.split('|').includes(tool),
+          )
+          .flatMap((g) => g.hooks.map((h) => h.timeout)),
+      );
+    for (const groups of Object.values(settings.hooks))
+      for (const h of groups.flatMap((g) => g.hooks)) expect(h.timeout).toBeGreaterThan(0);
+    // Each tool call: its PreToolUse hooks, the tool, then its PostToolUse hooks, in seconds.
+    for (const [tool, runs] of [
+      ['Bash', BASH_MAX_TIMEOUT / 1000],
+      ['Write', 0],
+      ['Read', 0],
+      ['Agent', 0],
+    ] as const)
+      expect(longest('PreToolUse', tool) + runs + longest('PostToolUse', tool), tool).toBeLessThan(
+        SILENCE / 1000,
+      );
+    for (const event of ['SessionStart', 'Stop', 'PreCompact'] as const)
+      expect(longest(event, ''), event).toBeLessThan(SILENCE / 1000);
+    // The Stop hook's own deadline ends it, with its reason, before Claude Code's timeout does.
+    expect(STOP_DEADLINE).toBeLessThanOrEqual(longest('Stop', '') * 1000 - 60_000);
   });
 
   it('runs the advisor on Opus, offers no Fable, keeps the file tools in the clone and allows the factory’s MCP tools', () => {

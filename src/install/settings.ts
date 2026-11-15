@@ -38,6 +38,8 @@ interface Hook {
   type: 'command';
   command: 'factory';
   args: string[];
+  /** Seconds, past which Claude Code stops the hook. */
+  timeout: number;
   onFailure?: 'block';
 }
 interface HookGroup {
@@ -57,12 +59,30 @@ export interface Settings {
   availableModels: string[];
 }
 
+/**
+ * Each hook's timeout, in seconds: with a Bash command's own limit, what one tool call can keep
+ * the stream silent stays under the launcher's `SILENCE`, and the Stop hook's own deadline,
+ * `STOP_DEADLINE`, ends it before this one does (T061, T086).
+ */
+export const HOOK_TIMEOUTS: Readonly<Record<string, number>> = {
+  'session-start': 60,
+  gate: 30,
+  'path-guard': 30,
+  'read-guard': 30,
+  'command-guard': 30,
+  'post-edit': 120,
+  log: 30,
+  stop: 600,
+  'pre-compact': 30,
+};
+
 /** `factory hook <name>`, blocking the action when it cannot run if `guard` is set. */
 const hook = (name: string, guard: boolean, matcher?: string): HookGroup => ({
   ...(matcher === undefined ? {} : { matcher }),
   hooks: [
     {
       ...{ type: 'command', command: 'factory', args: ['hook', name] },
+      timeout: HOOK_TIMEOUTS[name] ?? 30,
       ...(guard ? { onFailure: 'block' } : {}),
     },
   ],

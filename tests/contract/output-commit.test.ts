@@ -3,16 +3,18 @@
 // plumbing, the passing head recorded apart, and the second stop; with the real bwrap and git.
 import { execFileSync } from 'node:child_process';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
+  rmSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { hookOutput, readOutput, walkClone } from '../../src/hooks/output-commit.js';
+import { hookOutput, readOutput, walkClone, walkRoots } from '../../src/hooks/output-commit.js';
 import { passedRef, sessionRef, UnreadableHead } from '../../src/hooks/session-commits.js';
 import { passedPath, readSessionRecord } from '../../src/hooks/session.js';
 import { runStop } from '../../src/hooks/stop.js';
@@ -33,8 +35,10 @@ function issued(
   station = 5,
   files: Record<string, string> = {},
   tests: string[] = [],
+  prepare?: (r: ReturnType<typeof makeRepo>) => void,
 ) {
   const r = makeRepo({ files: { '.factory/config': CONFIG, 'src/login.ts': 'a\n', ...files } });
+  prepare?.(r);
   r.checkout(BRANCH, { create: true });
   r.commit({ [`${FEATURE}/.station.json`]: '{}\n' }, 'manifest');
   r.push();
@@ -202,6 +206,28 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
 });
 
 /** Removes the feature folder the manifest commit left in the clone's working tree. */
+describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
+  it("fails with its limit, never git's, when its git runs together pass it", async () => {
+    const t = issued();
+    t.write(REPORT, VERIFY);
+    const bin = tempDir('slow-git-');
+    const git = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\nsleep 2\nexec ${git} "$@"\n`, { mode: 0o755 });
+    const env = { ...t.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
+    const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
+    const ctx = { cwd: t.r.path, now: () => new Date(), env };
+    await expect(runStop(input, ctx, undefined, 1000)).rejects.toThrow(
+      /^the Stop hook ran past its 1 s limit, so the factory could not check the session's output/,
+    );
+    // The second stop is never blocked, and logs the same reason.
+    expect(await runStop({ ...input, stop_hook_active: true }, ctx, undefined, 1000)).toEqual({
+      block: false,
+    });
+    expect(t.events().at(-1)?.input_summary).toMatch(/ran past its 1 s limit/);
+    expect(await runStop(input, { ...ctx, env: t.env })).toEqual({ block: false });
+  }, 60_000);
+});
+
 function rmFeature(t: ReturnType<typeof issued>) {
   execFileSync('rm', ['-rf', join(t.r.path, FEATURE)]);
 }
@@ -449,12 +475,116 @@ describe("Test's output: only new test files, and their snapshots (T086, 28-5b-3
     expect(t.output).toThrow(/names tests its head .* does not have, tests\/gone\.test\.ts/);
   });
 
-  it('refuses a clone past the entries it walks', () => {
+  it("refuses a clone past the entries it walks, counting only under the patterns' roots", () => {
     const t = tested();
     const box = join(t.home, 'box');
     mkdirSync(box);
-    expect(() => walkClone(t.record(), box, { ...process.env, ...t.env }, 3)).toThrow(
-      /its clone holds more than the 3 entries the factory walks for Test's output/,
+    for (const name of ['a', 'b', 'c', 'd']) t.write(`dist/${name}.js`, 'x\n');
+    const env = { ...process.env, ...t.env };
+    expect(walkClone(t.record(), box, env, 3).paths).toEqual([EXISTING]);
+    for (const name of ['a', 'b', 'c']) t.write(`tests/${name}.test.ts`, 'x\n');
+    expect(() => walkClone(t.record(), box, env, 3)).toThrow(
+      /its clone holds more than the 3 entries the factory walks for Test's output, under tests\//,
     );
+    expect(walkRoots(['tests/**/*.test.ts', 'tests/unit/*.test.ts', 'e2e/x/*.spec.ts'])).toEqual([
+      'tests',
+      'e2e/x',
+    ]);
+    expect(walkRoots(['**/*.test.ts', 'tests/*.test.ts'])).toEqual(['']);
   });
+
+  it.each([
+    [
+      'a file above it',
+      { 'tests/a/helper': 'x\n' },
+      (t: ReturnType<typeof tested>) => {
+        rmSync(join(t.r.path, 'tests/a/helper'));
+        t.write('tests/a/helper/x.test.ts', 'it("b")\n');
+      },
+      'tests/a/helper/x.test.ts (the head has a file, folder or submodule there; remove it)',
+    ],
+    [
+      'a folder at it',
+      { 'tests/dir.test.ts/a.txt': 'x\n' },
+      (t: ReturnType<typeof tested>) => {
+        rmSync(join(t.r.path, 'tests/dir.test.ts'), { recursive: true });
+        t.write('tests/dir.test.ts', 'it("b")\n');
+      },
+      'tests/dir.test.ts (the head has a file, folder or submodule there; remove it)',
+    ],
+    [
+      'a submodule above it',
+      {},
+      (t: ReturnType<typeof tested>) => {
+        t.write('tests/sub/x.test.ts', 'it("b")\n');
+      },
+      'tests/sub (the head has a submodule there; remove what is in it)',
+    ],
+    [
+      'the same path in another letter case',
+      {},
+      (t: ReturnType<typeof tested>) => {
+        t.write('tests/Login.test.ts', 'it("b")\n');
+      },
+      'tests/Login.test.ts (the head has tests/login.test.ts, which a case-folding file system would overwrite; rename it)',
+    ],
+  ])(
+    'refuses an added test where the head has %s, naming it, never as its own error',
+    async (_n, files, make, why) => {
+      const t = issued('test', 5, { [EXISTING]: 'it("a")\n', ...files }, [EXISTING], (r) => {
+        mkdirSync(join(r.path, 'tests/sub'), { recursive: true });
+        r.git(['update-index', '--add', '--cacheinfo', `160000,${r.revParse('HEAD')},tests/sub`]);
+        r.git(['commit', '-q', '-m', 'sub']);
+      });
+      make(t);
+      const { block, reason } = await t.stop();
+      expect(block).toBe(true);
+      expect(reason).toContain(
+        `station verify output cannot be read: its output cannot be committed: ${why}`,
+      );
+      expect(t.ref(sessionRef(SESSION_ID))).toBe('');
+    },
+  );
+
+  it('refuses a folder or a test it cannot read, naming the way out', async () => {
+    const t = tested();
+    t.write(NEW, 'it("b")\n');
+    chmodSync(join(t.r.path, NEW), 0o000);
+    expect((await t.stop()).reason).toContain(
+      `${NEW} (cannot be read (EACCES): make it readable, or remove it)`,
+    );
+    chmodSync(join(t.r.path, NEW), 0o644);
+    mkdirSync(join(t.r.path, 'tests/locked'));
+    chmodSync(join(t.r.path, 'tests/locked'), 0o000);
+    try {
+      expect((await t.stop()).reason).toContain(
+        "the factory could not read tests/locked in its clone for Test's output (EACCES): make it readable, or remove it",
+      );
+    } finally {
+      chmodSync(join(t.r.path, 'tests/locked'), 0o755);
+    }
+  });
+
+  it("takes a head whose test files pass the command line's limit", async () => {
+    // About 2.5 MB of paths: on the command line, spawn fails with E2BIG.
+    const many = Object.fromEntries(
+      Array.from({ length: 12_000 }, (_, i) => [
+        `tests/${String(i).padStart(5, '0')}${'x'.repeat(190)}.test.ts`,
+        'it("a")\n',
+      ]),
+    );
+    const t = issued('test', 5, many, []);
+    t.passed();
+    t.write(NEW, 'it("b")\n');
+    expect(await t.stop()).toEqual({ block: false });
+    expect(
+      runGit(t.project, [
+        'diff-tree',
+        '--no-commit-id',
+        '--name-only',
+        '-r',
+        t.ref(passedRef(SESSION_ID)),
+      ]),
+    ).toBe(NEW);
+  }, 120_000);
 });
