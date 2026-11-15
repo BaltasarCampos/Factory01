@@ -214,7 +214,6 @@ describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", (
   });
 });
 
-/** Removes the feature folder the manifest commit left in the clone's working tree. */
 describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
   it("fails with its limit, never git's, when its git runs together pass it", async () => {
     const t = issued();
@@ -228,6 +227,10 @@ describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
     await expect(runStop(input, ctx, undefined, 1000)).rejects.toThrow(
       /^the Stop hook ran past its 1 s limit, so the factory could not check the session's output/,
     );
+    expect(t.events().at(-1)).toMatchObject({
+      kind: 'blocked',
+      input_summary: expect.stringMatching(/ran past its 1 s limit/) as string,
+    });
     // The second stop is never blocked, and logs the same reason.
     expect(await runStop({ ...input, stop_hook_active: true }, ctx, undefined, 1000)).toEqual({
       block: false,
@@ -271,6 +274,7 @@ describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
   }, 60_000);
 });
 
+/** Removes the feature folder the manifest commit left in the clone's working tree. */
 function rmFeature(t: ReturnType<typeof issued>) {
   execFileSync('rm', ['-rf', join(t.r.path, FEATURE)]);
 }
@@ -553,6 +557,7 @@ describe("Test's output: only new test files, and their snapshots (T086, 28-5b-3
       'e2e/x',
     ]);
     expect(walkRoots(['**/*.test.ts', 'tests/*.test.ts'])).toEqual(['']);
+    expect(walkRoots(['tests/@(a|b)/*.test.ts', 'e2e/+(x)/*.test.ts'])).toEqual(['tests', 'e2e']);
   });
 
   it.each([
@@ -605,6 +610,30 @@ describe("Test's output: only new test files, and their snapshots (T086, 28-5b-3
         `station verify output cannot be read: its output cannot be committed: ${why}`,
       );
       expect(t.ref(sessionRef(SESSION_ID))).toBe('');
+    },
+  );
+
+  it.each([
+    [
+      'a link',
+      (path: string) => {
+        symlinkSync(tempDir(), path);
+      },
+    ],
+    [
+      'not a folder',
+      (path: string) => {
+        writeFileSync(path, 'x\n');
+      },
+    ],
+  ])(
+    'refuses a walk root that is %s, where tests would vanish as none added',
+    async (what, make) => {
+      const t = issued('test', 5);
+      make(join(t.r.path, 'tests'));
+      expect((await t.stop()).reason).toContain(
+        `the factory could not read tests in its clone for Test's output (${what}): make it a folder, or remove it`,
+      );
     },
   );
 

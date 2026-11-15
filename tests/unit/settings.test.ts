@@ -84,16 +84,15 @@ describe('the generated settings (T082)', () => {
   });
 
   it("bounds every hook, so no tool call or stop keeps the stream silent past the launcher's SILENCE (T061, T086)", () => {
+    // Summed, as if they ran in turn: no probe recorded whether Claude Code runs them in parallel.
     const longest = (event: keyof Settings['hooks'], tool: string) =>
-      Math.max(
-        0,
-        ...settings.hooks[event]
-          .filter(
-            (g) =>
-              g.matcher === undefined || g.matcher === '*' || g.matcher.split('|').includes(tool),
-          )
-          .flatMap((g) => g.hooks.map((h) => h.timeout)),
-      );
+      settings.hooks[event]
+        .filter(
+          (g) =>
+            g.matcher === undefined || g.matcher === '*' || g.matcher.split('|').includes(tool),
+        )
+        .flatMap((g) => g.hooks.map((h) => h.timeout))
+        .reduce((sum, timeout) => sum + timeout, 0);
     for (const groups of Object.values(settings.hooks))
       for (const h of groups.flatMap((g) => g.hooks)) expect(h.timeout).toBeGreaterThan(0);
     // Each tool call: its PreToolUse hooks, the tool, then its PostToolUse hooks, in seconds.

@@ -111,7 +111,15 @@ async function stop(
   if (!again) {
     const session = sessionId(input.session_id);
     const record = readSessionRecord(home, session);
-    const reason = await check(checkers, record, home, session, ctx, false);
+    let reason: string | undefined;
+    try {
+      reason = await check(checkers, record, home, session, ctx, false);
+    } catch (err) {
+      // The factory's own failure blocks the stop too, and is logged as every block is.
+      const why = err instanceof Error ? err.message : String(err);
+      await logBlocked(record, home, session, { tool: 'Stop', input_summary: why }, ctx.now);
+      throw err;
+    }
     if (reason === undefined) return { block: false };
     const fields = { tool: 'Stop', input_summary: reason };
     const unlogged = await logBlocked(record, home, session, fields, ctx.now);

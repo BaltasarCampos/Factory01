@@ -194,14 +194,15 @@ const walk = (rel) => {
     if (stopped()) return;
   }
 };
-// A root is walked only when it, and every folder above it, is a folder, never a link.
+// A root is walked only when it, and every folder above it, is a folder: a link or a file refuses.
 const root = (path) => {
   let at = '';
   for (const part of path.split('/')) {
     at = at === '' ? part : at + '/' + part;
     let st;
     try { st = fs.lstatSync(clone + '/' + at); } catch (e) { return e.code === 'ENOENT' ? undefined : fail(at, e); }
-    if (!st.isDirectory()) return;
+    if (!st.isDirectory())
+      return void (out.failed = [at, st.isSymbolicLink() ? 'a link' : 'not a folder', 'make it a folder, or remove it']);
   }
   folder(path);
 };
@@ -324,7 +325,8 @@ function ownPaths(record: SessionRecord) {
 export function walkRoots(include: readonly string[] = TEST_CONFIG.include): string[] {
   const roots = include.map((pattern) => {
     const parts = pattern.split('/').slice(0, -1);
-    const glob = parts.findIndex((part) => /[*?[\]{}!]/.test(part));
+    // An extglob part, such as @(a|b), is a pattern, never a folder.
+    const glob = parts.findIndex((part) => /[*?[\]{}!()@+|]/.test(part));
     return parts.slice(0, glob < 0 ? parts.length : glob).join('/');
   });
   const inside = (r: string, o: string) => o !== r && (o === '' || r.startsWith(`${o}/`));
