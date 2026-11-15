@@ -229,7 +229,7 @@ Every station starts with a clean context and hands work on through files in the
 | Station | Reads | Writes |
 | --- | --- | --- |
 | 0 Define | Your pitch, the stack profile, the constitution's installed factory block | On `claude/define`: `.factory/brief.md`, the project part of `.specify/memory/constitution.md`, starter code, `.factory/define/`; seed issues |
-| 1 Intake | The issue, `brief.md` | Issue comments (first event entries), proposed `tier:` label |
+| 1 Intake | The issue, `brief.md` | Issue comments (its triage), proposed `tier:` label |
 | 2 Specify (`/speckit-specify`, `/speckit-clarify`) | The issue, `brief.md` | `specs/<issue>-<slug>/spec.md` and `checklists/requirements.md` |
 | 3 Plan (`/speckit-plan`, `/speckit-tasks`, `/speckit-analyze`) | `spec.md` | `plan.md`, `research.md`, `data-model.md`, `quickstart.md`, `contracts/` and `tasks.md`: tasks, each with its file list and tests |
 | 4 Build (`/speckit-implement`) | One task from `tasks.md`, the files it lists | Commits on the item's branch; the dispatcher ticks the task in `tasks.md` once CI's `build-test` passes on the pushed head, and a red one sends the task back to the Builder |
@@ -251,7 +251,7 @@ A small orchestrator script drives each work item through the stations; all stat
 - **Orchestrator:** the `factory` CLI. It picks the next ready issue by label and starts that item's current station as a Claude Code cloud session (`claude --cloud`) with the station's prompt; when the gate passes it moves the label on. The same logic runs in a daily cloud routine, so the line moves without the laptop.
 - **Work item store:** GitHub Issues plus a Project board; one issue per work item; `owner:`, `state:` and `tier:` labels (see Branches, labels and records).
 - **Artifact store:** the repository itself, in Spec Kit's layout: one feature folder per item, `specs/<issue>-<slug>/`, on the item's branch, holding `spec.md`, `plan.md`, `tasks.md` and `reports/` (the review, Security's report and Integrate's report; the review and Integrate's report are also posted as pull request comments).
-- **Event log:** append-only `events.jsonl` in the item's feature folder until merge, then lines under `.factory/events/` on `claude/factory-log`; Intake's entries start as issue comments. Untrusted telemetry: it feeds metrics and the Coach, never a retry count, merge or gate decision.
+- **Event log:** append-only `events.jsonl` in the item's feature folder until merge, then lines under `.factory/events/` on `claude/factory-log`; Intake's entries are kept on your laptop until the item's branch exists (see Branches). Untrusted telemetry: it feeds metrics and the Coach, never a retry count, merge or gate decision.
 - **Sandbox:** each cloud session's own isolated VM; GitHub credentials stay outside it, and network access uses the Trusted allowlist (package registries and common development hosts).
 - **Model access:** your Claude Pro plan; Sonnet as the main model with an Opus advisor (see Capacity); the plan's usage limits are the spending cap.
 - **Knowledge layer:** `CLAUDE.md`, the constitution (`.specify/memory/constitution.md`), Spec Kit templates in `.specify/templates/`, role instruction files and subagent definitions in `.claude/agents/`, architecture decision records in `/docs/adr`; cloud sessions pick these up from the cloned repo.
@@ -278,7 +278,7 @@ Every work item lives on one branch of its own from your approval to your merge,
 
 - **Created by the dispatcher, not an agent:** when you approve an item (`owner:approved`), the dispatcher creates its branch, and each station prompt names the feature folder `specs/<issue>-<slug>/`, taken from that signed branch name; the release's own Spec Kit commands write there and never create a branch of their own (see Tech stack).
 - **One item, one branch, one pull request:** a draft pull request opens at Specify; spec approval, CI, the verify and review reports and your merge all happen on it. Your merge brings the code and its whole trail into `main` together. The item stays under the size limit; bigger work is split by the Planner into more work items, never into several pull requests for one item.
-- **Before the branch exists:** Intake logs to the issue's comments; when the dispatcher creates the branch it copies those entries as the first lines of `events.jsonl`.
+- **Before the branch exists:** each time an Intake session ends, failed ones included, the dispatcher appends its checked log lines, or a line saying they could not be read, to `~/.factory/items/<owner>/<repo>/<issue>/events.jsonl` on your laptop, kept until the branch carrying them is pushed or the item is closed. Creating the branch, it writes that file's lines first in `events.jsonl`. With no such file the first line says Intake's events are not here; you get an alert only when the file records an Intake session whose lines are missing. Cloud mode's path is decided with T100.
 - **After the merge:** stations 7–8 write only to `claude/factory-log`. `factory merge` checks that branch's diff on your laptop (additions only, allowed paths only, regular text files only); a CI job reports the same early.
 - **Every merge is local and signed:** see Merging and verification on your laptop.
 
