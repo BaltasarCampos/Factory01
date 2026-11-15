@@ -32,7 +32,6 @@ import {
   sessionOutput,
   STOP_DEADLINE,
   UnreadableHead,
-  withDeadline,
   type SessionOutput,
 } from './session-commits.js';
 import {
@@ -45,6 +44,7 @@ import {
   type SessionRecord,
 } from './session.js';
 import { appendEvent } from '../events/append.js';
+import { withDeadline } from '../cli/deadline.js';
 
 export interface CheckResult {
   complete: boolean;

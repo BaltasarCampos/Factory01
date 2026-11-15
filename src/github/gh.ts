@@ -2,6 +2,7 @@
 // no token ever enters the factory's code. JSON output is parsed and then read through `Fields`,
 // which refuses any value of the wrong shape rather than guessing.
 import { execFile, type ExecFileException } from 'node:child_process';
+import { pastDeadline, timeLeft } from '../cli/deadline.js';
 import { EnvironmentError } from '../cli/env.js';
 import { REPO } from '../model/config.js';
 
@@ -45,13 +46,23 @@ export function gh(
   options: GhOptions & { json?: boolean } = {},
 ): Promise<unknown> {
   const env = { ...(options.env ?? process.env), GH_PROMPT_DISABLED: '1' };
+  // Inside the Stop hook, the time left before its deadline (T086).
+  let timeout: number | undefined;
+  try {
+    timeout = timeLeft();
+  } catch (err) {
+    return Promise.reject(err instanceof Error ? err : new Error(String(err)));
+  }
   return new Promise((resolve, reject) => {
     const child = execFile(
       'gh',
       args,
-      { env, cwd: options.cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8' },
+      { env, cwd: options.cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8', timeout },
       (err: ExecFileException | null, stdout: string, stderr: string) => {
-        if (err?.code === 'ENOENT') {
+        const over = err === null ? undefined : pastDeadline();
+        if (over !== undefined) {
+          reject(over);
+        } else if (err?.code === 'ENOENT') {
           reject(new EnvironmentError('`gh` not found on PATH; install it and try again'));
         } else if (err) {
           const code = typeof err.code === 'number' ? err.code : null;

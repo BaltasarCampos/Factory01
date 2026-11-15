@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import { dispatchOnce, type DispatchContext } from '../../src/dispatcher/dispatch.js';
@@ -20,6 +20,15 @@ import { makeRepo, mergeIntoMain, type Files, type TestRepo } from '../helpers/g
 import { makeKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
 import { recordSession, SESSION_ID } from '../helpers/session.js';
+import { untimed } from '../helpers/timed-spawns.js';
+
+// Every program a stop starts carries its deadline (slice 28-5c-2).
+vi.mock('node:child_process', async (real) =>
+  (await import('../helpers/timed-spawns.js')).timedSpawns(real),
+);
+afterEach(() => {
+  expect(untimed.splice(0)).toEqual([]);
+});
 
 const REPO = 'owner/project';
 const DEFINE = 'claude/define';

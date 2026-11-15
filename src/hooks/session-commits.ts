@@ -15,6 +15,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readdirSync } from 'node:fs';
 import { renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { probeBwrap, sandboxArgs } from '../ci/sandbox.js';
+import { pastDeadline, timeLeft } from '../cli/deadline.js';
 import { EnvironmentError } from '../cli/env.js';
 import { safeGit } from '../git/diff.js';
 import { visible } from '../notify/summary.js';
@@ -37,36 +38,9 @@ export interface SessionOutput {
 const GIT_TIMEOUT = 120_000;
 /**
  * The Stop hook's own limit, in ms, under its hook timeout (`HOOK_TIMEOUTS.stop`), so it ends with
- * its reason before Claude Code stops it: no git run of the stop outlasts it (slice 28-5c-1).
+ * its reason before Claude Code stops it: no program the stop starts outlasts it (slice 28-5c-1).
  */
 export const STOP_DEADLINE = 540_000;
-let deadline: { at: number; ms: number } | undefined;
-
-/** `run` with every git run in it bounded, all together, by `ms`. */
-export async function withDeadline<T>(ms: number, run: () => Promise<T>): Promise<T> {
-  const before = deadline;
-  deadline = { at: Date.now() + ms, ms };
-  try {
-    return await run();
-  } finally {
-    deadline = before;
-  }
-}
-
-/** The deadline's refusal, once it has passed; else none. */
-function past(): EnvironmentError | undefined {
-  if (deadline === undefined || Date.now() < deadline.at) return undefined;
-  return new EnvironmentError(
-    `the Stop hook ran past its ${String(deadline.ms / 1000)} s limit, so the factory could not check the session's output: the factory's own limit, which this session cannot fix`,
-  );
-}
-
-/** A git run's limit: `GIT_TIMEOUT`, or the time left before the deadline when that is less. */
-function bound(): number {
-  const over = past();
-  if (over !== undefined) throw over;
-  return deadline === undefined ? GIT_TIMEOUT : Math.min(GIT_TIMEOUT, deadline.at - Date.now());
-}
 /** The largest pack of new objects a session may add; the factory holds it in memory. */
 export const MAX_PACK = 64 * 1024 * 1024;
 const OID = /^[0-9a-f]{40}$/;
@@ -121,13 +95,13 @@ export function inBox(
   );
   const result = spawnSync('bwrap', [...argv, ...command], {
     env: outer,
-    timeout: bound(),
+    timeout: timeLeft(GIT_TIMEOUT),
     killSignal: 'SIGKILL',
     maxBuffer: limit,
     ...(io.input === undefined ? {} : { input: io.input }),
   });
   const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
-  const over = past();
+  const over = pastDeadline();
   if (over !== undefined) throw over;
   if (code === 'ENOBUFS')
     throw new UnreadableHead(
@@ -182,10 +156,10 @@ export function own(
 ) {
   let result: ReturnType<typeof safeGit>;
   try {
-    result = safeGit(repo, args, env, input, undefined, { timeout: bound(), ...more });
+    result = safeGit(repo, args, env, input, undefined, { timeout: GIT_TIMEOUT, ...more });
   } catch (err) {
     throw (
-      past() ??
+      pastDeadline() ??
       new EnvironmentError(`git ${args[0] ?? ''} in ${repo} did not finish: ${String(err)}`)
     );
   }

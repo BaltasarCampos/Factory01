@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatcherMessage } from '../../src/dispatcher/branch.js';
 import { runStop } from '../../src/hooks/stop.js';
 import { buildStopCheck } from '../../src/stations/checks/build.js';
@@ -9,7 +9,16 @@ import { checkPlan } from '../../src/stations/checks/plan.js';
 import { parseAnswers } from '../../src/stations/checks/questions.js';
 import { checkSpec, criterionLines, specStopCheck } from '../../src/stations/checks/spec.js';
 import { makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
+import { untimed } from '../helpers/timed-spawns.js';
 import { dispatcherClone, recordSession, SESSION_ID } from '../helpers/session.js';
+
+// Every program a stop starts carries its deadline (slice 28-5c-2).
+vi.mock('node:child_process', async (real) =>
+  (await import('../helpers/timed-spawns.js')).timedSpawns(real),
+);
+afterEach(() => {
+  expect(untimed.splice(0)).toEqual([]);
+});
 
 const FOLDER = 'specs/42-add-login';
 /** What the Stop hook hands a station check: the session's head, here in the repository itself. */

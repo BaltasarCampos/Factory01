@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hookOutput, readOutput, walkClone, walkRoots } from '../../src/hooks/output-commit.js';
 import { passedRef, sessionRef, UnreadableHead } from '../../src/hooks/session-commits.js';
 import { passedPath, readSessionRecord } from '../../src/hooks/session.js';
@@ -22,6 +22,15 @@ import { visible } from '../../src/notify/summary.js';
 import { makeRepo, runGit } from '../helpers/git-repo.js';
 import { tempDir } from '../helpers/keys.js';
 import { dispatcherClone, recordSession, SESSION_ID } from '../helpers/session.js';
+import { timed, untimed } from '../helpers/timed-spawns.js';
+
+// Every program a stop starts carries its deadline (slice 28-5c-2).
+vi.mock('node:child_process', async (real) =>
+  (await import('../helpers/timed-spawns.js')).timedSpawns(real),
+);
+afterEach(() => {
+  expect(untimed.splice(0)).toEqual([]);
+});
 
 const FEATURE = 'specs/42-add-login';
 const BRANCH = 'claude/42-add-login';
@@ -225,6 +234,40 @@ describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
     });
     expect(t.events().at(-1)?.input_summary).toMatch(/ran past its 1 s limit/);
     expect(await runStop(input, { ...ctx, env: t.env })).toEqual({ block: false });
+  }, 60_000);
+
+  it("bounds every program a stop starts, Intake's gh included, and stops a slow gh at the deadline", async () => {
+    timed.splice(0);
+    const t = tested();
+    t.write(NEW, 'it("b")\n');
+    await t.stop();
+    expect(timed).toEqual(expect.arrayContaining(['spawnSync bwrap', 'spawnSync git']));
+    const bin = tempDir('gh-');
+    const r = makeRepo({ files: { '.factory/config': CONFIG } });
+    const { env } = recordSession({
+      role: 'intake',
+      station: 1,
+      clone: r.path,
+      head: r.revParse('HEAD'),
+    });
+    const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
+    const stop = (wait: number, limit?: number) => {
+      writeFileSync(
+        join(bin, 'gh'),
+        `#!/bin/sh\nsleep ${String(wait)}\necho '{"number":42,"state":"OPEN","labels":[],"comments":[]}'\n`,
+        {
+          mode: 0o755,
+        },
+      );
+      // Intake's check runs gh with the process's own environment.
+      vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
+      const ctx = { cwd: r.path, now: () => new Date(), env };
+      return runStop(input, ctx, undefined, limit).finally(() => vi.unstubAllEnvs());
+    };
+    timed.splice(0);
+    expect((await stop(0)).block).toBe(true);
+    expect(timed).toContain('execFile gh');
+    await expect(stop(3, 1000)).rejects.toThrow(/^the Stop hook ran past its 1 s limit/);
   }, 60_000);
 });
 
