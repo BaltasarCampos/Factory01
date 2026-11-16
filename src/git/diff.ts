@@ -9,6 +9,7 @@
 // Nor may the user's git settings: every call runs without the global and system config, with
 // an explicit algorithm, context and no colour, so the laptop and CI see the same lines.
 import { spawnSync } from 'node:child_process';
+import { pastDeadline, timeLeft } from '../cli/deadline.js';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
@@ -63,6 +64,8 @@ export function safeGit(
   const clean = Object.fromEntries(
     Object.entries(env).filter(([name]) => !name.startsWith('GIT_')),
   );
+  // Inside the Stop hook, the time left before its deadline (T086).
+  const timeout = timeLeft(more.timeout);
   const result = spawnSync(
     'git',
     [
@@ -82,12 +85,10 @@ export function safeGit(
       },
       maxBuffer: 1024 * 1024 * 1024,
       ...(input === undefined ? {} : { input }),
-      ...(more.timeout === undefined
-        ? {}
-        : { timeout: more.timeout, killSignal: 'SIGKILL' as const }),
+      ...(timeout === undefined ? {} : { timeout, killSignal: 'SIGKILL' as const }),
     },
   );
-  if (result.error !== undefined) throw result.error;
+  if (result.error !== undefined) throw pastDeadline() ?? result.error;
   return { status: result.status, stdout: result.stdout, stderr: result.stderr.toString().trim() };
 }
 

@@ -2821,6 +2821,13 @@ describe('LocalLauncher availability: main against the pinned release', () => {
       },
       REPIN,
     ],
+    [
+      'a hook that differs only in its timeout',
+      (h: Hooks) => {
+        for (const hook of h.Stop?.flatMap((group) => group.hooks) ?? []) hook.timeout = 60;
+      },
+      REPIN,
+    ],
     ['a hook of another event', (h: Hooks) => (h.Notification = shell('notify-send x')), REPIN],
     ['no Stop hook', (h: Hooks) => (h.Stop = []), HOOKS],
     ['a hook the factory does not serve', (h: Hooks) => (h.Stop = served('nope')), AGREE],

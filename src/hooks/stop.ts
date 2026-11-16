@@ -32,7 +32,6 @@ import {
   sessionOutput,
   STOP_DEADLINE,
   UnreadableHead,
-  withDeadline,
   type SessionOutput,
 } from './session-commits.js';
 import {
@@ -45,6 +44,7 @@ import {
   type SessionRecord,
 } from './session.js';
 import { appendEvent } from '../events/append.js';
+import { withDeadline } from '../cli/deadline.js';
 
 export interface CheckResult {
   complete: boolean;
@@ -111,7 +111,15 @@ async function stop(
   if (!again) {
     const session = sessionId(input.session_id);
     const record = readSessionRecord(home, session);
-    const reason = await check(checkers, record, home, session, ctx, false);
+    let reason: string | undefined;
+    try {
+      reason = await check(checkers, record, home, session, ctx, false);
+    } catch (err) {
+      // The factory's own failure blocks the stop too, and is logged as every block is.
+      const why = err instanceof Error ? err.message : String(err);
+      await logBlocked(record, home, session, { tool: 'Stop', input_summary: why }, ctx.now);
+      throw err;
+    }
     if (reason === undefined) return { block: false };
     const fields = { tool: 'Stop', input_summary: reason };
     const unlogged = await logBlocked(record, home, session, fields, ctx.now);
@@ -202,7 +210,8 @@ async function check(
     return `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
   // Passed: the head is recorded only for a session whose start passed, and only once read.
   if (output !== undefined && hasPassed(home, session))
-    ownOk(output.repo, ['update-ref', passedRef(session), output.commit], env);
+    // Removed before the output was read: a ref there now is another hook's.
+    ownOk(output.repo, ['update-ref', passedRef(session), output.commit, ''], env);
   return undefined;
 }
 
@@ -214,7 +223,7 @@ function clearPassed(repo: string, session: string, env: NodeJS.ProcessEnv) {
   const ref = passedRef(session);
   const found = own(repo, ['rev-parse', '--verify', '-q', ref], env);
   if (found.status === 1) return;
-  const failed = found.status === 0 ? own(repo, ['update-ref', '-d', ref], env) : found;
+  const failed = found.status === 0 ? own(repo, ['update-ref', '-d', ref, found.out], env) : found;
   if (failed.status !== 0)
     throw new EnvironmentError(
       `the factory could not remove its passing head ${ref} in ${repo}, which this session cannot fix: ${failed.err}`,

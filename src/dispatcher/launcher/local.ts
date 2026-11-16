@@ -1232,16 +1232,34 @@ const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [val
 
 /**
  * The events each hook may be registered under, from the installed factory's own settings, which
- * every session's `--settings` file carries: `stop` under `PreToolUse` would block every call.
+ * every session's `--settings` file carries: `stop` under `PreToolUse` would block every call. With
+ * each, the whole entry, its group's matcher included, as `entry` writes it.
  */
-function hookEvents(): Map<string, Set<string>> {
+function hookEvents(): Map<string, Map<string, Record<string, unknown>>> {
   const { hooks } = JSON.parse(factoryFile('settings/settings.json')) as Settings;
-  const events = new Map<string, Set<string>>();
+  const events = new Map<string, Map<string, Record<string, unknown>>>();
   for (const [event, groups] of Object.entries(hooks))
-    for (const { args } of groups.flatMap((group) => group.hooks))
-      events.set(args[1] ?? '', new Set([...(events.get(args[1] ?? '') ?? []), event]));
+    for (const group of groups)
+      for (const one of group.hooks) {
+        const name = one.args[1] ?? '';
+        const at = events.get(name) ?? new Map<string, Record<string, unknown>>();
+        events.set(name, at.set(event, entry(group, one)));
+      }
   return events;
 }
+
+/** A hook entry with its group's matcher, every key, so a field a later release adds is seen. */
+const entry = (group: unknown, one: unknown): Record<string, unknown> => ({
+  ...(one as Record<string, unknown>),
+  matcher: (group as { matcher?: unknown } | null)?.matcher ?? null,
+});
+/** JSON with its keys sorted, so two entries compare as values. */
+const sorted = (value: unknown): string =>
+  JSON.stringify(value, (_key, v: unknown) =>
+    typeof v === 'object' && v !== null && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => a.localeCompare(b)))
+      : v,
+  );
 
 /**
  * Why settings do not install the factory's hooks: every event registered, every hook `factory
@@ -1277,15 +1295,26 @@ function hookProblem(settings: Buffer | undefined): Problem | undefined {
           return agree(
             `registers the ${event} hook factory hook ${visible(args[1])}, which the installed factory does not serve`,
           );
-        const served = events.get(args[1]) ?? new Set<string>();
-        if (!served.has(event))
+        const served = events.get(args[1]) ?? new Map<string, Record<string, unknown>>();
+        const theirs = served.get(event);
+        if (theirs === undefined)
           return agree(
-            `registers factory hook ${args[1]} under ${visible(event)}; the installed factory serves it under ${[...served].join(', ') || 'no event'}`,
+            `registers factory hook ${args[1]} under ${visible(event)}; the installed factory serves it under ${[...served.keys()].join(', ') || 'no event'}`,
           );
         if (GUARD_EVENTS.has(event) && (one as { onFailure?: unknown }).onFailure !== 'block')
           return repin(
             `registers the ${event} guard factory hook ${visible(args[1])} without onFailure: "block"`,
           );
+        // Whole, not field by field: a session given both registrations may run both (T125's S7a
+        // showed only that identical hooks run once).
+        const mine = entry(group, one);
+        if (sorted(mine) !== sorted(theirs)) {
+          const keys = [...new Set([...Object.keys(mine), ...Object.keys(theirs)])].sort();
+          const differ = keys.filter((k) => sorted(mine[k]) !== sorted(theirs[k]));
+          return repin(
+            `registers the ${event} hook factory hook ${args[1]} unlike the installed factory's, in ${visible(differ.join(', '))}`,
+          );
+        }
       }
   return undefined;
 }

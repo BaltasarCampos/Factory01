@@ -76,13 +76,20 @@ export const HOOK_TIMEOUTS: Readonly<Record<string, number>> = {
   'pre-compact': 30,
 };
 
+/** A hook's timeout; a hook with none is the factory's own error, never a default. */
+function timeoutOf(name: string): number {
+  const seconds = HOOK_TIMEOUTS[name];
+  if (seconds === undefined) throw new RefusedError(`factory hook ${name} has no timeout`);
+  return seconds;
+}
+
 /** `factory hook <name>`, blocking the action when it cannot run if `guard` is set. */
 const hook = (name: string, guard: boolean, matcher?: string): HookGroup => ({
   ...(matcher === undefined ? {} : { matcher }),
   hooks: [
     {
       ...{ type: 'command', command: 'factory', args: ['hook', name] },
-      timeout: HOOK_TIMEOUTS[name] ?? 30,
+      timeout: timeoutOf(name),
       ...(guard ? { onFailure: 'block' } : {}),
     },
   ],
