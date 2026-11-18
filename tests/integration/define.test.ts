@@ -20,15 +20,13 @@ import { makeRepo, mergeIntoMain, type Files, type TestRepo } from '../helpers/g
 import { makeKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
 import { recordSession, SESSION_ID } from '../helpers/session.js';
-import { untimed } from '../helpers/timed-spawns.js';
+import { checkSpawns, stopRow } from '../helpers/timed-spawns.js';
 
 // Every program a stop starts carries its deadline (slice 28-5c-2).
 vi.mock('node:child_process', async (real) =>
   (await import('../helpers/timed-spawns.js')).timedSpawns(real),
 );
-afterEach(() => {
-  expect(untimed.splice(0)).toEqual([]);
-});
+afterEach(checkSpawns);
 
 const REPO = 'owner/project';
 const DEFINE = 'claude/define';
@@ -269,10 +267,10 @@ describe('Define output check: questions first (AC-004, AC-056)', { timeout: 60_
       now: () => new Date(),
       env: recordSession({ ...record, ...issued }).env,
     };
-    expect(await runStop(input, ctx)).toEqual({ block: false });
+    expect(await stopRow(runStop(input, ctx))).toEqual({ block: false });
     output(r);
     r.push(DEFINE);
-    expect(await runStop(input, ctx)).toEqual({
+    expect(await stopRow(runStop(input, ctx))).toEqual({
       block: true,
       reason: expect.stringMatching(/before the Owner's answers/) as string,
     });

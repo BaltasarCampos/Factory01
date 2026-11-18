@@ -9,7 +9,7 @@
 // Nor may the user's git settings: every call runs without the global and system config, with
 // an explicit algorithm, context and no colour, so the laptop and CI see the same lines.
 import { spawnSync } from 'node:child_process';
-import { pastDeadline, timeLeft } from '../cli/deadline.js';
+import { deadlineActive, pastDeadline, timeLeft } from '../cli/deadline.js';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
@@ -53,6 +53,9 @@ const GITLINK = '160000';
  * index file the factory made, set after the drop. `more` adds a timeout, past which git is
  * killed with SIGKILL, and variables set after the drop, such as a quarantine's object folders.
  */
+/** The most one git run may take inside the Stop hook, in ms (T086). */
+export const GIT_TIMEOUT = 120_000;
+
 export function safeGit(
   repo: string,
   args: readonly string[],
@@ -64,8 +67,9 @@ export function safeGit(
   const clean = Object.fromEntries(
     Object.entries(env).filter(([name]) => !name.startsWith('GIT_')),
   );
-  // Inside the Stop hook, the time left before its deadline (T086).
-  const timeout = timeLeft(more.timeout);
+  // Inside the Stop hook, the time left before its deadline, and never more than GIT_TIMEOUT
+  // for one git run, whoever calls it (T086).
+  const timeout = timeLeft(more.timeout ?? (deadlineActive() ? GIT_TIMEOUT : undefined));
   const result = spawnSync(
     'git',
     [

@@ -2,23 +2,23 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { withDeadline } from '../../src/cli/deadline.js';
 import { dispatcherMessage } from '../../src/dispatcher/branch.js';
+import { GIT_TIMEOUT, safeGit } from '../../src/git/diff.js';
 import { runStop } from '../../src/hooks/stop.js';
 import { buildStopCheck } from '../../src/stations/checks/build.js';
 import { checkPlan } from '../../src/stations/checks/plan.js';
 import { parseAnswers } from '../../src/stations/checks/questions.js';
 import { checkSpec, criterionLines, specStopCheck } from '../../src/stations/checks/spec.js';
 import { makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
-import { untimed } from '../helpers/timed-spawns.js';
+import { checkSpawns, stopRow, timed, timeouts } from '../helpers/timed-spawns.js';
 import { dispatcherClone, recordSession, SESSION_ID } from '../helpers/session.js';
 
 // Every program a stop starts carries its deadline (slice 28-5c-2).
 vi.mock('node:child_process', async (real) =>
   (await import('../helpers/timed-spawns.js')).timedSpawns(real),
 );
-afterEach(() => {
-  expect(untimed.splice(0)).toEqual([]);
-});
+afterEach(checkSpawns);
 
 const FOLDER = 'specs/42-add-login';
 /** What the Stop hook hands a station check: the session's head, here in the repository itself. */
@@ -107,6 +107,29 @@ const TASKS = `# Tasks: Add login
 const why = (missing: string[] | undefined) => (missing ?? []).join('\n');
 const drop = (text: string, heading: string) =>
   text.replace(new RegExp(`## ${heading} \\*\\(mandatory\\)\\*\\n\\n[^\\n]+\\n\\n`), '');
+
+describe('the deadline on git inside a stop (T086, 28-5c-3a)', () => {
+  it('caps a git run with no timeout of its own at GIT_TIMEOUT, under a longer deadline', async () => {
+    const r = makeRepo({ files: { 'a.txt': 'a\n' } });
+    await withDeadline(GIT_TIMEOUT * 4, () =>
+      Promise.resolve(safeGit(r.path, ['rev-parse', 'HEAD'], process.env)),
+    );
+    expect(timed).toEqual(['spawnSync git']);
+    expect(timeouts[0]).toBeLessThanOrEqual(GIT_TIMEOUT);
+  });
+
+  it('refuses to start a program once no time is left, which never runs', async () => {
+    const r = makeRepo({ files: { 'a.txt': 'a\n' } });
+    const head = r.revParse('HEAD');
+    const run = withDeadline(1, async () => {
+      await new Promise((done) => setTimeout(done, 20));
+      return safeGit(r.path, ['update-ref', 'refs/never', head], process.env);
+    });
+    await expect(run).rejects.toThrow(/^the Stop hook ran past its 0.001 s limit/);
+    expect(timed).toEqual([]);
+    expect(r.git(['for-each-ref', 'refs/never'])).toBe('');
+  });
+});
 
 describe('Specify output check (AC-010)', () => {
   it('AC-010: a spec with problem, testable ACs, non-goals and affected areas is complete', () => {
@@ -458,7 +481,7 @@ describe('factory hook stop runs the Specify, Plan and Verify checks (AC-063)', 
     }
     const { env } = recordSession({ role: agent, station, clone: r.path, head });
     const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
-    return { r, stop: () => runStop(input, { cwd: r.path, now: () => new Date(), env }) };
+    return { r, stop: () => stopRow(runStop(input, { cwd: r.path, now: () => new Date(), env })) };
   }
 
   it('AC-063: Specify may stop once it has written a complete spec.md, which the factory commits', async () => {
@@ -564,7 +587,7 @@ describe("Build's stop check for a task session (T174)", () => {
     const { env } = recordSession({ ...record, project: dispatcherClone(r) });
     const input = { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop' };
 
-    expect(await runStop(input, { cwd: r.path, now: () => new Date(), env })).toEqual({
+    expect(await stopRow(runStop(input, { cwd: r.path, now: () => new Date(), env }))).toEqual({
       block: false,
     });
   });

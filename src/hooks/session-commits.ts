@@ -17,7 +17,7 @@ import { join, resolve } from 'node:path';
 import { probeBwrap, sandboxArgs } from '../ci/sandbox.js';
 import { pastDeadline, timeLeft } from '../cli/deadline.js';
 import { EnvironmentError } from '../cli/env.js';
-import { safeGit } from '../git/diff.js';
+import { GIT_TIMEOUT, safeGit } from '../git/diff.js';
 import { visible } from '../notify/summary.js';
 import { sessionFolder, type SessionRecord } from './session.js';
 
@@ -34,8 +34,6 @@ export interface SessionOutput {
   branch: string;
 }
 
-/** Each git run, in the sandbox or the factory's own, killed with SIGKILL past it. */
-const GIT_TIMEOUT = 120_000;
 /**
  * The Stop hook's own limit, in ms, under its hook timeout (`HOOK_TIMEOUTS.stop`), so it ends with
  * its reason before Claude Code stops it: no program the stop starts outlasts it (slice 28-5c-1).
@@ -188,7 +186,24 @@ export function swapRef(repo: string, ref: string, to: string, env: NodeJS.Proce
   const now = own(repo, ['rev-parse', '--verify', '-q', ref], env);
   if (now.status !== 0 && now.status !== 1)
     throw new EnvironmentError(`git rev-parse in ${repo} failed: ${now.err}`);
-  ownOk(repo, ['update-ref', ref, to, now.status === 0 ? now.out : ''], env);
+  writeRef(repo, ref, ['update-ref', ref, to, now.status === 0 ? now.out : ''], env);
+}
+
+/**
+ * A compare-and-swap ref write, `update-ref` with the old value: its failure is a lost race, which
+ * names the way out (T086).
+ */
+export function writeRef(
+  repo: string,
+  ref: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+) {
+  const result = own(repo, args, env);
+  if (result.status !== 0)
+    throw new EnvironmentError(
+      `another run of the Stop hook wrote ${ref} at the same time: the factory's own error, which this session cannot fix; check that the pin registers each hook once (git: ${visible(result.err)})`,
+    );
 }
 
 /** Moves a file into `folder`, by rename, or by copy and rename across filesystems. */

@@ -57,7 +57,15 @@ export function gh(
     const child = execFile(
       'gh',
       args,
-      { env, cwd: options.cwd, maxBuffer: MAX_BUFFER, encoding: 'utf8', timeout },
+      // SIGKILL: a gh, or a wrapper on PATH, that ignores SIGTERM would outlast the deadline.
+      {
+        env,
+        cwd: options.cwd,
+        maxBuffer: MAX_BUFFER,
+        encoding: 'utf8',
+        timeout,
+        killSignal: 'SIGKILL',
+      },
       (err: ExecFileException | null, stdout: string, stderr: string) => {
         const over = err === null ? undefined : pastDeadline();
         if (over !== undefined) {

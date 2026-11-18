@@ -16,21 +16,19 @@ import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { hookOutput, readOutput, walkClone, walkRoots } from '../../src/hooks/output-commit.js';
 import { passedRef, sessionRef, UnreadableHead } from '../../src/hooks/session-commits.js';
-import { passedPath, readSessionRecord } from '../../src/hooks/session.js';
+import { passedPath, readSessionRecord, sessionEvents } from '../../src/hooks/session.js';
 import { runStop } from '../../src/hooks/stop.js';
 import { visible } from '../../src/notify/summary.js';
 import { makeRepo, runGit } from '../helpers/git-repo.js';
 import { tempDir } from '../helpers/keys.js';
 import { dispatcherClone, recordSession, SESSION_ID } from '../helpers/session.js';
-import { timed, untimed } from '../helpers/timed-spawns.js';
+import { checkSpawns, timed } from '../helpers/timed-spawns.js';
 
 // Every program a stop starts carries its deadline (slice 28-5c-2).
 vi.mock('node:child_process', async (real) =>
   (await import('../helpers/timed-spawns.js')).timedSpawns(real),
 );
-afterEach(() => {
-  expect(untimed.splice(0)).toEqual([]);
-});
+afterEach(checkSpawns);
 
 const FEATURE = 'specs/42-add-login';
 const BRANCH = 'claude/42-add-login';
@@ -271,6 +269,15 @@ describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
     expect((await stop(0)).block).toBe(true);
     expect(timed).toContain('execFile gh');
     await expect(stop(3, 1000)).rejects.toThrow(/^the Stop hook ran past its 1 s limit/);
+    // A gh that ignores SIGTERM is killed at the deadline all the same.
+    writeFileSync(join(bin, 'gh'), "#!/bin/sh\ntrap '' TERM\nsleep 30\n", { mode: 0o755 });
+    vi.stubEnv('PATH', `${bin}:${process.env.PATH ?? ''}`);
+    const started = Date.now();
+    const ctx = { cwd: r.path, now: () => new Date(), env };
+    await expect(
+      runStop(input, ctx, undefined, 1000).finally(() => vi.unstubAllEnvs()),
+    ).rejects.toThrow(/^the Stop hook ran past its 1 s limit/);
+    expect(Date.now() - started).toBeLessThan(5000);
   }, 60_000);
 });
 
@@ -293,11 +300,43 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
       const env = { ...t.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
       const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
       await expect(runStop(input, { cwd: t.r.path, now: () => new Date(), env })).rejects.toThrow(
-        /git update-ref .* failed: .*(already exists|but expected)/,
+        /^another run of the Stop hook wrote .* at the same time: the factory's own error, which this session cannot fix; check that the pin registers each hook once \(git: .*(already exists|but expected)/,
       );
       expect(t.ref(ref)).toBe(t.head);
     },
   );
+
+  it('fails, never removing it, when another hook moves the passing head before its removal', async () => {
+    const t = issued();
+    t.passed();
+    t.write(REPORT, VERIFY);
+    expect(await t.stop()).toEqual({ block: false });
+    const ref = passedRef(SESSION_ID);
+    expect(t.ref(ref)).not.toBe(t.head);
+    const bin = tempDir('racing-git-');
+    const git = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+    const race = `case " $* " in *" update-ref -d ${ref} "*) ${git} update-ref ${ref} ${t.head};; esac`;
+    writeFileSync(join(bin, 'git'), `#!/bin/sh\n${race}\nexec ${git} "$@"\n`, { mode: 0o755 });
+    const env = { ...t.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
+    const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
+    await expect(runStop(input, { cwd: t.r.path, now: () => new Date(), env })).rejects.toThrow(
+      /^another run of the Stop hook wrote refs\/.* at the same time: .*check that the pin registers each hook once/,
+    );
+    expect(t.ref(ref)).toBe(t.head);
+  });
+
+  it("keeps the note that the blocked event was not written on the factory's own error", async () => {
+    const t = issued();
+    t.write(REPORT, VERIFY);
+    const log = sessionEvents(t.home, SESSION_ID);
+    rmSync(log, { force: true });
+    mkdirSync(log, { recursive: true });
+    const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
+    const ctx = { cwd: t.r.path, now: () => new Date(), env: t.env };
+    await expect(runStop(input, ctx, { 5: () => ({ complete: true }) })).rejects.toThrow(
+      /passed without reading the session's output.* \(the blocked event was not written: /,
+    );
+  });
 
   it('records the passing head only for a session whose start passed, and never for a failing check', async () => {
     const t = issued();

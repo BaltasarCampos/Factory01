@@ -2112,6 +2112,8 @@ export class LocalLauncher implements LocalSessionLauncher {
       ...{ FACTORY_ROLE: request.role, FACTORY_SESSION: id },
       ...(token === undefined ? {} : { GH_TOKEN: token }),
       ...(NO_ADVISOR.has(request.role) ? { CLAUDE_CODE_DISABLE_ADVISOR_TOOL: '1' } : {}),
+      // No auto memory, beside the settings' autoMemoryEnabled: false.
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       // Home is unreadable to sandboxed shells (T183): their temporary files and npm's cache here.
       ...{ TMPDIR: tmp, CLAUDE_CODE_TMPDIR: tmp, npm_config_cache: join(tmp, 'npm') },
       // No script runs and npx installs nothing; the command guard refuses the flags that beat these.
