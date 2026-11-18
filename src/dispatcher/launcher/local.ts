@@ -747,9 +747,10 @@ function namesIn(dir: string, match: RegExp, exact: readonly string[]): string[]
 /**
  * The memory files Claude Code would load from every folder above `clone`, up to `/`: each one's
  * `CLAUDE.md` and `CLAUDE.local.md`, and those and `rules/` in its `.claude` but home's,
- * which the per-session settings' `claudeMdExcludes` keep out (T061).
+ * which the per-session settings' `claudeMdExcludes` keep out (T061). A test's `stop` ends the
+ * walk after that folder, so nothing above the test's own tree decides the row.
  */
-function memoryAbove(clone: string, home: string): string[] {
+function memoryAbove(clone: string, home: string, stop?: string): string[] {
   const found: string[] = [];
   for (let dir = dirname(clone); ; dir = dirname(dir)) {
     found.push(...namesIn(dir, MEMORY, ['CLAUDE.md', 'CLAUDE.local.md']).map((n) => join(dir, n)));
@@ -760,7 +761,7 @@ function memoryAbove(clone: string, home: string): string[] {
           join(claude, n),
         ),
       );
-    if (dir === '/') return found;
+    if (dir === '/' || dir === stop) return found;
   }
 }
 
@@ -1379,6 +1380,13 @@ export interface LocalOptions {
   heartbeat?: number;
   /** The clone's install; tests give their own, so no row needs bwrap or pasta. */
   install?: Installer;
+  /**
+   * For tests only: the folder, a test's own, after which the walk for memory files above the
+   * clone ends, so a CLAUDE.md above the test's tree (the repository's own) decides no row. The
+   * factory never sets it, from config, environment or files: production walks to `/`, and
+   * `defaultLaunchers` is tested to leave it unset.
+   */
+  memoryStop?: string;
 }
 
 export class LocalLauncher implements LocalSessionLauncher {
@@ -1630,7 +1638,11 @@ export class LocalLauncher implements LocalSessionLauncher {
       });
       // Claude Code loads these from every folder above where it runs, whatever the settings say.
       const memory = step('reading the folders above the clone', () =>
-        memoryAbove(cwd, realpathSync(this.options.home)),
+        memoryAbove(
+          cwd,
+          realpathSync(this.options.home),
+          this.options.memoryStop === undefined ? undefined : realpathSync(this.options.memoryStop),
+        ),
       );
       if (memory.length > 0)
         throw new LaunchRefused(

@@ -153,6 +153,8 @@ function setup(options: Setup = {}) {
         return Promise.resolve(sessionRun(args, sessionStream(args, change), options));
       },
       sessionId: () => SESSION_ID,
+      // Nothing above the test's own home, such as the repository's CLAUDE.md, decides a row.
+      memoryStop: home,
     });
   const cli = async (
     argv: string[],
