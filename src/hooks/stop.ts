@@ -24,7 +24,7 @@ import { securityStopCheck } from '../stations/checks/security.js';
 import { specStopCheck } from '../stations/checks/spec.js';
 import { verifyStopCheck } from '../stations/checks/verify.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
-import { commitEvents } from './events-commit.js';
+import { belowLogs, commitEvents, LogNotFile } from './events-commit.js';
 import { HOOK_COMMITS, hookOutput, type Outside } from './output-commit.js';
 import {
   passedRef,
@@ -45,7 +45,7 @@ import {
   type SessionRecord,
 } from './session.js';
 import { appendEvent } from '../events/append.js';
-import { withDeadline } from '../cli/deadline.js';
+import { pastDeadline, withDeadline } from '../cli/deadline.js';
 
 export interface CheckResult {
   complete: boolean;
@@ -210,6 +210,14 @@ async function check(
       await appendEvent(sessionEvents(home, session), event, ctx.now);
     }
   }
+  // A path below an event log makes it a folder, which no events commit can append to.
+  const below = output === undefined ? [] : belowLogs(output, env);
+  if (below.length > 0) {
+    const shown =
+      below.slice(0, 10).join(', ') +
+      (below.length > 10 ? `, and ${String(below.length - 10)} more` : '');
+    return `${shown}: below an event log, which only the factory appends to; remove them in a new commit`;
+  }
   if (!result.complete)
     return `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
   // Passed: the head is recorded only for a session whose start passed, and only once read.
@@ -218,10 +226,16 @@ async function check(
     // passing head, and an alert says why.
     let events: string;
     try {
-      events = commitEvents(record, home, session, output.commit, env);
+      events = commitEvents(record, home, session, output.commit, env, ctx.now);
     } catch (err) {
+      // Past the deadline the first stop blocks, so that the second checks again.
+      const over = pastDeadline();
+      if (over !== undefined) throw over;
       const why = err instanceof Error ? err.message : String(err);
-      const summary = `no passing head: the factory could not append the session's log to the item's event log, its own error, which this session cannot fix: ${visible(why)}`;
+      const summary =
+        err instanceof LogNotFile
+          ? `no passing head: ${visible(why)}`
+          : `no passing head: the factory could not append the session's log to the item's event log, its own error, which this session cannot fix: ${visible(why)}`;
       const event = recordEvent(record, session, {
         kind: 'alert',
         tool: 'Stop',

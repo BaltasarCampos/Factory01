@@ -218,6 +218,9 @@ export function writeRef(
   try {
     now = readRef(repo, ref, env);
   } catch {
+    // The deadline's refusal is never hidden behind "could not write".
+    const over = pastDeadline();
+    if (over !== undefined) throw over;
     now = old === '' ? undefined : old;
   }
   if (now !== (old === '' ? undefined : old))
