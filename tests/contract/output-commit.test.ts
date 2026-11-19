@@ -79,7 +79,27 @@ function issued(
       .split('\n')
       .filter(Boolean)
       .map((line) => JSON.parse(line) as { kind: string; input_summary: string });
-  return { r, head, home, env, project, write, record, output, ref, stop, passed, events };
+  /** The one parent of the commit `name` names, or '' when it has another number of them. */
+  const parentOf = (name: string) => {
+    const [, ...parents] = runGit(project, ['rev-list', '--parents', '-n', '1', name]).split(' ');
+    return parents.length === 1 ? (parents[0] ?? '') : '';
+  };
+  return {
+    r,
+    head,
+    home,
+    env,
+    log,
+    project,
+    write,
+    record,
+    output,
+    ref,
+    parentOf,
+    stop,
+    passed,
+    events,
+  };
 }
 
 describe("the Stop hook commits a non-committing role's output (T086, 28-5b)", () => {
@@ -281,6 +301,66 @@ describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
   }, 60_000);
 });
 
+describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
+  const EVENTS = `${FEATURE}/events.jsonl`;
+  // Two lines already on the branch, the last cut short, with bytes JSON.parse would rewrite.
+  const OLD = '{"kind":"seed","note":"caf\u00e9 \\u00e9"}\n{"kind":"cut"';
+
+  it('has the checked commit as its one parent, changes only the log, and appends the lines', async () => {
+    const t = issued('reviewer', 5, { [EVENTS]: OLD });
+    t.passed();
+    t.write(REPORT, VERIFY.replace('pass', 'fail'));
+    expect((await t.stop()).block).toBe(true);
+    t.write(REPORT, VERIFY);
+    expect(await t.stop()).toEqual({ block: false });
+
+    const passed = t.ref(passedRef(SESSION_ID));
+    const checked = t.ref(sessionRef(SESSION_ID));
+    expect(passed).not.toBe(checked);
+    expect(t.parentOf(passed)).toBe(checked);
+    const changed = ['diff-tree', '--no-commit-id', '--name-only', '-r', passed];
+    expect(runGit(t.project, changed)).toBe(EVENTS);
+    const shown = execFileSync('git', ['-C', t.project, 'show', `${passed}:${EVENTS}`]);
+    expect(shown.toString('utf8')).toBe(`${OLD}\n${readFileSync(t.log, 'utf8')}`);
+    expect(t.events().map((e) => e.kind)).toEqual(['blocked']);
+    const trailers = ['log', '-1', '--format=%an|%(trailers:only,unfold)', passed];
+    expect(runGit(t.project, trailers)).toBe(
+      'Factory reviewer|Factory-Role: reviewer\nFactory-Item: 42-add-login',
+    );
+  });
+
+  /** The passing stop's outcome: no passing head, the session ref kept, an alert saying why. */
+  const unmade = (t: ReturnType<typeof issued>, why: RegExp) => {
+    expect(t.ref(passedRef(SESSION_ID))).toBe('');
+    expect(t.ref(sessionRef(SESSION_ID))).not.toBe('');
+    const last = t.events().at(-1);
+    expect(last?.kind).toBe('alert');
+    expect(last?.input_summary).toMatch(
+      /^no passing head: the factory could not append the session's log to the item's event log, its own error, which this session cannot fix: /,
+    );
+    expect(last?.input_summary).toMatch(why);
+  };
+
+  it('records no passing head, and an alert says why, for a log line that is not an event', async () => {
+    const t = issued();
+    t.passed();
+    t.write(REPORT, VERIFY);
+    writeFileSync(t.log, '{"kind":"blocked"}\n', { flag: 'a' });
+    expect(await t.stop()).toEqual({ block: false });
+    unmade(t, /line 1 of the session's log is not an event/);
+  });
+
+  it('records no passing head, and an alert says why, for a log on the branch that is a folder', async () => {
+    const t = issued('reviewer', 5, { [`${EVENTS}/x`]: 'x\n' });
+    t.passed();
+    t.write(REPORT, VERIFY.replace('pass', 'fail'));
+    expect((await t.stop()).block).toBe(true);
+    t.write(REPORT, VERIFY);
+    expect(await t.stop()).toEqual({ block: false });
+    unmade(t, /events\.jsonl at \w+ is not a regular file/);
+  });
+});
+
 /** Removes the feature folder the manifest commit left in the clone's working tree. */
 function rmFeature(t: ReturnType<typeof issued>) {
   execFileSync('rm', ['-rf', join(t.r.path, FEATURE)]);
@@ -391,7 +471,8 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     expect(t.ref(passedRef(SESSION_ID))).toBe('');
     t.write(REPORT, VERIFY);
     expect(await t.stop()).toEqual({ block: false });
-    expect(t.ref(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
+    // The events commit on the head the check passed (28-5c-3b).
+    expect(t.parentOf(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
     // A later stop that fails removes it: the ref names the commit the last stop passed at.
     t.write(REPORT, VERIFY.replace('pass', 'fail'));
     expect((await t.stop()).block).toBe(true);
@@ -423,7 +504,8 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     });
     t.write(REPORT, VERIFY);
     expect(await t.stop(true)).toEqual({ block: false });
-    expect(t.ref(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
+    // The events commit on the head the check passed (28-5c-3b).
+    expect(t.parentOf(passedRef(SESSION_ID))).toBe(t.ref(sessionRef(SESSION_ID)));
   });
 
   it('passes with a stale packed-refs lock in the factory clone when there is no passing head to remove', async () => {
