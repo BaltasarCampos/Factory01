@@ -45,7 +45,7 @@ import {
   type SessionRecord,
 } from './session.js';
 import { appendEvent } from '../events/append.js';
-import { pastDeadline, withDeadline } from '../cli/deadline.js';
+import { DeadlinePassed, withDeadline } from '../cli/deadline.js';
 
 export interface CheckResult {
   complete: boolean;
@@ -226,16 +226,24 @@ async function check(
     // passing head, and an alert says why.
     let events: string;
     try {
-      events = commitEvents(record, home, session, output.commit, env, ctx.now);
+      const made = commitEvents(record, home, session, output.commit, env, ctx.now);
+      events = made.commit;
+      if (made.full !== undefined) {
+        const fields = { kind: 'alert' as const, tool: 'Stop', input_summary: made.full };
+        await appendEvent(
+          sessionEvents(home, session),
+          recordEvent(record, session, fields),
+          ctx.now,
+        );
+      }
     } catch (err) {
       // Past the deadline the first stop blocks, so that the second checks again.
-      const over = pastDeadline();
-      if (over !== undefined) throw over;
+      if (err instanceof DeadlinePassed) throw err;
       const why = err instanceof Error ? err.message : String(err);
-      const summary =
-        err instanceof LogNotFile
-          ? `no passing head: ${visible(why)}`
-          : `no passing head: the factory could not append the session's log to the item's event log, its own error, which this session cannot fix: ${visible(why)}`;
+      // A log the session's commits made a link, executable or a gitlink: its forced turn can
+      // remove it, and the second stop ends with no passing head and the alert.
+      if (err instanceof LogNotFile) return why;
+      const summary = `no passing head: the factory could not append the session's log to the item's event log, its own error, which this session cannot fix: ${visible(why)}`;
       const event = recordEvent(record, session, {
         kind: 'alert',
         tool: 'Stop',

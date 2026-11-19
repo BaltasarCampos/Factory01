@@ -2,7 +2,7 @@
 // no token ever enters the factory's code. JSON output is parsed and then read through `Fields`,
 // which refuses any value of the wrong shape rather than guessing.
 import { execFile, type ExecFileException } from 'node:child_process';
-import { pastDeadline, timeLeft } from '../cli/deadline.js';
+import { bound, type Bound } from '../cli/deadline.js';
 import { EnvironmentError } from '../cli/env.js';
 import { REPO } from '../model/config.js';
 
@@ -47,9 +47,9 @@ export function gh(
 ): Promise<unknown> {
   const env = { ...(options.env ?? process.env), GH_PROMPT_DISABLED: '1' };
   // Inside the Stop hook, the time left before its deadline (T086).
-  let timeout: number | undefined;
+  let limit: Bound;
   try {
-    timeout = timeLeft();
+    limit = bound();
   } catch (err) {
     return Promise.reject(err instanceof Error ? err : new Error(String(err)));
   }
@@ -63,11 +63,13 @@ export function gh(
         cwd: options.cwd,
         maxBuffer: MAX_BUFFER,
         encoding: 'utf8',
-        timeout,
+        timeout: limit.timeout,
         killSignal: 'SIGKILL',
       },
       (err: ExecFileException | null, stdout: string, stderr: string) => {
-        const over = err === null ? undefined : pastDeadline();
+        // Killed at its timeout; a stdout past maxBuffer is killed too, but is no timeout.
+        const timedOut = err?.killed === true && err.code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+        const over = err === null ? undefined : limit.ended(timedOut);
         if (over !== undefined) {
           reject(over);
         } else if (err?.code === 'ENOENT') {

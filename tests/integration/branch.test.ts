@@ -1063,7 +1063,8 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       expect(t.cloud.launches).toHaveLength(2);
       expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(forged);
     }
-  });
+    // About 31 s even alone (T061's (111)); past 60 s under the whole suite's load.
+  }, 120_000);
 
   it('in local mode tells its own manifest running while its last session’s group lives and spent once it has ended, stopping on a group record it cannot read (T061)', async () => {
     const t = setup();

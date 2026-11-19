@@ -8,7 +8,7 @@ import { spawnSync, type SpawnSyncReturns } from 'node:child_process';
 import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { pastDeadline, timeLeft } from '../cli/deadline.js';
+import { bound } from '../cli/deadline.js';
 import { RefusedError } from '../cli/env.js';
 import { attached } from './network.js';
 
@@ -90,10 +90,13 @@ export const DEV = [
  */
 export function probeBwrap(args: readonly string[], env: NodeJS.ProcessEnv, what: string) {
   const outer = { PATH: env.PATH ?? '' };
+  const limit = bound();
   const probe = spawnSync('bwrap', [...args, 'true'], {
-    ...{ env: outer, encoding: 'utf8', timeout: timeLeft(), killSignal: 'SIGKILL' },
+    ...{ env: outer, encoding: 'utf8', timeout: limit.timeout, killSignal: 'SIGKILL' },
   });
-  const over = pastDeadline();
+  const over = limit.ended(
+    (probe.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT',
+  );
   if (over !== undefined) throw over;
   if (probe.error !== undefined || probe.status !== 0)
     throw new RefusedError(`${what}: ${probe.error?.message ?? probe.stderr.trim()}`);

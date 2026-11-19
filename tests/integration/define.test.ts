@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
@@ -381,6 +381,55 @@ describe("Define's events (T086, 28-5c-3b)", () => {
       input_summary: `second stop, ended with no passing head: ${DEFINE_EVENTS}/x: ${WAY}`,
     });
   });
+
+  /** A commit that puts `make`'s entry at Define's event log. */
+  const atLog = (make: (r: TestRepo, path: string) => void) => (r: TestRepo) => {
+    mkdirSync(join(r.path, '.factory/define'), { recursive: true });
+    make(r, join(r.path, DEFINE_EVENTS));
+    r.git(['commit', '-q', '-m', 'Define: log']);
+  };
+  const NOT_FILE = new RegExp(
+    `^${DEFINE_EVENTS.replaceAll('.', '\\.')} at \\w{12} on claude/define is not a regular file, so the session's log cannot be appended to it; only a commit that removes it clears this$`,
+  );
+
+  it.each([
+    [
+      'a symlink',
+      atLog((r, path) => {
+        symlinkSync('elsewhere', path);
+        r.git(['add', DEFINE_EVENTS]);
+      }),
+    ],
+    [
+      'the executable bit',
+      atLog((r, path) => {
+        writeFileSync(path, '');
+        r.git(['add', DEFINE_EVENTS]);
+        r.git(['update-index', '--chmod=+x', DEFINE_EVENTS]);
+      }),
+    ],
+    [
+      'a gitlink',
+      atLog((r) => {
+        const at = `160000,${r.revParse('HEAD')},${DEFINE_EVENTS}`;
+        r.git(['update-index', '--add', '--cacheinfo', at]);
+      }),
+    ],
+  ])(
+    'blocks the first stop on a log the session made %s, and the second ends with no passing head',
+    async (_name, work) => {
+      const t = belowStop(work);
+      const first = await t.stop();
+      expect(first.block).toBe(true);
+      expect(first.reason).toMatch(NOT_FILE);
+      expect(await t.stop(true)).toEqual({ block: false });
+      expect(t.passed()).toBe('');
+      expect(t.last().kind).toBe('alert');
+      expect(
+        t.last().input_summary?.replace(/^second stop, ended with no passing head: /, ''),
+      ).toMatch(NOT_FILE);
+    },
+  );
 });
 
 describe(

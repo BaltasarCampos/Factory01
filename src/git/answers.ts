@@ -7,7 +7,7 @@
 // git failure throws, so it never reads as no answers.
 import { spawnSync } from 'node:child_process';
 import type { ReleaseKeys } from '../approvals/keys.js';
-import { pastDeadline, timeLeft } from '../cli/deadline.js';
+import { bound } from '../cli/deadline.js';
 import { RefusedError } from '../cli/env.js';
 import { signedUnder } from './history.js';
 
@@ -27,15 +27,18 @@ export type SignedAnswers =
 
 /** git's stdout; any failure throws. */
 export function gitOut(repo: string, args: readonly string[], env?: NodeJS.ProcessEnv): string {
+  const limit = bound();
   const result = spawnSync('git', ['-c', 'core.hooksPath=/dev/null', ...args], {
     cwd: repo,
     env,
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
-    timeout: timeLeft(),
+    timeout: limit.timeout,
     killSignal: 'SIGKILL',
   });
-  const over = pastDeadline();
+  const over = limit.ended(
+    (result.error as NodeJS.ErrnoException | undefined)?.code === 'ETIMEDOUT',
+  );
   if (over !== undefined) throw over;
   if (result.error !== undefined || result.status !== 0)
     throw new RefusedError(

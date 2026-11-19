@@ -14,9 +14,11 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { clearDeadlineForTests, deadlineActive } from '../../src/cli/deadline.js';
 import { makeEvent } from '../../src/events/append.js';
 import {
   commitEvents,
+  LOG_FULL,
   MAX_APPEND,
   MAX_LOG,
   type EventLimits,
@@ -41,6 +43,15 @@ vi.mock('node:child_process', async (real) =>
   (await import('../helpers/timed-spawns.js')).timedSpawns(real),
 );
 afterEach(checkSpawns);
+// A row that leaves its deadline running fails under its own name, and the rows after it run
+// with none (Owner decision 2026-11-19).
+afterEach(() => {
+  try {
+    expect(deadlineActive(), 'a deadline is still running after this row').toBe(false);
+  } finally {
+    clearDeadlineForTests();
+  }
+});
 
 const FEATURE = 'specs/42-add-login';
 const BRANCH = 'claude/42-add-login';
@@ -439,17 +450,17 @@ describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
     },
   );
 
-  it('records no passing head for a log on the branch that is a folder, naming it and the way out', async () => {
+  it('blocks the first stop on a log on the branch that is a folder, and the second ends with no passing head, naming it and the way out', async () => {
     const t = issued('reviewer', 5, { [`${EVENTS}/x`]: 'x\n' });
     t.passed();
-    t.write(REPORT, VERIFY.replace('pass', 'fail'));
-    expect((await t.stop()).block).toBe(true);
     t.write(REPORT, VERIFY);
-    expect(await t.stop()).toEqual({ block: false });
-    unmade(
-      t,
-      /^no passing head: specs\/42-add-login\/events\.jsonl at \w{12} on claude\/42-add-login is not a regular file, so the session's log cannot be appended to it; only a commit that removes it clears this; for an item, the way out is to close it and file it again, until T096$/,
-    );
+    const why =
+      "specs/42-add-login/events.jsonl at \\w{12} on claude/42-add-login is not a regular file, so the session's log cannot be appended to it; only a commit that removes it clears this; for an item, the way out is to close it and file it again, until T096";
+    const first = await t.stop();
+    expect(first.block).toBe(true);
+    expect(first.reason).toMatch(new RegExp(`^${why}$`));
+    expect(await t.stop(true)).toEqual({ block: false });
+    unmade(t, new RegExp(`^second stop, ended with no passing head: ${why}$`));
   });
 
   it('blocks the first stop when the deadline passes inside the events commit, and the second still records a passing head', async () => {
@@ -460,13 +471,16 @@ describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
     // A git that hangs only on the events commit's commit-tree.
     const bin = tempDir('slow-git-');
     const git = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
-    const script = `#!/bin/sh\ncase "$*" in *"station 5 events"*) sleep 30;; esac\nexec ${git} "$@"\n`;
+    // It touches a marker first, so the row knows the events commit's catch was reached.
+    const marker = join(bin, 'reached');
+    const script = `#!/bin/sh\ncase "$*" in *"station 5 events"*) touch '${marker}'; sleep 30;; esac\nexec ${git} "$@"\n`;
     writeFileSync(join(bin, 'git'), script, { mode: 0o755 });
     const env = { ...t.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
     const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
     await expect(
       runStop(input, { cwd: t.r.path, now: () => new Date(), env }, undefined, 4000),
     ).rejects.toThrow(/^the Stop hook ran past its 4 s limit/);
+    expect(existsSync(marker)).toBe(true);
     expect(t.ref(passedRef(SESSION_ID))).toBe('');
     expect(t.events().at(-1)?.kind).toBe('blocked');
     expect(await t.stop(true)).toEqual({ block: false });
@@ -480,10 +494,11 @@ describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
     writeFileSync(t.log, line.repeat(count));
     const env = { ...process.env, ...t.env };
     const now = () => new Date();
-    const commit = commitEvents(t.record(), t.home, SESSION_ID, t.head, env, now, limits);
-    const lines = appended(t, commit, old === '' ? 0 : 1);
+    const made = commitEvents(t.record(), t.home, SESSION_ID, t.head, env, now, limits);
+    const { commit } = made;
+    const lines = commit === t.head ? [] : appended(t, commit, old === '' ? 0 : 1);
     const size = execFileSync('git', ['-C', t.project, 'cat-file', '-s', `${commit}:${EVENTS}`]);
-    return { line, lines, size: Number(size.toString()) };
+    return { line, lines, size: Number(size.toString()), made, t };
   };
 
   it("leaves out what passes the session's own limit, with one line saying how much and why", () => {
@@ -502,7 +517,7 @@ describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
     const append = (a?.length ?? 0) + (b?.length ?? 0) + 50;
     const env = { ...process.env, ...t.env };
     const limits = { append, log: MAX_LOG };
-    const commit = commitEvents(
+    const { commit } = commitEvents(
       t.record(),
       t.home,
       SESSION_ID,
@@ -527,6 +542,49 @@ describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
       /^the session's log from line \d+ on, \d+ bytes, is left out, which would take specs\/42-add-login\/events\.jsonl past 12000 bytes$/,
     );
   });
+
+  /** The factory's full line, as the events commit writes it. */
+  const fullLine = (t: ReturnType<typeof issued>) =>
+    JSON.stringify(
+      makeEvent(
+        recordEvent(t.record(), SESSION_ID, {
+          kind: 'alert',
+          tool: 'Stop',
+          input_summary: LOG_FULL,
+        }),
+      ),
+    );
+  const FULL =
+    /^specs\/42-add-login\/events\.jsonl is full, past 12000 bytes, so none of this session's events is in it; they are only in the session's own log$/;
+
+  it.each([
+    ['room smaller than one note', `${'z'.repeat(11_899)}\n`],
+    ['a log on the branch already over the limit', `${'z'.repeat(13_000)}\n`],
+  ])('writes the full line once for %s, past the limit by that line alone', (_name, old) => {
+    const { lines, size, made } = limited('y', 3, { append: MAX_APPEND, log: 12_000 }, old);
+    expect(lines.map((e) => e.input_summary)).toEqual([LOG_FULL]);
+    expect(size).toBe(old.length + Buffer.byteLength(JSON.stringify(lines[0])) + 1);
+    expect(made.full).toMatch(FULL);
+  });
+
+  it('adds no second full line for a later session, which still gets the alert', () => {
+    const t0 = issued();
+    const old = `${'z'.repeat(11_000)}\n${fullLine(t0)}\n`;
+    const { made, t } = limited('y', 3, { append: MAX_APPEND, log: 12_000 }, old);
+    expect(made.commit).toBe(t.head);
+    expect(made.full).toMatch(FULL);
+  });
+
+  it("alerts in the session's own log when its events are left out of a full log, the passing head kept", async () => {
+    const t = issued('reviewer', 5, { [EVENTS]: `${'z'.repeat(MAX_LOG)}\n` });
+    t.passed();
+    t.write(REPORT, VERIFY);
+    writeFileSync(t.log, `${good(t)}\n`);
+    expect(await t.stop()).toEqual({ block: false });
+    expect(t.parentOf(t.ref(passedRef(SESSION_ID)))).toBe(t.ref(sessionRef(SESSION_ID)));
+    expect(t.events().at(-1)).toMatchObject({ kind: 'alert' });
+    expect(t.events().at(-1)?.input_summary).toMatch(/events\.jsonl is full, past 48 MiB/);
+  }, 60_000);
 
   it('has 4 MiB and 48 MiB as its limits, and the Stop hook passes neither', () => {
     expect([MAX_APPEND, MAX_LOG]).toEqual([4 * 1024 * 1024, 48 * 1024 * 1024]);
@@ -663,7 +721,8 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     expect(await u.stop()).toEqual({ block: false });
     expect(u.ref(sessionRef(SESSION_ID))).not.toBe('');
     expect(u.ref(passedRef(SESSION_ID))).toBe('');
-  });
+    // Five stops on two branches: about 2.5 s alone, past 5 s under the whole suite's load.
+  }, 15_000);
 
   it('checks again at the second stop, recording a passing head, and never blocks it', async () => {
     const t = issued();
