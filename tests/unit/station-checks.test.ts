@@ -3,6 +3,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { withDeadline } from '../../src/cli/deadline.js';
+import { EnvironmentError } from '../../src/cli/env.js';
 import { dispatcherMessage } from '../../src/dispatcher/branch.js';
 import { GIT_TIMEOUT, safeGit } from '../../src/git/diff.js';
 import { runStop } from '../../src/hooks/stop.js';
@@ -11,6 +12,7 @@ import { checkPlan } from '../../src/stations/checks/plan.js';
 import { parseAnswers } from '../../src/stations/checks/questions.js';
 import { checkSpec, criterionLines, specStopCheck } from '../../src/stations/checks/spec.js';
 import { makeRepo, type Files, type TestRepo } from '../helpers/git-repo.js';
+import { tempDir } from '../helpers/keys.js';
 import { checkSpawns, stopRow, timed, timeouts } from '../helpers/timed-spawns.js';
 import { dispatcherClone, recordSession, SESSION_ID } from '../helpers/session.js';
 
@@ -116,6 +118,18 @@ describe('the deadline on git inside a stop (T086, 28-5c-3a)', () => {
     );
     expect(timed).toEqual(['spawnSync git']);
     expect(timeouts[0]).toBeLessThanOrEqual(GIT_TIMEOUT);
+  });
+
+  it('names the git subcommand, the repository and the limit when its own cap stops it', () => {
+    const r = makeRepo({ files: { 'a.txt': 'a\n' } });
+    const bin = tempDir('slow-git-');
+    writeFileSync(join(bin, 'git'), '#!/bin/sh\nexec sleep 5\n', { mode: 0o755 });
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
+    const run = () => safeGit(r.path, ['status'], env, undefined, undefined, { timeout: 100 });
+    expect(run).toThrow(EnvironmentError);
+    expect(run).toThrow(
+      `git status in ${r.path} did not finish within its 0.1 s limit: the factory's own error, which this session cannot fix`,
+    );
   });
 
   it('refuses to start a program once no time is left, which never runs', async () => {

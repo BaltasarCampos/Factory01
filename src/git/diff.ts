@@ -10,6 +10,7 @@
 // an explicit algorithm, context and no colour, so the laptop and CI see the same lines.
 import { spawnSync } from 'node:child_process';
 import { deadlineActive, pastDeadline, timeLeft } from '../cli/deadline.js';
+import { EnvironmentError } from '../cli/env.js';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
@@ -43,6 +44,9 @@ export interface FileChange {
 const SYMLINK = '120000';
 const GITLINK = '160000';
 
+/** The most one git run may take inside the Stop hook, in ms (T086). */
+export const GIT_TIMEOUT = 120_000;
+
 /**
  * Git without the global and system config, attributes files, hooks, submodule recursion or an
  * external diff. Every inherited `GIT_*` variable is dropped first: `GIT_CONFIG_PARAMETERS` and
@@ -53,9 +57,6 @@ const GITLINK = '160000';
  * index file the factory made, set after the drop. `more` adds a timeout, past which git is
  * killed with SIGKILL, and variables set after the drop, such as a quarantine's object folders.
  */
-/** The most one git run may take inside the Stop hook, in ms (T086). */
-export const GIT_TIMEOUT = 120_000;
-
 export function safeGit(
   repo: string,
   args: readonly string[],
@@ -92,7 +93,16 @@ export function safeGit(
       ...(timeout === undefined ? {} : { timeout, killSignal: 'SIGKILL' as const }),
     },
   );
-  if (result.error !== undefined) throw pastDeadline() ?? result.error;
+  if (result.error !== undefined) {
+    const over = pastDeadline();
+    if (over !== undefined) throw over;
+    // Its own cap, not the deadline: named, never Node's bare ETIMEDOUT.
+    if ((result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT' && timeout !== undefined)
+      throw new EnvironmentError(
+        `git ${args[0] ?? ''} in ${repo} did not finish within its ${String(timeout / 1000)} s limit: the factory's own error, which this session cannot fix`,
+      );
+    throw result.error;
+  }
   return { status: result.status, stdout: result.stdout, stderr: result.stderr.toString().trim() };
 }
 

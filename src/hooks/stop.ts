@@ -26,8 +26,8 @@ import { verifyStopCheck } from '../stations/checks/verify.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
 import { HOOK_COMMITS, hookOutput, type Outside } from './output-commit.js';
 import {
-  own,
   passedRef,
+  readRef,
   sessionOutput,
   STOP_DEADLINE,
   UnreadableHead,
@@ -214,12 +214,7 @@ async function check(
   // Passed: the head is recorded only for a session whose start passed, and only once read.
   if (output !== undefined && hasPassed(home, session))
     // Removed before the output was read: a ref there now is another hook's.
-    writeRef(
-      output.repo,
-      passedRef(session),
-      ['update-ref', passedRef(session), output.commit, ''],
-      env,
-    );
+    writeRef(output.repo, passedRef(session), '', output.commit, env);
   return undefined;
 }
 
@@ -229,13 +224,8 @@ async function check(
  */
 function clearPassed(repo: string, session: string, env: NodeJS.ProcessEnv) {
   const ref = passedRef(session);
-  const found = own(repo, ['rev-parse', '--verify', '-q', ref], env);
-  if (found.status === 1) return;
-  if (found.status !== 0)
-    throw new EnvironmentError(
-      `the factory could not read its passing head ${ref} in ${repo}, which this session cannot fix: ${visible(found.err)}`,
-    );
-  writeRef(repo, ref, ['update-ref', '-d', ref, found.out], env);
+  const found = readRef(repo, ref, env);
+  if (found !== undefined) writeRef(repo, ref, found, undefined, env);
 }
 
 /** The alert for what changed outside the role's paths, or why it could not be listed; or none. */

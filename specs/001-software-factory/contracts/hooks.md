@@ -2,7 +2,7 @@
 
 Registered in `.claude/settings.json` (guardrail file); each runs `factory hook <event>` and
 reads the Claude Code hook JSON on stdin. Exit 2 = block (reason on stderr); exit 0 = allow.
-Any internal error → exit 2 (fail closed): that blocks the action at SessionStart, PreToolUse (the gate and each guard), PreCompact and the first stop; post-edit and log run after the tool, at PostToolUse, so their exit 2 reports the error to the session and undoes nothing, and the second stop is never blocked. A hook Claude Code stops at its timeout blocks only where it has `onFailure: "block"`: a timed-out post-edit, log or stop hook is expected not to block, so the Stop hook ends by its own deadline first (not yet probed: T125's S6 recorded only the `onFailure: "block"` case; T061's (86) probes it).
+Any internal error → exit 2 (fail closed): that blocks the action at PreToolUse (the gate and each guard), PreCompact and the first stop; at SessionStart Claude Code only reports it, and the gate then refuses every tool call, `passed.json` being absent, as the SessionStart row says; post-edit and log run after the tool, at PostToolUse, so their exit 2 reports the error to the session and undoes nothing, and the second stop is never blocked. A hook Claude Code stops at its timeout blocks only where it has `onFailure: "block"`: a timed-out post-edit, log or stop hook is expected not to block, so the Stop hook ends by its own deadline first (not yet probed: T125's S6 recorded only the `onFailure: "block"` case; T061's (86) probes it).
 
 | Hook event | Command | Checks | Spec |
 |------------|---------|--------|------|

@@ -325,6 +325,51 @@ describe('the passing head and the second stop (T086, 28-5b-2)', () => {
     expect(t.ref(ref)).toBe(t.head);
   });
 
+  it('names a leftover ref lock and the way out, never a lost race', async () => {
+    const t = issued();
+    t.passed();
+    t.write(REPORT, VERIFY);
+    const common = runGit(t.project, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    const lock = join(common, `${sessionRef(SESSION_ID)}.lock`);
+    mkdirSync(dirname(lock), { recursive: true });
+    writeFileSync(lock, '');
+    const refused = t.stop();
+    await expect(refused).rejects.toThrow(
+      /^the factory could not write refs\/factory\/sessions\/\S+ in .*\(git: .*\.lock.*\); if no git is running, remove the \.lock file git names$/,
+    );
+    await expect(refused).rejects.not.toThrow(/another run of the Stop hook/);
+  });
+
+  it('names a leftover packed-refs.lock on the removal of the passing head, keeping it', async () => {
+    const t = issued();
+    t.passed();
+    t.write(REPORT, VERIFY);
+    expect(await t.stop()).toEqual({ block: false });
+    const at = t.ref(passedRef(SESSION_ID));
+    const common = runGit(t.project, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+    writeFileSync(join(common, 'packed-refs.lock'), '');
+    await expect(t.stop()).rejects.toThrow(
+      /^the factory could not write refs\/factory\/passed\/\S+ in .*packed-refs\.lock.*; if no git is running, remove the \.lock file git names$/,
+    );
+    expect(t.ref(passedRef(SESSION_ID))).toBe(at);
+  });
+
+  it.each([sessionRef(SESSION_ID), passedRef(SESSION_ID)])(
+    'refuses a broken %s, never reading it as absent',
+    async (ref) => {
+      const t = issued();
+      t.passed();
+      t.write(REPORT, VERIFY);
+      const common = runGit(t.project, ['rev-parse', '--path-format=absolute', '--git-common-dir']);
+      mkdirSync(dirname(join(common, ref)), { recursive: true });
+      writeFileSync(join(common, ref), 'not a commit\n');
+      await expect(t.stop()).rejects.toThrow(
+        new RegExp(`^the factory could not read ${ref} in .*, which this session cannot fix: `),
+      );
+      expect(readFileSync(join(common, ref), 'utf8')).toBe('not a commit\n');
+    },
+  );
+
   it("keeps the note that the blocked event was not written on the factory's own error", async () => {
     const t = issued();
     t.write(REPORT, VERIFY);
