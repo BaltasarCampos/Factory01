@@ -14,9 +14,21 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { makeEvent } from '../../src/events/append.js';
+import {
+  commitEvents,
+  MAX_APPEND,
+  MAX_LOG,
+  type EventLimits,
+} from '../../src/hooks/events-commit.js';
 import { hookOutput, readOutput, walkClone, walkRoots } from '../../src/hooks/output-commit.js';
 import { passedRef, sessionRef, UnreadableHead } from '../../src/hooks/session-commits.js';
-import { passedPath, readSessionRecord, sessionEvents } from '../../src/hooks/session.js';
+import {
+  passedPath,
+  readSessionRecord,
+  recordEvent,
+  sessionEvents,
+} from '../../src/hooks/session.js';
 import { runStop } from '../../src/hooks/stop.js';
 import { visible } from '../../src/notify/summary.js';
 import { makeRepo, runGit } from '../helpers/git-repo.js';
@@ -71,7 +83,9 @@ function issued(
       { session_id: SESSION_ID, cwd: r.path, hook_event_name: 'Stop', stop_hook_active: again },
       { cwd: r.path, now: () => new Date(), env },
     );
+  // As the start check does: the session's log first, then its record that the start passed.
   const passed = () => {
+    writeFileSync(log, '', { flag: 'a' });
     writeFileSync(passedPath(home, SESSION_ID), `${JSON.stringify({ session: SESSION_ID })}\n`);
   };
   const events = () =>
@@ -335,29 +349,190 @@ describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
     expect(t.ref(sessionRef(SESSION_ID))).not.toBe('');
     const last = t.events().at(-1);
     expect(last?.kind).toBe('alert');
-    expect(last?.input_summary).toMatch(
-      /^no passing head: the factory could not append the session's log to the item's event log, its own error, which this session cannot fix: /,
-    );
     expect(last?.input_summary).toMatch(why);
   };
+  /** One event line of the session's own, as its hooks write them. */
+  const good = (t: ReturnType<typeof issued>, what = 'one') =>
+    JSON.stringify(
+      makeEvent(recordEvent(t.record(), SESSION_ID, { kind: 'alert', input_summary: what })),
+    );
+  /** The lines the events commit `commit` appended, parsed. */
+  const appended = (t: ReturnType<typeof issued>, commit: string, skip = 0) =>
+    execFileSync('git', ['-C', t.project, 'show', `${commit}:${EVENTS}`])
+      .toString('utf8')
+      .split('\n')
+      .filter(Boolean)
+      .slice(skip)
+      .map((line) => JSON.parse(line) as { kind: string; tool?: string; input_summary: string });
 
-  it('records no passing head, and an alert says why, for a log line that is not an event', async () => {
-    const t = issued();
-    t.passed();
-    t.write(REPORT, VERIFY);
-    writeFileSync(t.log, '{"kind":"blocked"}\n', { flag: 'a' });
-    expect(await t.stop()).toEqual({ block: false });
-    unmade(t, /line 1 of the session's log is not an event/);
-  });
+  it.each([
+    [
+      'a cut-off last line',
+      (g: string) => `${g}\n{"kind":`,
+      2,
+      /^line 2 .* it is cut short, with no newline/,
+    ],
+    [
+      'a line that is not JSON',
+      (g: string) => `${g}\nnot json\n${g}\n`,
+      3,
+      /^line 2 .* not valid JSON/,
+    ],
+    [
+      'a line that fails the schema',
+      (g: string) => `${g}\n{"kind":"blocked"}\n${g}\n`,
+      3,
+      /^line 2 .* ts: RFC 3339/,
+    ],
+    [
+      'an empty line',
+      (g: string) => `${g}\n\n${g}\n`,
+      3,
+      /^line 2 of the session's log is not an event: it is empty$/,
+    ],
+  ])(
+    'keeps the passing head for %s, replaced by an alert line, the lines around it kept',
+    async (_name, log, count, why) => {
+      const t = issued();
+      t.passed();
+      t.write(REPORT, VERIFY);
+      writeFileSync(t.log, log(good(t)));
+      expect(await t.stop()).toEqual({ block: false });
+      const passed = t.ref(passedRef(SESSION_ID));
+      expect(t.parentOf(passed)).toBe(t.ref(sessionRef(SESSION_ID)));
+      const lines = appended(t, passed);
+      expect(lines).toHaveLength(count);
+      expect(lines[0]?.input_summary).toBe('one');
+      expect(lines[1]).toMatchObject({ kind: 'alert', tool: 'Stop' });
+      expect(lines[1]?.input_summary).toMatch(why);
+      if (count === 3) expect(lines[2]?.input_summary).toBe('one');
+    },
+  );
 
-  it('records no passing head, and an alert says why, for a log on the branch that is a folder', async () => {
+  it.each([
+    [
+      'an unreadable log, a folder',
+      (path: string) => {
+        rmSync(path);
+        mkdirSync(path);
+      },
+      /^the session's log could not be read, so none of its events is here: it is not a regular file$/,
+    ],
+    [
+      'a missing log',
+      (path: string) => {
+        rmSync(path);
+      },
+      /^the session's log was missing, the factory's own fault/,
+    ],
+  ])(
+    'keeps the passing head for %s, with one alert line in the events commit',
+    async (_name, make, why) => {
+      const t = issued();
+      t.passed();
+      t.write(REPORT, VERIFY);
+      make(t.log);
+      expect(await t.stop()).toEqual({ block: false });
+      const lines = appended(t, t.ref(passedRef(SESSION_ID)));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]?.input_summary).toMatch(why);
+    },
+  );
+
+  it('records no passing head for a log on the branch that is a folder, naming it and the way out', async () => {
     const t = issued('reviewer', 5, { [`${EVENTS}/x`]: 'x\n' });
     t.passed();
     t.write(REPORT, VERIFY.replace('pass', 'fail'));
     expect((await t.stop()).block).toBe(true);
     t.write(REPORT, VERIFY);
     expect(await t.stop()).toEqual({ block: false });
-    unmade(t, /events\.jsonl at \w+ is not a regular file/);
+    unmade(
+      t,
+      /^no passing head: specs\/42-add-login\/events\.jsonl at \w{12} on claude\/42-add-login is not a regular file, so the session's log cannot be appended to it; only a commit that removes it clears this; for an item, the way out is to close it and file it again, until T096$/,
+    );
+  });
+
+  it('blocks the first stop when the deadline passes inside the events commit, and the second still records a passing head', async () => {
+    const t = issued();
+    t.passed();
+    t.write(REPORT, VERIFY);
+    writeFileSync(t.log, `${good(t)}\n`);
+    // A git that hangs only on the events commit's commit-tree.
+    const bin = tempDir('slow-git-');
+    const git = execFileSync('sh', ['-c', 'command -v git']).toString().trim();
+    const script = `#!/bin/sh\ncase "$*" in *"station 5 events"*) sleep 30;; esac\nexec ${git} "$@"\n`;
+    writeFileSync(join(bin, 'git'), script, { mode: 0o755 });
+    const env = { ...t.env, PATH: `${bin}:${process.env.PATH ?? ''}` };
+    const input = { session_id: SESSION_ID, cwd: t.r.path, hook_event_name: 'Stop' };
+    await expect(
+      runStop(input, { cwd: t.r.path, now: () => new Date(), env }, undefined, 4000),
+    ).rejects.toThrow(/^the Stop hook ran past its 4 s limit/);
+    expect(t.ref(passedRef(SESSION_ID))).toBe('');
+    expect(t.events().at(-1)?.kind).toBe('blocked');
+    expect(await t.stop(true)).toEqual({ block: false });
+    expect(t.parentOf(t.ref(passedRef(SESSION_ID)))).toBe(t.ref(sessionRef(SESSION_ID)));
+  }, 60_000);
+
+  /** The events commit with small limits: the session's log `log` lines, the branch's `old`. */
+  const limited = (what: string, count: number, limits: EventLimits, old = '') => {
+    const t = issued('reviewer', 5, old === '' ? {} : { [EVENTS]: old });
+    const line = `${good(t, what)}\n`;
+    writeFileSync(t.log, line.repeat(count));
+    const env = { ...process.env, ...t.env };
+    const now = () => new Date();
+    const commit = commitEvents(t.record(), t.home, SESSION_ID, t.head, env, now, limits);
+    const lines = appended(t, commit, old === '' ? 0 : 1);
+    const size = execFileSync('git', ['-C', t.project, 'cat-file', '-s', `${commit}:${EVENTS}`]);
+    return { line, lines, size: Number(size.toString()) };
+  };
+
+  it("leaves out what passes the session's own limit, with one line saying how much and why", () => {
+    const { line, lines } = limited('x'.repeat(200), 40, { append: 2048, log: MAX_LOG });
+    const kept = Math.floor(2048 / line.length);
+    expect(lines).toHaveLength(kept + 1);
+    expect(lines.at(-1)?.input_summary).toBe(
+      `the session's log from line ${String(kept + 1)} on, ${String((40 - kept) * line.length)} bytes, is left out, past the 2048 bytes one events commit appends`,
+    );
+  });
+
+  it('leaves out a line the limit falls in the middle of, whole, never as a line that is not an event', () => {
+    const t = issued();
+    const [a, b, c] = ['a', 'b', 'c'].map((ch, i) => `${good(t, ch.repeat(100 * (i + 1)))}\n`);
+    writeFileSync(t.log, `${a ?? ''}${b ?? ''}${c ?? ''}`);
+    const append = (a?.length ?? 0) + (b?.length ?? 0) + 50;
+    const env = { ...process.env, ...t.env };
+    const limits = { append, log: MAX_LOG };
+    const commit = commitEvents(
+      t.record(),
+      t.home,
+      SESSION_ID,
+      t.head,
+      env,
+      () => new Date(),
+      limits,
+    );
+    expect(appended(t, commit).map((e) => e.input_summary)).toEqual([
+      'a'.repeat(100),
+      'b'.repeat(200),
+      `the session's log from line 3 on, ${String(c?.length)} bytes, is left out, past the ${String(append)} bytes one events commit appends`,
+    ]);
+  });
+
+  it('never takes the branch log past its limit, leaving out what does not fit', () => {
+    const old = `${'z'.repeat(6000)}\n`;
+    const { lines, size } = limited('y', 40, { append: MAX_APPEND, log: 12_000 }, old);
+    expect(size).toBeLessThanOrEqual(12_000);
+    expect(lines.length).toBeGreaterThan(1);
+    expect(lines.at(-1)?.input_summary).toMatch(
+      /^the session's log from line \d+ on, \d+ bytes, is left out, which would take specs\/42-add-login\/events\.jsonl past 12000 bytes$/,
+    );
+  });
+
+  it('has 4 MiB and 48 MiB as its limits, and the Stop hook passes neither', () => {
+    expect([MAX_APPEND, MAX_LOG]).toEqual([4 * 1024 * 1024, 48 * 1024 * 1024]);
+    const stop = readFileSync(join(process.cwd(), 'src/hooks/stop.ts'), 'utf8');
+    const calls = [...stop.matchAll(/commitEvents\(([^)]*)\)/g)].map((m) => m[1]);
+    expect(calls).toEqual(['record, home, session, output.commit, env, ctx.now']);
   });
 });
 

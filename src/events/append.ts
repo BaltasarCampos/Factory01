@@ -18,20 +18,25 @@ export function eventLogPath(target: LogTarget, ts: string): string {
   return join(target.factoryLog, '.factory', 'events', `${month}.jsonl`);
 }
 
-export async function appendEvent(
-  target: string | LogTarget,
-  input: EventInput,
-  now: () => Date = () => new Date(),
-): Promise<Event> {
+/** The event as the writer makes it: `ts` from `now`, its text redacted, checked. */
+export function makeEvent(input: EventInput, now: () => Date = () => new Date()): Event {
   const fields: EventInput & { ts?: unknown } = { ...input };
   delete fields.ts;
-  const event = validateEvent({
+  return validateEvent({
     ts: now().toISOString(),
     ...fields,
     ...(fields.tool === undefined ? {} : { tool: redact(fields.tool) }),
     ...(fields.input_summary === undefined ? {} : { input_summary: redact(fields.input_summary) }),
     ...(fields.evidence === undefined ? {} : { evidence: redact(fields.evidence) }),
   });
+}
+
+export async function appendEvent(
+  target: string | LogTarget,
+  input: EventInput,
+  now: () => Date = () => new Date(),
+): Promise<Event> {
+  const event = makeEvent(input, now);
   const path = typeof target === 'string' ? target : eventLogPath(target, event.ts);
   await mkdir(dirname(path), { recursive: true });
   // A last line cut short (no newline) stays as it is; the new line starts on its own.

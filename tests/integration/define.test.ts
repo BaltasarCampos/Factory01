@@ -315,6 +315,72 @@ describe("Define's events (T086, 28-5c-3b)", () => {
       'Factory-Role: define',
     );
   });
+
+  /** A Define stop after `work` on claude/define, its passing head, and the session's log. */
+  const belowStop = (work: (r: TestRepo) => void, main: Files = {}) => {
+    const r = project({ main });
+    ask(r);
+    work(r);
+    r.push(DEFINE);
+    const record = { role: 'define', station: 0, item: 0, feature: '', clone: r.path };
+    const { home, env, log } = recordSession({
+      ...record,
+      branch: DEFINE,
+      head: r.revParse('main'),
+    });
+    writeFileSync(passedPath(home, SESSION_ID), `${JSON.stringify({ session: SESSION_ID })}\n`);
+    const input = { session_id: SESSION_ID, hook_event_name: 'Stop' };
+    const stop = (again = false) =>
+      stopRow(
+        runStop({ ...input, stop_hook_active: again }, { cwd: r.path, now: () => new Date(), env }),
+      );
+    const passed = () => r.git(['for-each-ref', passedRef(SESSION_ID)]);
+    const last = () =>
+      JSON.parse(readFileSync(log, 'utf8').trim().split('\n').at(-1) ?? '{}') as {
+        kind?: string;
+        input_summary?: string;
+      };
+    return { stop, passed, last };
+  };
+  const WAY = 'below an event log, which only the factory appends to; remove them in a new commit';
+
+  it.each([
+    ['the root events log', { 'events.jsonl/x': 'x\n' }, 'events.jsonl/x'],
+    [
+      'a nested events log, in any letter case',
+      { [`${DEFINE_EVENTS}/x`]: 'x\n', 'specs/9-a/Events.jsonl/y': 'y\n' },
+      `${DEFINE_EVENTS}/x, specs/9-a/Events.jsonl/y`,
+    ],
+  ])(
+    'blocks the stop on a path below %s, naming it and the way out',
+    async (_name, files, named) => {
+      const t = belowStop((r) => r.commit(files, 'Define: logs'));
+      expect(await t.stop()).toEqual({ block: true, reason: `${named}: ${WAY}` });
+      expect(t.passed()).toBe('');
+    },
+  );
+
+  it('blocks the stop on a folder renamed in below an events log', async () => {
+    const t = belowStop(
+      (r) => {
+        r.git(['mv', 'notes', DEFINE_EVENTS]);
+        r.git(['commit', '-q', '-m', 'Define: move']);
+      },
+      { 'notes/x': 'x\n' },
+    );
+    expect(await t.stop()).toEqual({ block: true, reason: `${DEFINE_EVENTS}/x: ${WAY}` });
+  });
+
+  it('ends at the second stop with no passing head, never blocked, its alert naming the path and the way out', async () => {
+    const t = belowStop((r) => r.commit({ [`${DEFINE_EVENTS}/x`]: 'x\n' }, 'Define: logs'));
+    expect((await t.stop()).block).toBe(true);
+    expect(await t.stop(true)).toEqual({ block: false });
+    expect(t.passed()).toBe('');
+    expect(t.last()).toMatchObject({
+      kind: 'alert',
+      input_summary: `second stop, ended with no passing head: ${DEFINE_EVENTS}/x: ${WAY}`,
+    });
+  });
 });
 
 describe(
