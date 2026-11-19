@@ -202,6 +202,10 @@ describe('the per-session settings (T061, T082)', () => {
     ]);
   });
 
+  it('turns auto memory off for every role, so no saved note reaches a later session', () => {
+    for (const role of ROLES) expect(render(role).autoMemoryEnabled, role).toBe(false);
+  });
+
   it('opens for writing no folder under ~/.factory/, which the sandbox denies whole', () => {
     for (const role of ROLES) {
       const settings = render(role);

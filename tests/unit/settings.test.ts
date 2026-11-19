@@ -9,6 +9,7 @@ import { STOP_DEADLINE } from '../../src/hooks/session-commits.js';
 import {
   CLAUDE_CODE_TOOLS,
   deniedTools,
+  HOOK_TIMEOUTS,
   renderSettings,
   type Settings,
 } from '../../src/install/settings.js';
@@ -108,7 +109,8 @@ describe('the generated settings (T082)', () => {
     for (const event of ['SessionStart', 'Stop', 'PreCompact'] as const)
       expect(longest(event, ''), event).toBeLessThan(SILENCE / 1000);
     // The Stop hook's own deadline ends it, with its reason, before Claude Code's timeout does.
-    expect(STOP_DEADLINE).toBeLessThanOrEqual(longest('Stop', '') * 1000 - 60_000);
+    // Against the Stop hook's own timeout: a second Stop hook would loosen the summed ones.
+    expect(STOP_DEADLINE).toBeLessThanOrEqual((HOOK_TIMEOUTS.stop ?? 0) * 1000 - 60_000);
   });
 
   it('runs the advisor on Opus, offers no Fable, keeps the file tools in the clone and allows the factory’s MCP tools', () => {

@@ -27,6 +27,7 @@ export type SessionSettings = Omit<Settings, 'permissions'> &
   Omit<SandboxSettings, 'permissions'> & {
     permissions: Settings['permissions'];
     claudeMdExcludes: string[];
+    autoMemoryEnabled: false;
   };
 
 export interface SessionInput {
@@ -121,5 +122,8 @@ export function renderSessionSettings(policy: Policy, input: SessionInput): Sess
       `${paths.home}/.claude/rules/**`,
       `${paths.clone}/**/node_modules/**`,
     ],
+    // No auto memory: notes a steered session saved would reach later sessions unguarded, and a
+    // session loads only its CLAUDE.md, role, work item and input (constitution).
+    autoMemoryEnabled: false,
   };
 }

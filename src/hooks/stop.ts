@@ -27,12 +27,12 @@ import type { HookContext, HookInput, HookResult } from './log.js';
 import { HOOK_COMMITS, hookOutput, type Outside } from './output-commit.js';
 import {
   own,
-  ownOk,
   passedRef,
   sessionOutput,
   STOP_DEADLINE,
   UnreadableHead,
   type SessionOutput,
+  writeRef,
 } from './session-commits.js';
 import {
   logBlocked,
@@ -117,7 +117,10 @@ async function stop(
     } catch (err) {
       // The factory's own failure blocks the stop too, and is logged as every block is.
       const why = err instanceof Error ? err.message : String(err);
-      await logBlocked(record, home, session, { tool: 'Stop', input_summary: why }, ctx.now);
+      const fields = { tool: 'Stop', input_summary: why };
+      const unlogged = await logBlocked(record, home, session, fields, ctx.now);
+      // As the reason path does: an unwritten block is said, not lost.
+      if (unlogged !== '' && err instanceof Error) err.message += visible(unlogged);
       throw err;
     }
     if (reason === undefined) return { block: false };
@@ -211,7 +214,12 @@ async function check(
   // Passed: the head is recorded only for a session whose start passed, and only once read.
   if (output !== undefined && hasPassed(home, session))
     // Removed before the output was read: a ref there now is another hook's.
-    ownOk(output.repo, ['update-ref', passedRef(session), output.commit, ''], env);
+    writeRef(
+      output.repo,
+      passedRef(session),
+      ['update-ref', passedRef(session), output.commit, ''],
+      env,
+    );
   return undefined;
 }
 
@@ -223,11 +231,11 @@ function clearPassed(repo: string, session: string, env: NodeJS.ProcessEnv) {
   const ref = passedRef(session);
   const found = own(repo, ['rev-parse', '--verify', '-q', ref], env);
   if (found.status === 1) return;
-  const failed = found.status === 0 ? own(repo, ['update-ref', '-d', ref, found.out], env) : found;
-  if (failed.status !== 0)
+  if (found.status !== 0)
     throw new EnvironmentError(
-      `the factory could not remove its passing head ${ref} in ${repo}, which this session cannot fix: ${failed.err}`,
+      `the factory could not read its passing head ${ref} in ${repo}, which this session cannot fix: ${visible(found.err)}`,
     );
+  writeRef(repo, ref, ['update-ref', '-d', ref, found.out], env);
 }
 
 /** The alert for what changed outside the role's paths, or why it could not be listed; or none. */

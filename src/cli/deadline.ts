@@ -19,6 +19,9 @@ export async function withDeadline<T>(ms: number, run: () => Promise<T>): Promis
 /** Whether a deadline is running, for the test that proves every program carries it. */
 export const deadlineActive = () => deadline !== undefined;
 
+/** The ms left before the running deadline, or undefined for none; for the same test. */
+export const msLeft = () => (deadline === undefined ? undefined : deadline.at - Date.now());
+
 /** The deadline's refusal: the factory's own limit, which the session cannot fix. */
 const refusal = (ms: number) =>
   new EnvironmentError(
