@@ -1,11 +1,15 @@
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { renderComment } from '../../src/approvals/record.js';
 import { sign } from '../../src/approvals/sign.js';
 import { dispatchOnce, type DispatchContext } from '../../src/dispatcher/dispatch.js';
+import { appendEvent } from '../../src/events/append.js';
+import { DEFINE_EVENTS } from '../../src/hooks/events-commit.js';
+import { passedRef, sessionRef } from '../../src/hooks/session-commits.js';
+import { passedPath, readSessionRecord, recordEvent } from '../../src/hooks/session.js';
 import { runStop } from '../../src/hooks/stop.js';
 import { STATES, type ApprovalRecord } from '../../src/model/types.js';
 import {
@@ -274,6 +278,42 @@ describe('Define output check: questions first (AC-004, AC-056)', { timeout: 60_
       block: true,
       reason: expect.stringMatching(/before the Owner's answers/) as string,
     });
+  });
+});
+
+describe("Define's events (T086, 28-5c-3b)", () => {
+  it('appends the session log to .factory/define/events.jsonl on claude/define, in the events commit', async () => {
+    const r = project();
+    ask(r);
+    r.push(DEFINE);
+    const record = { role: 'define', station: 0, item: 0, feature: '', clone: r.path };
+    const { home, env, log } = recordSession({
+      ...record,
+      branch: DEFINE,
+      head: r.revParse('main'),
+    });
+    writeFileSync(passedPath(home, SESSION_ID), `${JSON.stringify({ session: SESSION_ID })}\n`);
+    const line = recordEvent(readSessionRecord(home, SESSION_ID), SESSION_ID, {
+      kind: 'alert',
+      tool: 'Bash',
+      input_summary: 'one tool call',
+    });
+    await appendEvent(log, line);
+    const input = { session_id: SESSION_ID, hook_event_name: 'Stop' };
+
+    expect(await stopRow(runStop(input, { cwd: r.path, now: () => new Date(), env }))).toEqual({
+      block: false,
+    });
+
+    const git = (args: string[]) => r.git(args);
+    const passed = git(['rev-parse', passedRef(SESSION_ID)]);
+    expect(git(['rev-parse', `${passed}^`])).toBe(git(['rev-parse', sessionRef(SESSION_ID)]));
+    expect(git(['diff-tree', '--no-commit-id', '--name-only', '-r', passed])).toBe(DEFINE_EVENTS);
+    expect(`${git(['show', `${passed}:${DEFINE_EVENTS}`])}\n`).toBe(readFileSync(log, 'utf8'));
+    // Define's work is the project's, not an item's: no Factory-Item.
+    expect(git(['log', '-1', '--format=%(trailers:only,unfold)', passed])).toBe(
+      'Factory-Role: define',
+    );
   });
 });
 

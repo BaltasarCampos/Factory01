@@ -481,7 +481,22 @@ export function commitOutput(
   work: string,
   env: NodeJS.ProcessEnv,
 ): string {
-  const { project: repo, head, role } = record;
+  return commitFiles(record, record.head, files, work, env, 'output');
+}
+
+/**
+ * The commit of `files` on `head` in the factory's own clone, as the role's factory author, with
+ * its trailers (`Factory-Item` only for an item's work); `head` when they change nothing.
+ */
+export function commitFiles(
+  record: SessionRecord,
+  head: string,
+  files: ReadonlyMap<string, Buffer>,
+  work: string,
+  env: NodeJS.ProcessEnv,
+  what: string,
+): string {
+  const { project: repo, role } = record;
   const who = author(role);
   const more = {
     env: {
@@ -497,8 +512,8 @@ export function commitOutput(
   }
   const tree = ownOk(repo, ['write-tree'], env, more);
   if (tree === ownOk(repo, ['rev-parse', `${head}^{tree}`], env)) return head;
-  const item = basename(record.feature);
-  const message = `${who.name}: station ${String(record.station)} output\n\nFactory-Role: ${role}\nFactory-Item: ${item}\n`;
+  const item = record.feature === '' ? '' : `Factory-Item: ${basename(record.feature)}\n`;
+  const message = `${who.name}: station ${String(record.station)} ${what}\n\nFactory-Role: ${role}\n${item}`;
   // The clone's own config would set the commit's encoding header.
   const commit = ['commit-tree', '--no-gpg-sign', tree, '-p', head, '-m', message];
   return ownOk(repo, ['-c', 'i18n.commitEncoding=UTF-8', ...commit], env, more);

@@ -24,10 +24,11 @@ import { securityStopCheck } from '../stations/checks/security.js';
 import { specStopCheck } from '../stations/checks/spec.js';
 import { verifyStopCheck } from '../stations/checks/verify.js';
 import type { HookContext, HookInput, HookResult } from './log.js';
+import { commitEvents } from './events-commit.js';
 import { HOOK_COMMITS, hookOutput, type Outside } from './output-commit.js';
 import {
-  own,
   passedRef,
+  readRef,
   sessionOutput,
   STOP_DEADLINE,
   UnreadableHead,
@@ -212,14 +213,26 @@ async function check(
   if (!result.complete)
     return `station ${name} output is incomplete: ${(result.missing ?? ['see the station prompt']).join(', ')}`;
   // Passed: the head is recorded only for a session whose start passed, and only once read.
-  if (output !== undefined && hasPassed(home, session))
+  if (output !== undefined && hasPassed(home, session)) {
+    // The passing head names the events commit on the head the check passed; with none, no
+    // passing head, and an alert says why.
+    let events: string;
+    try {
+      events = commitEvents(record, home, session, output.commit, env);
+    } catch (err) {
+      const why = err instanceof Error ? err.message : String(err);
+      const summary = `no passing head: the factory could not append the session's log to the item's event log, its own error, which this session cannot fix: ${visible(why)}`;
+      const event = recordEvent(record, session, {
+        kind: 'alert',
+        tool: 'Stop',
+        input_summary: summary,
+      });
+      await appendEvent(sessionEvents(home, session), event, ctx.now);
+      return undefined;
+    }
     // Removed before the output was read: a ref there now is another hook's.
-    writeRef(
-      output.repo,
-      passedRef(session),
-      ['update-ref', passedRef(session), output.commit, ''],
-      env,
-    );
+    writeRef(output.repo, passedRef(session), '', events, env);
+  }
   return undefined;
 }
 
@@ -229,13 +242,8 @@ async function check(
  */
 function clearPassed(repo: string, session: string, env: NodeJS.ProcessEnv) {
   const ref = passedRef(session);
-  const found = own(repo, ['rev-parse', '--verify', '-q', ref], env);
-  if (found.status === 1) return;
-  if (found.status !== 0)
-    throw new EnvironmentError(
-      `the factory could not read its passing head ${ref} in ${repo}, which this session cannot fix: ${visible(found.err)}`,
-    );
-  writeRef(repo, ref, ['update-ref', '-d', ref, found.out], env);
+  const found = readRef(repo, ref, env);
+  if (found !== undefined) writeRef(repo, ref, found, undefined, env);
 }
 
 /** The alert for what changed outside the role's paths, or why it could not be listed; or none. */

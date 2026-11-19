@@ -156,6 +156,7 @@ export function own(
   try {
     result = safeGit(repo, args, env, input, undefined, { timeout: GIT_TIMEOUT, ...more });
   } catch (err) {
+    if (err instanceof EnvironmentError) throw err;
     throw (
       pastDeadline() ??
       new EnvironmentError(`git ${args[0] ?? ''} in ${repo} did not finish: ${String(err)}`)
@@ -183,27 +184,52 @@ export function ownOk(
  * hook would leave to block every later stop.
  */
 export function swapRef(repo: string, ref: string, to: string, env: NodeJS.ProcessEnv) {
-  const now = own(repo, ['rev-parse', '--verify', '-q', ref], env);
-  if (now.status !== 0 && now.status !== 1)
-    throw new EnvironmentError(`git rev-parse in ${repo} failed: ${now.err}`);
-  writeRef(repo, ref, ['update-ref', ref, to, now.status === 0 ? now.out : ''], env);
+  writeRef(repo, ref, readRef(repo, ref, env) ?? '', to, env);
 }
 
 /**
- * A compare-and-swap ref write, `update-ref` with the old value: its failure is a lost race, which
- * names the way out (T086).
+ * The commit `ref` names, or undefined when it is absent: exit 1 with nothing on stderr. A broken
+ * ref exits 1 with a warning, and is the factory's error, never absent.
+ */
+export function readRef(repo: string, ref: string, env: NodeJS.ProcessEnv): string | undefined {
+  const found = own(repo, ['rev-parse', '--verify', '-q', ref], env);
+  if (found.status === 0) return found.out;
+  if (found.status === 1 && found.err === '') return undefined;
+  throw new EnvironmentError(
+    `the factory could not read ${ref} in ${repo}, which this session cannot fix: ${visible(found.err)}`,
+  );
+}
+
+/**
+ * Moves `ref` from `old` (`''` for absent) to `to`, or deletes it with no `to`, by git's
+ * compare-and-swap. A failure is a lost race only when the ref moved meanwhile (T086).
  */
 export function writeRef(
   repo: string,
   ref: string,
-  args: readonly string[],
+  old: string,
+  to: string | undefined,
   env: NodeJS.ProcessEnv,
 ) {
+  const args = to === undefined ? ['update-ref', '-d', ref, old] : ['update-ref', ref, to, old];
   const result = own(repo, args, env);
-  if (result.status !== 0)
+  if (result.status === 0) return;
+  let now: string | undefined;
+  try {
+    now = readRef(repo, ref, env);
+  } catch {
+    now = old === '' ? undefined : old;
+  }
+  if (now !== (old === '' ? undefined : old))
     throw new EnvironmentError(
       `another run of the Stop hook wrote ${ref} at the same time: the factory's own error, which this session cannot fix; check that the pin registers each hook once (git: ${visible(result.err)})`,
     );
+  const lock = /\.lock\b/.test(result.err)
+    ? '; if no git is running, remove the .lock file git names'
+    : '';
+  throw new EnvironmentError(
+    `the factory could not write ${ref} in ${repo}, which this session cannot fix (git: ${visible(result.err)})${lock}`,
+  );
 }
 
 /** Moves a file into `folder`, by rename, or by copy and rename across filesystems. */
