@@ -9,7 +9,7 @@
 // Nor may the user's git settings: every call runs without the global and system config, with
 // an explicit algorithm, context and no colour, so the laptop and CI see the same lines.
 import { spawnSync } from 'node:child_process';
-import { deadlineActive, pastDeadline, timeLeft } from '../cli/deadline.js';
+import { bound, deadlineActive } from '../cli/deadline.js';
 import { EnvironmentError } from '../cli/env.js';
 import { mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -70,7 +70,8 @@ export function safeGit(
   );
   // Inside the Stop hook, the time left before its deadline, and never more than GIT_TIMEOUT
   // for one git run, whoever calls it (T086).
-  const timeout = timeLeft(more.timeout ?? (deadlineActive() ? GIT_TIMEOUT : undefined));
+  const limit = bound(more.timeout ?? (deadlineActive() ? GIT_TIMEOUT : undefined));
+  const { timeout } = limit;
   const result = spawnSync(
     'git',
     [
@@ -94,10 +95,11 @@ export function safeGit(
     },
   );
   if (result.error !== undefined) {
-    const over = pastDeadline();
+    const timedOut = (result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT';
+    const over = limit.ended(timedOut);
     if (over !== undefined) throw over;
     // Its own cap, not the deadline: named, never Node's bare ETIMEDOUT.
-    if ((result.error as NodeJS.ErrnoException).code === 'ETIMEDOUT' && timeout !== undefined)
+    if (timedOut && timeout !== undefined)
       throw new EnvironmentError(
         `git ${args[0] ?? ''} in ${repo} did not finish within its ${String(timeout / 1000)} s limit: the factory's own error, which this session cannot fix`,
       );

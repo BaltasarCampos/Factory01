@@ -15,7 +15,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readdirSync } from 'node:fs';
 import { renameSync, rmSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { probeBwrap, sandboxArgs } from '../ci/sandbox.js';
-import { pastDeadline, timeLeft } from '../cli/deadline.js';
+import { bound, DeadlinePassed, pastDeadline } from '../cli/deadline.js';
 import { EnvironmentError } from '../cli/env.js';
 import { GIT_TIMEOUT, safeGit } from '../git/diff.js';
 import { visible } from '../notify/summary.js';
@@ -91,15 +91,16 @@ export function inBox(
     env,
     "the session's clone is read only inside bubblewrap, which failed (install it with: sudo apt install bubblewrap)",
   );
+  const time = bound(GIT_TIMEOUT);
   const result = spawnSync('bwrap', [...argv, ...command], {
     env: outer,
-    timeout: timeLeft(GIT_TIMEOUT),
+    timeout: time.timeout,
     killSignal: 'SIGKILL',
     maxBuffer: limit,
     ...(io.input === undefined ? {} : { input: io.input }),
   });
   const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
-  const over = pastDeadline();
+  const over = time.ended(code === 'ETIMEDOUT');
   if (over !== undefined) throw over;
   if (code === 'ENOBUFS')
     throw new UnreadableHead(
@@ -217,10 +218,9 @@ export function writeRef(
   let now: string | undefined;
   try {
     now = readRef(repo, ref, env);
-  } catch {
+  } catch (err) {
     // The deadline's refusal is never hidden behind "could not write".
-    const over = pastDeadline();
-    if (over !== undefined) throw over;
+    if (err instanceof DeadlinePassed) throw err;
     now = old === '' ? undefined : old;
   }
   if (now !== (old === '' ? undefined : old))

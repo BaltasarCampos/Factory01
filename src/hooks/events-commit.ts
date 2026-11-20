@@ -30,6 +30,8 @@ export const MAX_APPEND = 4 * 1024 * 1024;
 export const MAX_LOG = 48 * 1024 * 1024;
 /** Kept under `MAX_LOG` for the one line that says what was left out. */
 const NOTE_ROOM = 4096;
+/** The factory's line, once, in a log no session's lines fit in any more (Owner decision 2026-11-19). */
+export const LOG_FULL = "the event log is full; later sessions' events are left out";
 /** The two limits; only tests pass others, as the launcher's memory-walk stop is for tests (T061). */
 export interface EventLimits {
   append: number;
@@ -181,10 +183,30 @@ function logAt(record: SessionRecord, head: string, path: string, env: NodeJS.Pr
   return blob.stdout;
 }
 
+/** Whether the log's last line is the factory's `LOG_FULL` line. */
+function endsFull(old: Buffer): boolean {
+  const end = old.length > 0 && old[old.length - 1] === 0x0a ? old.length - 1 : old.length;
+  try {
+    const tail = old.subarray(old.lastIndexOf(0x0a, end - 1) + 1, end).toString('utf8');
+    const last = JSON.parse(tail) as Record<string, unknown>;
+    return last.kind === 'alert' && last.tool === 'Stop' && last.input_summary === LOG_FULL;
+  } catch {
+    return false;
+  }
+}
+
+/** The events commit, and the alert for the session's own log when its events are left out. */
+export interface EventsCommit {
+  commit: string;
+  full?: string;
+}
+
 /**
  * The events commit on `head`, the commit the check passed, in the record's `project`; `head`
- * itself when there is no line to append, or no room for one. Throws only on a git failure or a
- * log at `head` that is not a regular file (`LogNotFile`).
+ * itself when there is no line to append. A log the session's lines no longer fit in gets the
+ * `LOG_FULL` line once, passing the limit by that line alone, and `full` says so for the session's
+ * own log; telemetry never costs the work. Throws only on a git failure or a log at `head` that is
+ * not a regular file (`LogNotFile`).
  */
 export function commitEvents(
   record: SessionRecord,
@@ -194,7 +216,7 @@ export function commitEvents(
   env: NodeJS.ProcessEnv,
   now: () => Date,
   limits: EventLimits = { append: MAX_APPEND, log: MAX_LOG },
-): string {
+): EventsCommit {
   const path = eventsPath(record);
   const old = logAt(record, head, path, env);
   // A last line cut short keeps its bytes; the first new line starts on its own.
@@ -222,12 +244,22 @@ export function commitEvents(
       ),
     );
   }
-  const added = Buffer.concat(lines.flatMap((line) => [line, Buffer.from('\n')]));
-  if (lines.length === 0 || added.length > room) return head;
+  const lined = (all: Buffer[]) => Buffer.concat(all.flatMap((line) => [line, Buffer.from('\n')]));
+  let added = lined(lines);
+  if (lines.length === 0) return { commit: head };
+  // Once full, nothing more goes in: the full line stays the log's last.
+  let full: string | undefined;
+  const already = endsFull(old);
+  if (already || added.length > room) {
+    full = `${path} is full, past ${size(limits.log)}, so none of this session's events is in it; they are only in the session's own log`;
+    if (already) return { commit: head, full };
+    added = lined([note(LOG_FULL)]);
+  }
   const log = Buffer.concat([old, lead, added]);
   const work = mkdtempSync(join(sessionFolder(home, session), 'events-'));
   try {
-    return commitFiles(record, head, new Map([[path, log]]), work, env, 'events');
+    const commit = commitFiles(record, head, new Map([[path, log]]), work, env, 'events');
+    return full === undefined ? { commit } : { commit, full };
   } finally {
     rmSync(work, { recursive: true, force: true });
   }
