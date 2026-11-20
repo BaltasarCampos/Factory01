@@ -25,11 +25,12 @@ When a slice needs a file under `.specify/`, write it byte for byte to `~` and r
 
 ## Checks
 
-- The whole suite, `npm test`, on a slice's first code commit and on its last commit before the report. On commits between: `npm run lint`, `npm run typecheck` and `npx vitest related <files> --run`. On notes-only commits: the contract tests that read `specs/`.
-- On the reported commit, run exactly CI's commands, each as its own call: `npm run build`, `npm run lint`, `npm run typecheck`, `npx --no-install prettier --check .`, `npm test`. Never a substitute: `tsc -p .` covers `src/` only and once let a broken type check through (2026-10-14).
+- The whole suite, `npm test -- --testTimeout=15000`, on a slice's first code commit and on its last commit before the report. On commits between: `npm run lint`, `npm run typecheck` and `npx vitest related <files> --run`. On notes-only commits: the contract tests that read `specs/`.
+- On the reported commit, run exactly CI's commands, each as its own call: `npm run build`, `npm run lint`, `npm run typecheck`, `npx --no-install prettier --check .`, `npm test -- --testTimeout=15000`. Never a substitute: `tsc -p .` covers `src/` only and once let a broken type check through (2026-10-14).
 - Commit only after every check has passed and you have read the results. A whole-suite run with any failure, even a timeout in a file you didn't touch, is re-run whole before the commit. If the re-run passes, the report names the test and both results; if it fails again, stop and tell the Owner.
 - Chain a commit on the checks' exit status; never commit from a script that only greps their output (28-4b-2). Don't edit the tree while a suite runs on it. On whole-suite runs, read only the failures and the summary line.
 - The laptop has about 2.7 GB of memory. Run heavy checks one at a time, never in parallel. When tests time out, check `free -m` first. Never run Vitest with `--root` outside the repository.
+- `--testTimeout=15000` is for the laptop's load and goes on the command only, never in `vitest.config`, `package.json` or CI. CI keeps Vitest's 5 s default, so a row slow on CI still fails there; rows with their own limits keep them (2026-11-20).
 - To wait for a background run, wait on its own pid. Never `pgrep -f` a word that is in your own command line: the wait then matches itself and never ends.
 - Tests build their own state: their PATH, the programs on it and files in home. They never rely on what the machine running them has installed (T061, 2026-10-30).
 
