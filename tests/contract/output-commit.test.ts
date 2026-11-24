@@ -586,6 +586,20 @@ describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
     expect(t.events().at(-1)?.input_summary).toMatch(/events\.jsonl is full, past 48 MiB/);
   }, 60_000);
 
+  it.skipIf(process.getuid?.() === 0)(
+    "keeps the passing head, and names the real cause, when the session's log cannot take the full alert",
+    async () => {
+      const t = issued('reviewer', 5, { [EVENTS]: `${'z'.repeat(MAX_LOG)}\n` });
+      t.passed();
+      t.write(REPORT, VERIFY);
+      writeFileSync(t.log, `${good(t)}\n`);
+      chmodSync(t.log, 0o444);
+      await expect(t.stop()).rejects.toThrow(/EACCES/);
+      expect(t.parentOf(t.ref(passedRef(SESSION_ID)))).toBe(t.ref(sessionRef(SESSION_ID)));
+    },
+    60_000,
+  );
+
   it('has 4 MiB and 48 MiB as its limits, and the Stop hook passes neither', () => {
     expect([MAX_APPEND, MAX_LOG]).toEqual([4 * 1024 * 1024, 48 * 1024 * 1024]);
     const stop = readFileSync(join(process.cwd(), 'src/hooks/stop.ts'), 'utf8');
