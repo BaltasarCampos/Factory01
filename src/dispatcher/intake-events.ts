@@ -16,6 +16,7 @@ import {
   readFileSync,
   readSync,
   fsyncSync,
+  rmSync,
   writeSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -25,6 +26,7 @@ import { MAX_APPEND, MAX_LOG } from '../hooks/events-commit.js';
 import { readSessionRecord, recordEvent, sessionEvents } from '../hooks/session.js';
 import { sessionLines } from '../hooks/session-log.js';
 import { visible } from '../notify/summary.js';
+import { validateEvent } from '../events/schema.js';
 import { failureFile, readFailureRecord, repoParts } from './failures.js';
 import { present, sessionRunning } from './launcher/local.js';
 
@@ -47,6 +49,7 @@ const failed = (what: string, file: string, err: unknown) =>
 export const INTAKE_FULL = `Intake's events file is full, past ${String(MAX_LOG / (1024 * 1024))} MiB; the rest of this session's lines and later sessions' lines are left out`;
 
 interface Scanned {
+  text: string;
   sessions: Set<string>;
   /** Whether the factory's full line is in the file. */
   full: boolean;
@@ -79,7 +82,7 @@ function scan(file: string): Scanned {
     }
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT')
-      return { sessions: new Set(), full: false, size: 0 };
+      return { text: '', sessions: new Set(), full: false, size: 0 };
     throw failed('could not read', file, err);
   }
   const found = new Set<string>();
@@ -97,7 +100,7 @@ function scan(file: string): Scanned {
     if (summary === INTAKE_FULL) full = true;
     else if (typeof session === 'string' && summary === intakeMark(session)) found.add(session);
   }
-  return { sessions: found, full, size };
+  return { text, sessions: found, full, size };
 }
 
 export const intakeSessions = (file: string): Set<string> => scan(file).sessions;
@@ -206,4 +209,67 @@ export function recoverIntakeSession(
   if (sessionRunning(home, id) !== undefined) return;
   if (!present(join(home, '.factory', 'sessions', id, 'session.json'))) return;
   appendIntakeSession(home, repo, issue, id, now);
+}
+
+/** The role version of a factory line that no release wrote: the seed's "not here" line. */
+const NO_RELEASE = 'v0.0.0+000000000000';
+
+/** The seed of an item branch's `events.jsonl`: Intake's lines, and what to alert, if anything. */
+export interface IntakeSeed {
+  text: string;
+  /** An Intake session ran and its lines are not in the file: why, for one alert. */
+  missing?: string;
+}
+
+/**
+ * The first lines of the item branch's `events.jsonl` (design, "Before the branch exists"): the
+ * per-item file's lines that are events of this item's Intake, in order, or one line saying
+ * Intake's events are not here. It reads no comment. The failure record's session, when it ran
+ * and has no marker in the file, is named in `missing`: the lines are lost, so the Owner is told.
+ */
+export function intakeSeed(home: string, repo: string, issue: number, now: () => Date): IntakeSeed {
+  const state = scan(intakeEventsFile(home, repo, issue));
+  const lines = state.text.split('\n').filter((line) => {
+    try {
+      const e = validateEvent(JSON.parse(line));
+      return e.item === issue && e.role === 'intake';
+    } catch {
+      return false;
+    }
+  });
+  const none = JSON.stringify(
+    makeEvent(
+      {
+        ...{ item: issue, station: 1, role: 'intake', role_version: NO_RELEASE },
+        ...{ session: 'dispatcher', model: 'none', kind: 'alert', tool: 'Dispatcher' },
+        input_summary: "Intake's events are not here: none were kept on the laptop for this item",
+      },
+      now,
+    ),
+  );
+  const text = `${(lines.length === 0 ? [none] : lines).join('\n')}\n`;
+  const id = readFailureRecord(failureFile(home, repo, issue, 1))?.session;
+  const ran = id !== undefined && present(join(home, '.factory', 'sessions', id, 'session.json'));
+  if (!ran || state.sessions.has(id)) return { text };
+  // Full by its line, or too near the limit for an append to fit one (see `appendIntakeSession`).
+  const full = state.full || state.size > MAX_LOG - 1024;
+  const why = full ? 'the file is full' : 'it was not appended to the file';
+  return {
+    text,
+    missing: `#${String(issue)}: Intake session ${id}'s lines are not in the item's events file, since ${why}; the branch is created without them, and they are only in the session's own log under ~/.factory/sessions/`,
+  };
+}
+
+/** Whether the item's file exists; anything but its absence throws. */
+export const hasIntakeFile = (home: string, repo: string, issue: number): boolean =>
+  present(intakeEventsFile(home, repo, issue));
+
+/** Deletes the item's file once its lines are on the pushed branch; a missing file is fine. */
+export function dropIntakeFile(home: string, repo: string, issue: number): void {
+  const file = intakeEventsFile(home, repo, issue);
+  try {
+    rmSync(file, { force: true });
+  } catch (err) {
+    throw failed('could not delete', file, err);
+  }
 }

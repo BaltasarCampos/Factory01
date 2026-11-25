@@ -36,7 +36,14 @@ import {
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
 import { visible } from '../notify/summary.js';
 import { duplicateOf } from '../stations/checks/intake.js';
-import { appendIntakeSession, recoverIntakeSession } from './intake-events.js';
+import {
+  appendIntakeSession,
+  dropIntakeFile,
+  hasIntakeFile,
+  type IntakeSeed,
+  intakeSeed,
+  recoverIntakeSession,
+} from './intake-events.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
 import {
@@ -182,7 +189,6 @@ interface Target {
   station: Station;
   role: RoleName;
   branch: string;
-  comments: PostedComment[];
   failure?: string;
   /** The dispatcher's own spent manifest at the branch's head, started again (T061). */
   relaunch?: { head: string; manifest: StationManifest };
@@ -402,6 +408,16 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     // A session that ended before its lines reached the item's file: first, before anything moves.
     if (why === undefined && item.state === 'new' && config.agents === 'local')
       recoverIntakeSession(ctx.failures.home, repo, issue.number, git.now);
+    // A file left by a pass that stopped between the branch's push and the delete goes next pass.
+    else if (
+      why === undefined &&
+      item.branch !== undefined &&
+      hasIntakeFile(ctx.failures.home, repo, issue.number)
+    )
+      await seedBranch(
+        { ctx, git, mainRef, config, alertOnce },
+        { issue: issue.number, branch: item.branch },
+      );
     let found = await gather();
     if (found.tick !== undefined && item.branch !== undefined) {
       const { task, head } = found.tick;
@@ -441,6 +457,11 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     if (decision.ok) {
       // Any move out of `new` ends Intake's count, its record deleted first, so a failure to
       // delete it stops the pass with the item still in `new` (T061).
+      // The seed is read first: the record names the Intake session whose lines may be missing.
+      const toBranch = item.state === 'new' && decision.to === 'triaged';
+      const seed = toBranch
+        ? intakeSeed(ctx.failures.home, repo, issue.number, git.now)
+        : undefined;
       if (item.state === 'new') clearIntake(ctx.failures, repo, issue.number);
       await addLabel(repo, issue.number, `state:${decision.to}`, options);
       for (const label of issue.labels)
@@ -459,8 +480,12 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
           evidence: decision.reason,
         });
       }
-      if (from === 'new' && decision.to === 'triaged' && item.branch !== undefined)
-        createItemBranch(git, { issue: issue.number, branch: item.branch }, comments, mainRef);
+      if (toBranch && item.branch !== undefined)
+        await seedBranch(
+          { ctx, git, mainRef, config, alertOnce },
+          { issue: issue.number, branch: item.branch },
+          seed,
+        );
       item.state = decision.to;
       found = await gather();
     }
@@ -496,7 +521,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     const failure = relaunch === undefined ? found.buildFailure : relaunch.manifest.failure;
     if (branch !== undefined && role !== undefined)
       targets.push({
-        ...{ item, station: at, role, branch, comments },
+        ...{ item, station: at, role, branch },
         ...(failure === undefined ? {} : { failure }),
         ...(relaunch === undefined ? {} : { relaunch }),
       });
@@ -542,13 +567,32 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   return result;
 }
 
+/**
+ * The item's branch, seeded from Intake's per-item file, which is dropped once the branch is on
+ * origin, whether this pass pushed it or an earlier one did and stopped before the delete. A push
+ * that fails keeps the file. The lines of an Intake session that are not in it alert once.
+ */
+async function seedBranch(
+  pass: Pick<Pass, 'ctx' | 'git' | 'mainRef' | 'config' | 'alertOnce'>,
+  ref: ItemRef,
+  read?: IntakeSeed,
+): Promise<void> {
+  const { ctx, git, mainRef, config, alertOnce } = pass;
+  const { home } = ctx.failures;
+  const seed = read ?? intakeSeed(home, config.repo, ref.issue, git.now);
+  const created = createItemBranch(git, ref, seed.text, mainRef);
+  dropIntakeFile(home, config.repo, ref.issue);
+  if (created && seed.missing !== undefined)
+    await alertOnce({ urgency: 'info', kind: 'intake-events-missing', text: seed.missing });
+}
+
 /** The session for `target`; undefined when the item holds instead, and the pass goes on. */
 async function startSession(pass: Pass, target: Target): Promise<PassResult | undefined> {
   const { ctx, result, config, git, mainRef, keys, history, released, alertOnce } = pass;
   const { launcher, refuse } = pass;
   const { repo } = config;
   const options = ctx.gh ?? {};
-  const { item, station, role, branch, comments, failure, relaunch } = target;
+  const { item, station, role, branch, failure, relaunch } = target;
   // The feature folder and the task's files, for the session's own settings (T061).
   let session = { feature: '', files: [] as readonly string[] };
   let starting: { starting: (id: string, launched: string) => void } | undefined;
@@ -580,7 +624,7 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
   if (station === 1 && config.agents === 'local') attempt();
   if (station >= 2 && station <= 6) {
     const ref: ItemRef = { issue: item.issue.number, branch };
-    createItemBranch(git, ref, comments, mainRef);
+    await seedBranch(pass, ref);
     await ensureDraftPr(repo, { ...ref, title: item.issue.title }, options);
     // In local mode the dispatcher's own manifest commit is known from the failure record alone,
     // written before the push, so a record that cannot be written pushes nothing (T061).

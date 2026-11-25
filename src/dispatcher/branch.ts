@@ -1,7 +1,7 @@
 // The work-item branch (FR-016a, AC-066): created by the dispatcher, never by a session, under
 // the name the Owner signed in the `approved` record's `branch` field, never re-derived from the
 // issue title, from which every reader takes the feature folder (T170, research R9). Its first
-// commit seeds `events.jsonl` with Intake's issue-comment events; one draft pull request per item
+// commit seeds `events.jsonl` with Intake's events from the laptop's per-item file; one draft pull request per item
 // is opened before Specify starts.
 //
 // Commits are built with git plumbing on a temporary index, so the dispatcher's working copy is
@@ -11,16 +11,11 @@ import { spawnSync } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { PostedComment } from '../approvals/verify.js';
 import { EnvironmentError } from '../cli/env.js';
-import { redact } from '../events/redact.js';
-import { validateEvent } from '../events/schema.js';
 import { DISPATCHER } from '../events/trace.js';
 import type { GhOptions } from '../github/gh.js';
 import { createDraftPr, listPrs } from '../github/prs.js';
 import { isSlug } from '../model/naming.js';
-import type { Event } from '../model/types.js';
-import { clean } from '../notify/summary.js';
 
 export interface ItemRef {
   issue: number;
@@ -34,12 +29,6 @@ export interface BranchContext {
   now: () => Date;
   env?: NodeJS.ProcessEnv;
 }
-
-/** Caps on Intake's comment events (data-model.md § Event). */
-export const MAX_BLOCKS = 4;
-export const MAX_BLOCK_BYTES = 4096;
-const BLOCK = /^```factory-event[ \t]*\n([\s\S]*?)\n```[ \t]*$/gm;
-const REDACTED = ['tool', 'input_summary', 'evidence'];
 
 /** `<issue>-<slug>` of an item branch; refuses a branch that is not `claude/<issue>-<slug>`. */
 export function featureOf(item: ItemRef): string {
@@ -154,44 +143,6 @@ export function commitAndPush(
   }
 }
 
-/** Intake's events in one comment: valid blocks for this item, timed by GitHub, cleaned. */
-function commentEvents(issue: number, comment: PostedComment): Event[] {
-  // Signed records stay on the issue; the event log is telemetry (data-model § Approval record).
-  if (comment.body.includes('```factory-record')) return [];
-  const blocks = [...comment.body.matchAll(BLOCK)].map((m) => m[1] ?? '');
-  if (blocks.length > MAX_BLOCKS) return [];
-  return blocks.flatMap((text) => {
-    if (Buffer.byteLength(text) > MAX_BLOCK_BYTES) return [];
-    let value: unknown;
-    try {
-      value = JSON.parse(text);
-    } catch {
-      return [];
-    }
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return [];
-    const fields: Record<string, unknown> = {};
-    for (const [key, v] of Object.entries(value))
-      fields[key] =
-        typeof v !== 'string' ? v : REDACTED.includes(key) ? redact(clean(v)) : clean(v);
-    try {
-      const event = validateEvent({ ...fields, ts: comment.createdAt });
-      return event.item === issue && event.role === 'intake' ? [event] : [];
-    } catch {
-      return [];
-    }
-  });
-}
-
-/** The first lines of `events.jsonl`: each comment's events once, by comment ID. */
-export function seedEvents(issue: number, comments: readonly PostedComment[]): string {
-  const seen = new Set<string>();
-  return comments
-    .filter((c) => !seen.has(c.id) && seen.add(c.id))
-    .flatMap((c) => commentEvents(issue, c))
-    .map((e) => `${JSON.stringify(e)}\n`)
-    .join('');
-}
-
 /**
  * Create the item branch from main with the seeded event log.
  * False when the branch already exists: a later pass copies nothing.
@@ -199,12 +150,12 @@ export function seedEvents(issue: number, comments: readonly PostedComment[]): s
 export function createItemBranch(
   ctx: BranchContext,
   item: ItemRef,
-  comments: readonly PostedComment[],
+  seed: string,
   mainRef = 'origin/main',
 ): boolean {
   const feature = featureOf(item);
   if (fetchBranch(ctx, item.branch) !== undefined) return false;
-  const files = { [`specs/${feature}/events.jsonl`]: seedEvents(item.issue, comments) };
+  const files = { [`specs/${feature}/events.jsonl`]: seed };
   const main = git(ctx, ['rev-parse', '--verify', `${mainRef}^{commit}`]);
   commitAndPush(ctx, main, files, dispatcherMessage(`create ${item.branch}`, feature), item.branch);
   git(ctx, [

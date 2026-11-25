@@ -7,12 +7,13 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentError } from '../../src/cli/env.js';
-import { createItemBranch, dispatcherMessage } from '../../src/dispatcher/branch.js';
+import { dispatcherMessage } from '../../src/dispatcher/branch.js';
 import { changedFiles, dispatchOnce } from '../../src/dispatcher/dispatch.js';
 import { gatherEvidence } from '../../src/dispatcher/evidence.js';
 import {
@@ -29,6 +30,7 @@ import {
 } from '../../src/dispatcher/intake-events.js';
 import { groupRecord } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, SessionFailed } from '../../src/dispatcher/launcher/types.js';
+import { MAX_LOG } from '../../src/hooks/events-commit.js';
 import { checkIntakeIssue } from '../../src/stations/checks/intake.js';
 import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
@@ -47,9 +49,7 @@ import {
   INTAKE_LABELS,
   HASH,
   owner,
-  approvalBody,
   intakeEvent,
-  block,
   eventComment,
   setup,
   seededLines,
@@ -77,58 +77,66 @@ describe('work-item branch creation (AC-066, FR-016a)', { timeout: 60_000 }, () 
     ]);
   });
 
-  it('copies a valid Intake factory-event block as the first line of events.jsonl, with GitHub’s comment time and cleaned text (AC-066)', async () => {
+  /** Writes the item's per-item file as Intake's sessions would have left it. */
+  const intakeFile = (t: ReturnType<typeof setup>, lines: string[]) => {
+    const file = intakeEventsFile(t.home, REPO, ISSUE);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, lines.map((l) => `${l}\n`).join(''));
+    return file;
+  };
+
+  it("seeds events.jsonl from Intake's per-item file, its events only and no comment, and drops the file once pushed (AC-066, 28-5c-4d-2)", async () => {
     const at = '2026-10-01T08:30:00Z';
-    const body = eventComment(intakeEvent({ input_summary: 'triage ‮labels\u0007 done' }));
-    const t = setup({ comments: [{ body, createdAt: at }] });
+    const comment = eventComment(intakeEvent({ session: 'from-a-comment' }));
+    const t = setup({ comments: [{ body: comment, createdAt: at }] });
+    const own = intakeEvent({ session: 'intake-1', ts: at, kind: 'alert', tool: 'Dispatcher' });
+    const file = intakeFile(t, [
+      JSON.stringify(own),
+      'not json at all',
+      JSON.stringify(intakeEvent({ item: 3 })),
+      JSON.stringify(intakeEvent({ role: 'builder' })),
+    ]);
 
     await dispatchOnce(t.ctx);
 
-    const lines = seededLines(t);
-    expect(lines).toEqual([expect.objectContaining({ ts: at, role: 'intake', item: ISSUE })]);
-    expect(lines[0]?.input_summary).toBe('triage labels done');
+    expect(seededLines(t)).toEqual([own]);
+    expect(existsSync(file)).toBe(false);
   });
 
-  // Bodies are built per test: the Owner key exists only once beforeAll has run.
-  it.each([
-    ['a block with another role', () => eventComment(intakeEvent({ role: 'builder' }))],
-    ['a block for another item', () => eventComment(intakeEvent({ item: 3 }))],
-    ['a malformed block', () => block('{"item": 2, "role": "intake"')],
-    ['a block that fails the Event schema', () => eventComment(intakeEvent({ kind: 'merge' }))],
-    ['an oversized block', () => eventComment(intakeEvent({ input_summary: 'x'.repeat(5000) }))],
-    [
-      'a comment with more blocks than the cap',
-      () => eventComment(...Array.from({ length: 5 }, () => intakeEvent())),
-    ],
-    ['a signed record comment', () => `${approvalBody(2)}\n\n${eventComment(intakeEvent())}`],
-  ])('does not copy %s (AC-066)', async (_name, body) => {
-    const t = setup({ comments: [{ body: body(), createdAt: '2026-10-01T08:30:00Z' }] });
+  it("with no file the first line says Intake's events are not here, and nothing alerts (28-5c-4d-2)", async () => {
+    const t = setup();
 
     await dispatchOnce(t.ctx);
 
-    expect(seededLines(t)).toEqual([]);
+    expect(seededLines(t)).toEqual([
+      expect.objectContaining({ role: 'intake', tool: 'Dispatcher', item: ISSUE }),
+    ]);
+    expect(seededLines(t)[0]?.input_summary).toMatch(/^Intake's events are not here/);
+    expect(t.inbox()).toEqual([]);
   });
 
-  it('a later pass, with the branch already there, copies nothing new (AC-066)', async () => {
-    const first = eventComment(intakeEvent({ session: 'first' }));
-    const t = setup({ comments: [{ body: first, createdAt: '2026-10-01T08:30:00Z' }] });
+  it('keeps the file when the push fails, and drops a leftover once the branch is on origin, its lines never written twice (28-5c-4d-2)', async () => {
+    const t = setup();
+    const own = intakeEvent({ session: 'intake-1', kind: 'alert', tool: 'Dispatcher' });
+    const file = intakeFile(t, [JSON.stringify(own)]);
+    const hook = join(t.project.origin, 'hooks', 'pre-receive');
+    mkdirSync(dirname(hook), { recursive: true });
+    writeFileSync(hook, '#!/bin/sh\nexit 1\n', { mode: 0o755 });
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow();
+    expect(existsSync(file)).toBe(true);
+
+    rmSync(hook);
     await dispatchOnce(t.ctx);
-    const head = t.project.git(['rev-parse', `origin/${BRANCH}`]);
+    expect(seededLines(t)).toEqual([own]);
+    expect(existsSync(file)).toBe(false);
 
-    const later = eventComment(intakeEvent({ session: 'later' }));
-    const comments = [
-      { id: '5001', author: 'owner', body: first, createdAt: '2026-10-01T08:30:00Z' },
-      { id: '6000', author: 'owner', body: later, createdAt: '2026-10-01T09:30:00Z' },
-    ];
-    const created = createItemBranch(
-      { projectDir: t.project.path, now: () => new Date('2026-10-01T10:00:00Z') },
-      { issue: ISSUE, branch: BRANCH },
-      comments,
-    );
-
-    expect(created).toBe(false);
-    expect(t.project.git(['rev-parse', `origin/${BRANCH}`])).toBe(head);
-    expect(seededLines(t).map((l) => l.session)).toEqual(['first']);
+    // The factory stopped between the push and the delete: the file is back, the branch is there.
+    const head = t.project.git(['rev-parse', `origin/${BRANCH}~1`]);
+    intakeFile(t, [JSON.stringify(own)]);
+    await dispatchOnce(t.ctx);
+    expect(existsSync(file)).toBe(false);
+    expect(t.project.git(['rev-parse', `origin/${BRANCH}~1`])).toBe(head);
+    expect(seededLines(t)).toEqual([own]);
   });
 
   it('opens exactly one draft PR before the Specify launch, and a second pass opens none (FR-016a)', async () => {
@@ -372,6 +380,28 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
       outcome: 'ended',
     });
   });
+
+  it("alerts once when an Intake session's lines are not in the file, naming why, and still creates the branch (28-5c-4d-2)", async () => {
+    const t = setup({ labels: ['tier:2'] });
+    await dispatchOnce(t.ctx);
+    // The file is full, so recovery can add nothing: the session's lines are lost.
+    const file = intakeEventsFile(t.home, REPO, ISSUE);
+    writeFileSync(file, '');
+    truncateSync(file, MAX_LOG - 10);
+    intakeLabels(INTAKE_LABELS);
+    await passes(t, 2);
+    expect(t.labels()).toContain('state:triaged');
+    const missing = t.inbox().flatMap((c) => {
+      const a = parseAlert({ ...c, id: String(c.id) });
+      return a?.kind === 'intake-events-missing' ? [a.text] : [];
+    });
+    expect(missing).toEqual([
+      expect.stringMatching(
+        /^#2: Intake session 00000000-0000-4000-8000-000000000001's lines are not in the item's events file, since the file is full; the branch is created without them/,
+      ),
+    ]);
+    expect(existsSync(file)).toBe(false);
+  }, 60_000);
 
   it('holds at once on a full context, under a newly installed factory too, and stops the pass at a last session it cannot tell has ended, launching nothing', async () => {
     const t = setup({ labels: ['tier:2'] });
@@ -1106,7 +1136,11 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       throw new EnvironmentError('the installed factory cannot be hashed: x: EACCES');
     };
     const cases = [
-      [true, () => HASH, /^the failure record .*2-2\.json cannot be read: .*ENOTDIR/],
+      [
+        true,
+        () => HASH,
+        /^(the failure record .*2-2\.json|.*events\.jsonl) cannot be read: .*ENOTDIR/,
+      ],
       [false, unhashable, /^the installed factory cannot be hashed: /],
     ] as const;
     for (const [blocked, factory, why] of cases) {
