@@ -9,6 +9,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -20,6 +21,7 @@ import {
   intakeSessions,
 } from '../../src/dispatcher/intake-events.js';
 import { makeEvent } from '../../src/events/append.js';
+import { MAX_LOG } from '../../src/hooks/events-commit.js';
 import { readSessionRecord, recordEvent, sessionEvents } from '../../src/hooks/session.js';
 import { recordSession, SESSION_ID } from '../helpers/session.js';
 
@@ -122,6 +124,34 @@ describe("Intake's per-item file (T086, 28-5c-4c)", () => {
     t.append();
     expect(intakeSessions(t.file)).toEqual(new Set([SESSION_ID]));
     expect(readFileSync(t.file, 'utf8')).not.toContain(intakeMark(other));
+  });
+
+  it("never reads a session's own line naming the Dispatcher as its marker, even for its own session", () => {
+    const t = intake();
+    const own = t.line({
+      kind: 'alert',
+      tool: 'Dispatcher',
+      input_summary: intakeMark(SESSION_ID),
+    });
+    writeFileSync(t.path, `${own}\n`);
+    t.append();
+    const marks = t.lines().filter((e) => e.input_summary === intakeMark(SESSION_ID));
+    expect(marks).toHaveLength(1);
+    expect(t.lines().at(-1)?.input_summary).toMatch(
+      /^line 1 of the session's log is not an event: it names the factory's own tool, Dispatcher$/,
+    );
+  });
+
+  it('reads a file past the work log limit as an error, naming the way out, and appends nothing', () => {
+    const t = intake('');
+    mkdirSync(dirname(t.file), { recursive: true });
+    writeFileSync(t.file, '');
+    truncateSync(t.file, MAX_LOG + 1);
+    expect(() => intakeSessions(t.file)).toThrow(
+      /^could not read Intake's events file .*: it is \d+ bytes, past the 48 MiB .*close the item and file it again, or delete the file/,
+    );
+    expect(t.append).toThrow(/past the 48 MiB/);
+    expect(statSync(t.file).size).toBe(MAX_LOG + 1);
   });
 
   it('keeps the lines of a file that already exists byte for byte', () => {

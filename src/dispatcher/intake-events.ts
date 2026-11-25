@@ -10,6 +10,7 @@
 import {
   closeSync,
   constants,
+  existsSync,
   fstatSync,
   mkdirSync,
   openSync,
@@ -21,11 +22,12 @@ import {
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../cli/env.js';
 import { makeEvent } from '../events/append.js';
-import { MAX_APPEND } from '../hooks/events-commit.js';
+import { MAX_APPEND, MAX_LOG } from '../hooks/events-commit.js';
 import { readSessionRecord, recordEvent, sessionEvents } from '../hooks/session.js';
 import { sessionLines } from '../hooks/session-log.js';
 import { visible } from '../notify/summary.js';
-import { repoParts } from './failures.js';
+import { failureFile, readFailureRecord, repoParts } from './failures.js';
+import { sessionRunning } from './launcher/local.js';
 
 /** The item's file of Intake's events, kept until its branch carries them (built in 28-5c-4c, read in 28-5c-4d). */
 export function intakeEventsFile(home: string, repo: string, issue: number): string {
@@ -52,7 +54,14 @@ export function intakeSessions(file: string): Set<string> {
   try {
     const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
-      if (!fstatSync(fd).isFile()) throw new Error('it is not a regular file');
+      const stat = fstatSync(fd);
+      const { size } = stat;
+      if (!stat.isFile()) throw new Error('it is not a regular file');
+      // Bounded as the work's event log is: past it nothing is read, and nothing is appended.
+      if (size > MAX_LOG)
+        throw new Error(
+          `it is ${String(size)} bytes, past the ${String(MAX_LOG / (1024 * 1024))} MiB the factory reads; close the item and file it again, or delete the file`,
+        );
       text = readFileSync(fd, 'utf8');
     } finally {
       closeSync(fd);
@@ -143,4 +152,25 @@ export function appendIntakeSession(
   } finally {
     closeSync(fd);
   }
+}
+
+/**
+ * Before the next pass goes on, the last Intake session the item's failure record names, when its
+ * lines are not in the item's file: a crash after the session started and before its append, with
+ * or without its outcome recorded, leaves exactly that. The record names the last session only,
+ * and a session is recovered before the next one is recorded, so it names every session whose
+ * lines could be missing but one the Owner's deleting the record forgets (28-5c-4d-1). A session
+ * that still runs appends its own lines when it ends; one that never wrote its record has none.
+ */
+export function recoverIntakeSession(
+  home: string,
+  repo: string,
+  issue: number,
+  now: () => Date,
+): void {
+  const id = readFailureRecord(failureFile(home, repo, issue, 1))?.session;
+  if (id === undefined) return;
+  if (sessionRunning(home, id) !== undefined) return;
+  if (!existsSync(join(home, '.factory', 'sessions', id, 'session.json'))) return;
+  appendIntakeSession(home, repo, issue, id, now);
 }

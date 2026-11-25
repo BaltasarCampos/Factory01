@@ -36,7 +36,7 @@ import {
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
 import { visible } from '../notify/summary.js';
 import { duplicateOf } from '../stations/checks/intake.js';
-import { appendIntakeSession } from './intake-events.js';
+import { appendIntakeSession, recoverIntakeSession } from './intake-events.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
 import {
@@ -399,6 +399,9 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
       why === undefined && !FINAL.includes(item.state)
         ? ctx.gatherEvidence(item, config, history, keys)
         : {};
+    // A session that ended before its lines reached the item's file: first, before anything moves.
+    if (why === undefined && item.state === 'new' && config.agents === 'local')
+      recoverIntakeSession(ctx.failures.home, repo, issue.number, git.now);
     let found = await gather();
     if (found.tick !== undefined && item.branch !== undefined) {
       const { task, head } = found.tick;
