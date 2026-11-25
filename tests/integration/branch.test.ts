@@ -14,6 +14,7 @@ import {
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
 import { nextTask, pendingStation, writeStationManifest } from '../../src/dispatcher/manifest.js';
+import { intakeEventsFile, intakeSessions } from '../../src/dispatcher/intake-events.js';
 import { groupRecord } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { checkIntakeIssue } from '../../src/stations/checks/intake.js';
@@ -21,6 +22,7 @@ import { configOnMain } from '../../src/model/config.js';
 import { parseAlert } from '../../src/notify/inbox.js';
 import { type Tier } from '../../src/model/types.js';
 import { readState, seedState, type FakeIssue } from '../helpers/fake-gh.js';
+import { fakeLocalId } from '../helpers/fake-launcher.js';
 import { gitEnv, mergeIntoMain } from '../helpers/git-repo.js';
 import { tempDir, writeKeyFiles } from '../helpers/keys.js';
 import {
@@ -228,20 +230,35 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
     await passes(t, 3);
     expect(t.local.launches.map((l) => l.station)).toEqual([1, 1]);
     expect(readFailureRecord(file)).toEqual({
-      ...{ factory: HASH, count: 2, session: 'fake-local-2', outcome: 'ended' },
+      ...{
+        factory: HASH,
+        count: 2,
+        session: '00000000-0000-4000-8000-000000000002',
+        outcome: 'ended',
+      },
     });
     const { missing } = await checkIntakeIssue(REPO, ISSUE, 2);
     const cap = `2 Intake sessions started with retry_limit 1, so no more start while the item is new; the last`;
-    const ended = `${cap}, fake-local-2, ended well, but Intake's output is still incomplete: ${missing.join('; ')}; delete ${file} to reset`;
+    const ended = `${cap}, 00000000-0000-4000-8000-000000000002, ended well, but Intake's output is still incomplete: ${missing.join('; ')}; delete ${file} to reset`;
     expect(holds(t)).toEqual([`retry-limit #2 holds: ${ended}`]);
 
     rmSync(file);
     t.local.failure = new SessionFailed('claude exited 1: \u0007', false);
     await passes(t, 3);
     expect(t.local.launches).toHaveLength(4);
-    const failed = `${cap}, fake-local-4, failed: claude exited 1: \\u{7}; delete ${file} to reset`;
+    const failed = `${cap}, 00000000-0000-4000-8000-000000000004, failed: claude exited 1: \\u{7}; delete ${file} to reset`;
     expect(holds(t)).toEqual([`retry-limit #2 holds: ${ended}`, `retry-limit #2 holds: ${failed}`]);
     expect(t.labels()).not.toContain('state:triaged');
+  });
+
+  it("appends each Intake session's log to the item's file once it ends, a failed one too (28-5c-4b)", async () => {
+    const t = setup({ labels: ['tier:2'] });
+    await dispatchOnce(t.ctx);
+    t.local.failure = new SessionFailed('claude exited 1', false);
+    await dispatchOnce(t.ctx);
+    expect(t.local.launches.map((l) => l.station)).toEqual([1, 1]);
+    const file = intakeEventsFile(t.home, REPO, ISSUE);
+    expect([...intakeSessions(file)]).toEqual([fakeLocalId(1), fakeLocalId(2)]);
   });
 
   it('holds at once on a full context, under a newly installed factory too, and stops the pass at a last session it cannot tell has ended, launching nothing', async () => {
@@ -255,7 +272,7 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
     expect(t.local.launches).toHaveLength(1);
     const file = failureFile(t.home, REPO, ISSUE, 1);
     expect(holds(t)).toEqual([
-      `context-full #2 holds: Intake session fake-local-1 filled its context, so the item is too big for one session: split it; it failed: claude exited 1; delete ${file} to reset`,
+      `context-full #2 holds: Intake session 00000000-0000-4000-8000-000000000001 filled its context, so the item is too big for one session: split it; it failed: claude exited 1; delete ${file} to reset`,
     ]);
 
     // An unknown context, null as a session with no log reads: an ordinary failure, started again.
@@ -862,7 +879,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
     // The session's id is in it before the session can run.
     expect(record).toEqual({
-      ...{ head: tip(t), factory: HASH, count: 1, session: 'fake-local-1' },
+      ...{ head: tip(t), factory: HASH, count: 1, session: '00000000-0000-4000-8000-000000000001' },
       outcome: 'ended',
     });
     expect(t.show(`${FEATURE}/.station.json`)).toMatch(/"station": 2/);
@@ -882,7 +899,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       head: tip(stopped),
       factory: HASH,
       count: 1,
-      session: 'fake-local-1',
+      session: '00000000-0000-4000-8000-000000000001',
     });
 
     const refused = setup();
@@ -915,7 +932,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     await dispatchOnce(t.ctx);
 
     expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toMatchObject({
-      ...{ count: 1, session: 'fake-local-1', outcome: 'failed' },
+      ...{ count: 1, session: '00000000-0000-4000-8000-000000000001', outcome: 'failed' },
       ...{ last: 'claude exited 1: \\u{7}', context_full: true },
     });
   });
@@ -932,7 +949,12 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     await expect(dispatchOnce(t.ctx)).rejects.toThrow();
 
     expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toMatchObject({
-      ...{ count: 1, session: 'fake-local-1', outcome: 'failed', last: 'claude exited 1' },
+      ...{
+        count: 1,
+        session: '00000000-0000-4000-8000-000000000001',
+        outcome: 'failed',
+        last: 'claude exited 1',
+      },
     });
   });
 
@@ -946,7 +968,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       if (record === undefined) throw new Error('no record');
       writeFailureRecord(file, { ...record, session: 'another-session' });
     };
-    const lost = `the failure record ${file} no longer names session fake-local-1 at`;
+    const lost = `the failure record ${file} no longer names session 00000000-0000-4000-8000-000000000001 at`;
     await expect(dispatchOnce(t.ctx)).rejects.toThrow(lost);
 
     const [alert, ...more] = heldAlerts(t, 'session-failed');
@@ -996,7 +1018,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     expect(t.local.launches).toHaveLength(2);
     const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 2));
     expect(record).toEqual({
-      ...{ head: tip(t), factory: HASH, count: 1, session: 'fake-local-2' },
+      ...{ head: tip(t), factory: HASH, count: 1, session: '00000000-0000-4000-8000-000000000002' },
       outcome: 'ended',
     });
 
@@ -1068,7 +1090,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
 
   it('in local mode tells its own manifest running while its last session’s group lives and spent once it has ended, stopping on a group record it cannot read (T061)', async () => {
     const t = setup();
-    await dispatchOnce(t.ctx); // the Specify manifest, its record naming fake-local-1
+    await dispatchOnce(t.ctx); // the Specify manifest, its record naming 00000000-0000-4000-8000-000000000001
     const seen: (string | undefined)[] = [];
     const evidence = t.ctx.gatherEvidence;
     t.ctx.gatherEvidence = async (...args) => {
@@ -1077,7 +1099,7 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       return found;
     };
     // The group lives under the home the records are in, where the launcher keeps its sessions.
-    const dir = join(t.home, '.factory', 'sessions', 'fake-local-1');
+    const dir = join(t.home, '.factory', 'sessions', '00000000-0000-4000-8000-000000000001');
     mkdirSync(dir, { recursive: true });
     const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
     // With no pid, killing group 0 would kill the test runner's own group.
@@ -1085,6 +1107,8 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     const pgid = child.pid;
     if (pgid === undefined) throw new Error('sleep has no pid');
     try {
+      // Still alive: the fake launcher's end marker, written as the real one's at settle, goes.
+      rmSync(join(dir, 'ended'), { force: true });
       writeFileSync(join(dir, 'group.json'), JSON.stringify(groupRecord(pgid)));
       await dispatchOnce(t.ctx);
     } finally {
@@ -1165,7 +1189,12 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
       const session =
         failure instanceof LaunchRefused
           ? { count: 0 }
-          : { count: 2, session: 'fake-local-2', outcome: 'failed', last: failure.message };
+          : {
+              count: 2,
+              session: '00000000-0000-4000-8000-000000000002',
+              outcome: 'failed',
+              last: failure.message,
+            };
       const full = failure instanceof LaunchRefused ? {} : { context_full: null };
       expect(readFailureRecord(failureFile(t.home, REPO, ISSUE, 2))).toEqual({
         ...{ head: manifest, factory: HASH },

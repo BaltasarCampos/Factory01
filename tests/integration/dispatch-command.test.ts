@@ -131,7 +131,7 @@ function setup(options: Setup = {}) {
   // The laptop's own key lists (`factory keygen`), which release tags must verify against.
   writeFileSync(join(home, '.factory', 'allowed_signers'), `${owner.allowedSignersLine}\n`);
   writeFileSync(join(home, '.factory', 'revoked_keys'), '');
-  const local = new FakeLauncher('local');
+  const local = new FakeLauncher('local', home);
   /** A real local launcher against this release manifest; sessions are recorded, not run. */
   const sessions: { args: readonly string[]; cwd: string }[] = [];
   /** `change` changes the session's stream, or gives its exit status and output outright. */
@@ -287,7 +287,7 @@ describe('factory dispatch and factory run (contracts/cli.md)', { timeout: 60_00
     expect(thrown(1)).toHaveLength(2);
   });
 
-  it('without launchers from the caller, an agents: cloud project starts no session and the Owner gets one info alert (T125)', async () => {
+  it('without launchers from the caller, an agents: cloud project starts no session and the Owner gets one info alert (Owner decision 2026-11-24)', async () => {
     const t = setup({ agents: 'cloud' });
 
     const r = await t.cli(['dispatch'], { launchers: false });

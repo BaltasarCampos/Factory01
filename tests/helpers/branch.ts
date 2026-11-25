@@ -138,9 +138,10 @@ export function setup(options: Setup = {}) {
     },
   });
   const keys = writeKeyFiles([owner], []);
-  const local = new FakeLauncher('local');
   const clock = new FakeClock('2026-10-01T10:00:00Z');
   const home = tempDir();
+  // The dispatcher, the evidence and the launcher read one home (contracts/local-sessions.md).
+  const local = new FakeLauncher('local', home);
   const cloud = new FakeLauncher('cloud');
   const evidence = { projectDir: project.path, failures: { home, factory: () => HASH } };
   const ctx: DispatchContext = {

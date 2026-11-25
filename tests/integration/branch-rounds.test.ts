@@ -781,7 +781,7 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       const [first, again] = u.local.launches;
       // Nothing else changed, so the relaunch's prompt and settings are the first attempt's.
       expect(given(again)).toEqual(given(first));
-      expect(again?.sessionId).toBe('fake-local-2');
+      expect(again?.sessionId).toBe('00000000-0000-4000-8000-000000000002');
       expect(u.project.git(['log', '-1', '--format=%s', `origin/${BRANCH}`])).toBe(
         'Dispatcher: station 2 (spec) manifest',
       );
@@ -851,13 +851,15 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       await expect(dispatchOnce(t.ctx)).rejects.toThrow('the factory was stopped');
       expect(recordAt(t, 2)).not.toHaveProperty('outcome');
       delete t.local.failure;
-      const dir = join(t.home, '.factory', 'sessions', 'fake-local-1');
+      const dir = join(t.home, '.factory', 'sessions', '00000000-0000-4000-8000-000000000001');
       mkdirSync(dir, { recursive: true });
       const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
       await once(child, 'spawn');
       const pgid = child.pid;
       if (pgid === undefined) throw new Error('sleep has no pid');
       try {
+        // Still alive: the fake launcher's end marker, written as the real one's at settle, goes.
+        rmSync(join(dir, 'ended'), { force: true });
         writeFileSync(join(dir, 'group.json'), JSON.stringify(groupRecord(pgid)));
         await dispatchOnce(t.ctx);
         expect(t.local.launches).toHaveLength(1);
@@ -869,7 +871,11 @@ describe('Verify results from the required check runs (T168)', { timeout: 60_000
       });
       await dispatchOnce(t.ctx);
       expect(t.local.launches).toHaveLength(2);
-      expect(recordAt(t, 2)).toMatchObject({ count: 2, session: 'fake-local-2', outcome: 'ended' });
+      expect(recordAt(t, 2)).toMatchObject({
+        count: 2,
+        session: '00000000-0000-4000-8000-000000000002',
+        outcome: 'ended',
+      });
     });
 
     it('T061: after a red CI round, a session failing on the re-issued manifest is started again with its failure line, and CI green at that manifest ticks nothing', async () => {

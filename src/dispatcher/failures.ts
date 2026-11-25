@@ -70,13 +70,18 @@ const OUT = 'delete it, by its path, to start its count again';
  * The record's file for `repo`, exactly `owner/name` in GitHub's name characters, neither part
  * `.` or `..`, both lower-cased, since GitHub names ignore case.
  */
-export function failureFile(home: string, repo: string, item: number, station: Station) {
+export function repoParts(repo: string): [string, string] {
   const parts = repo.toLowerCase().split('/');
   const [owner = '', name = ''] = parts;
   if (parts.length !== 2 || !/^[a-z0-9-]+$/.test(owner) || !/^(?!\.\.?$)[a-z0-9._-]+$/.test(name))
     throw new EnvironmentError(
       `${visible(repo)} is not a GitHub owner/name: it has no failure record`,
     );
+  return [owner, name];
+}
+
+export function failureFile(home: string, repo: string, item: number, station: Station) {
+  const [owner, name] = repoParts(repo);
   return join(home, '.factory', 'failures', owner, name, `${String(item)}-${String(station)}.json`);
 }
 

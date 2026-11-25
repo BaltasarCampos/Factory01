@@ -11,15 +11,15 @@
 // be read gets one such line; and past `MAX_APPEND` of the session's lines, or past `MAX_LOG` for
 // the whole file, what does not fit is left out, with one line saying so. Only a git failure or a
 // log on the branch that is not a regular file leaves the session with no passing head.
-import { closeSync, constants, fstatSync, mkdtempSync, openSync, readSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { EnvironmentError } from '../cli/env.js';
 import { makeEvent } from '../events/append.js';
-import { validateEvent } from '../events/schema.js';
 import { safeGit } from '../git/diff.js';
 import { visible } from '../notify/summary.js';
 import { commitFiles } from './output-commit.js';
 import { own, type SessionOutput } from './session-commits.js';
+import { sessionLines } from './session-log.js';
 import { recordEvent, sessionEvents, sessionFolder, type SessionRecord } from './session.js';
 
 /** Define's event log on `claude/define`, which has no feature folder. */
@@ -66,100 +66,6 @@ export function belowLogs(at: SessionOutput, env: NodeJS.ProcessEnv): string[] {
 
 const size = (n: number) =>
   n % (1024 * 1024) === 0 ? `${String(n / (1024 * 1024))} MiB` : `${String(n)} bytes`;
-const brief = (text: string) => visible(text.length > 300 ? `${text.slice(0, 300)}...` : text);
-
-type Read = { missing: true } | { unread: string } | { text: Buffer; size: number };
-
-/** At most `limit` bytes of the session's log, never following a link. */
-function readLog(path: string, limit: number): Read {
-  let fd: number;
-  try {
-    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return { missing: true };
-    return { unread: err instanceof Error ? err.message : String(err) };
-  }
-  try {
-    const stat = fstatSync(fd);
-    if (!stat.isFile()) return { unread: 'it is not a regular file' };
-    const text = Buffer.alloc(Math.max(0, Math.min(stat.size, limit)));
-    let got = 0;
-    while (got < text.length) {
-      const n = readSync(fd, text, got, text.length - got, got);
-      if (n === 0) break;
-      got += n;
-    }
-    return { text: text.subarray(0, got), size: Math.max(stat.size, got) };
-  } catch (err) {
-    return { unread: err instanceof Error ? err.message : String(err) };
-  } finally {
-    closeSync(fd);
-  }
-}
-
-/** Why `line` is not an event, or undefined when it is one. */
-function notEvent(line: Buffer, cut: boolean): string | undefined {
-  if (line.length === 0) return 'it is empty';
-  try {
-    validateEvent(JSON.parse(line.toString('utf8')));
-    return undefined;
-  } catch (err) {
-    const why = err instanceof Error ? err.message : String(err);
-    return cut ? `it is cut short, with no newline at its end: ${why}` : why;
-  }
-}
-
-/**
- * The lines to append: the session's, each that is not an event replaced by `note`, at most
- * `budget` bytes of them; or the one note for a log that is missing or cannot be read.
- */
-function sessionLines(
-  home: string,
-  session: string,
-  budget: number,
-  note: (summary: string) => Buffer,
-): { lines: Buffer[]; left?: { line: number; bytes: number } } {
-  const log = readLog(sessionEvents(home, session), Math.max(0, budget));
-  if ('missing' in log)
-    return {
-      lines: [
-        note(
-          "the session's log was missing, the factory's own fault, since its start check creates it: none of the session's events is here",
-        ),
-      ],
-    };
-  if ('unread' in log)
-    return {
-      lines: [
-        note(
-          `the session's log could not be read, so none of its events is here: ${brief(log.unread)}`,
-        ),
-      ],
-    };
-  const { text } = log;
-  const whole = text.length === log.size;
-  const lines: Buffer[] = [];
-  let used = 0;
-  let start = 0;
-  let n = 1;
-  const left = () => ({ lines, left: { line: n, bytes: log.size - start } });
-  for (; start < text.length; n += 1) {
-    const end = text.indexOf(0x0a, start);
-    // A line the read did not reach the end of is left out, never read as cut short.
-    if (end === -1 && !whole) return left();
-    const line = text.subarray(start, end === -1 ? text.length : end);
-    const why = notEvent(line, end === -1);
-    const out =
-      why === undefined
-        ? line
-        : note(`line ${String(n)} of the session's log is not an event: ${brief(why)}`);
-    if (used + out.length + 1 > budget) return left();
-    lines.push(out);
-    used += out.length + 1;
-    start = end === -1 ? text.length : end + 1;
-  }
-  return start < log.size ? left() : { lines };
-}
 
 /** The log's bytes at `head`, empty when it has none; `LogNotFile` for a link or folder. */
 function logAt(record: SessionRecord, head: string, path: string, env: NodeJS.ProcessEnv): Buffer {
@@ -232,7 +138,7 @@ export function commitEvents(
         ),
       ),
     );
-  const { lines, left } = sessionLines(home, session, budget, note);
+  const { lines, left } = sessionLines(sessionEvents(home, session), session, budget, note);
   if (left !== undefined) {
     const why =
       budget === limits.append

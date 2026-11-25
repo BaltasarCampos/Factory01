@@ -3,11 +3,15 @@
 // as the local launcher does when `starting` throws: a `LaunchRefused` for that item alone, with
 // nothing launched.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { LaunchRefused, type Availability } from '../../src/dispatcher/launcher/types.js';
 import { visible } from '../../src/notify/summary.js';
+import { ROLE_VERSION } from './session.js';
+
+/** The fake local launcher's `n`th session id, a UUID as the local launcher's are. */
+export const fakeLocalId = (n: number) => `00000000-0000-4000-8000-${String(n).padStart(12, '0')}`;
 
 export interface LaunchRequest {
   project: string;
@@ -52,6 +56,25 @@ export class FakeLauncher {
     this.home = home ?? mkdtempSync(join(tmpdir(), 'fake-launcher-'));
   }
 
+  /** As the local launcher does before the spawn: the session's record, and its log, empty. */
+  private record(request: LaunchRequest, id: string, head: string) {
+    const folder = join(this.home, '.factory', 'sessions', id);
+    mkdirSync(folder, { recursive: true });
+    const record = {
+      ...{ role: request.role, item: request.item, station: request.station },
+      ...{ feature: request.feature, files: request.files, clone: request.project },
+      ...{ project: request.project, model: 'sonnet', role_version: ROLE_VERSION },
+      ...{ repo: 'owner/project', inbox_issue: 1, branch: request.branch, head, tests: [] },
+    };
+    try {
+      writeFileSync(join(folder, 'session.json'), JSON.stringify(record), { flag: 'wx' });
+    } catch (err) {
+      // A row that wrote its own record keeps it.
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    writeFileSync(join(folder, 'events.jsonl'), '', { flag: 'a' });
+  }
+
   /** Make the launcher report itself unavailable (cloud outage, missing `claude` binary). */
   setUnavailable(unavailable = true): void {
     this.isAvailable = !unavailable;
@@ -71,14 +94,17 @@ export class FakeLauncher {
     if (!this.isAvailable) return Promise.reject(new Error(`${this.mode} launcher unavailable`));
     const refusal = this.refusal ?? this.refusalFor?.(request);
     if (refusal !== undefined) return Promise.reject(refusal);
-    const sessionId = `fake-${this.mode}-${String(this.launches.length + 1)}`;
+    const n = this.launches.length + 1;
+    const sessionId = this.mode === 'local' ? fakeLocalId(n) : `fake-cloud-${String(n)}`;
     this.beforeStart?.();
     try {
       if (request.starting !== undefined) {
         // The branch's head on origin now, as the local launcher fetches and checks it.
         const ref = `refs/heads/${request.branch}`;
         const listed = execFileSync('git', ['ls-remote', 'origin', ref], { cwd: request.project });
-        request.starting(sessionId, listed.toString().split('\t')[0] ?? '');
+        const head = listed.toString().split('\t')[0] ?? '';
+        request.starting(sessionId, head);
+        this.record(request, sessionId, head);
       }
     } catch (err) {
       const why = err instanceof Error ? err.message : String(err);
@@ -88,6 +114,9 @@ export class FakeLauncher {
     this.launches.push({ ...request, mode: this.mode, sessionId });
     this.afterStart?.();
     for (const beat of this.beats) request.heartbeat?.(beat);
+    // As the local launcher does at settle, once no process of the session remains.
+    if (request.starting !== undefined)
+      writeFileSync(join(this.home, '.factory', 'sessions', sessionId, 'ended'), '');
     return this.failure === undefined
       ? Promise.resolve({ sessionId })
       : Promise.reject(this.failure);

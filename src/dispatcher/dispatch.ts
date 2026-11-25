@@ -36,6 +36,7 @@ import {
 import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
 import { visible } from '../notify/summary.js';
 import { duplicateOf } from '../stations/checks/intake.js';
+import { appendIntakeSession } from './intake-events.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
 import {
@@ -561,6 +562,8 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
         recordSession(ctx.failures, where, sha, id, launched);
         settled = (outcome) => {
           recordOutcome(ctx.failures, where, sha, id, outcome);
+          // Intake's events wait on the laptop until the item's branch exists (28-5c-4b).
+          if (station === 1) appendIntakeSession(ctx.failures.home, repo, where.item, id, git.now);
         };
       },
     };
