@@ -14,7 +14,7 @@ export const timed: string[] = [];
 export const timeouts: number[] = [];
 
 /**
- * How far a timeout may pass the time left read here: `timeLeft` reads the clock a moment before
+ * How far a timeout may pass the time left read here: the program's `bound()` reads the clock a moment before
  * the program starts, never minutes.
  */
 const SLACK = 1000;

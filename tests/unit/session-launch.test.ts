@@ -3270,14 +3270,14 @@ await runProcess('bash', ['-c', process.argv[3]], {
   }, 15_000);
 });
 
-describe('CloudLauncher until the Phase 0 probe (T125)', () => {
-  it('is unavailable and starts nothing: the cloud command is not confirmed', async () => {
+describe('CloudLauncher until after Gate A (Owner decision 2026-11-24)', () => {
+  it('is unavailable and starts nothing: cloud sessions are refused until after Gate A', async () => {
     const launcher = new CloudLauncher();
     expect(launcher.mode).toBe('cloud');
     const request = { ...REQUEST, project: '/nowhere' };
     expect(cloudInvocation(request)).toBeUndefined();
-    expect(await launcher.available()).toMatchObject({ ok: false, reason: /T125/ });
-    await expect(launcher.launch(request)).rejects.toThrow(/T125/);
+    expect(await launcher.available()).toMatchObject({ ok: false, reason: /until after Gate A/ });
+    await expect(launcher.launch(request)).rejects.toThrow(/until after Gate A/);
   });
 });
 

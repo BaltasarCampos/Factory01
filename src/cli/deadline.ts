@@ -68,6 +68,6 @@ export function bound(cap?: number): Bound {
 }
 
 /** The deadline's refusal once it has passed, for a program that ended without finishing; else none. */
-export function pastDeadline(): EnvironmentError | undefined {
+export function pastDeadline(): DeadlinePassed | undefined {
   return deadline !== undefined && Date.now() >= deadline.at ? refusal(deadline.ms) : undefined;
 }

@@ -224,18 +224,9 @@ async function check(
   if (output !== undefined && hasPassed(home, session)) {
     // The passing head names the events commit on the head the check passed; with none, no
     // passing head, and an alert says why.
-    let events: string;
+    let made: ReturnType<typeof commitEvents>;
     try {
-      const made = commitEvents(record, home, session, output.commit, env, ctx.now);
-      events = made.commit;
-      if (made.full !== undefined) {
-        const fields = { kind: 'alert' as const, tool: 'Stop', input_summary: made.full };
-        await appendEvent(
-          sessionEvents(home, session),
-          recordEvent(record, session, fields),
-          ctx.now,
-        );
-      }
+      made = commitEvents(record, home, session, output.commit, env, ctx.now);
     } catch (err) {
       // Past the deadline the first stop blocks, so that the second checks again.
       if (err instanceof DeadlinePassed) throw err;
@@ -252,8 +243,18 @@ async function check(
       await appendEvent(sessionEvents(home, session), event, ctx.now);
       return undefined;
     }
+    // Outside the try, and after the head: a log that cannot take this alert is not a failed
+    // events commit, so it neither costs the passing head nor reads as that cause.
     // Removed before the output was read: a ref there now is another hook's.
-    writeRef(output.repo, passedRef(session), '', events, env);
+    writeRef(output.repo, passedRef(session), '', made.commit, env);
+    if (made.full !== undefined) {
+      const fields = { kind: 'alert' as const, tool: 'Stop', input_summary: made.full };
+      await appendEvent(
+        sessionEvents(home, session),
+        recordEvent(record, session, fields),
+        ctx.now,
+      );
+    }
   }
   return undefined;
 }
