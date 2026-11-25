@@ -16,11 +16,14 @@ import { dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   appendIntakeSession,
+  INTAKE_FULL,
   intakeEventsFile,
   intakeMark,
   intakeSessions,
+  recoverIntakeSession,
 } from '../../src/dispatcher/intake-events.js';
 import { makeEvent } from '../../src/events/append.js';
+import { failureFile, writeFailureRecord } from '../../src/dispatcher/failures.js';
 import { MAX_LOG } from '../../src/hooks/events-commit.js';
 import { readSessionRecord, recordEvent, sessionEvents } from '../../src/hooks/session.js';
 import { recordSession, SESSION_ID } from '../helpers/session.js';
@@ -152,6 +155,59 @@ describe("Intake's per-item file (T086, 28-5c-4c)", () => {
     );
     expect(t.append).toThrow(/past the 48 MiB/);
     expect(statSync(t.file).size).toBe(MAX_LOG + 1);
+  });
+
+  it('leaves out what would pass the limit, whole lines only, with the full line once, and a later session adds nothing (28-5c-4d-2)', () => {
+    const t = intake('');
+    mkdirSync(dirname(t.file), { recursive: true });
+    const room = 4000;
+    writeFileSync(t.file, '');
+    truncateSync(t.file, MAX_LOG - room);
+    const log = Array.from({ length: 40 }, (_v, i) =>
+      t.line({ input_summary: `line ${String(i)}` }),
+    );
+    writeFileSync(t.path, `${log.join('\n')}\n`);
+    t.append();
+    const size = statSync(t.file).size;
+    expect(size).toBeLessThanOrEqual(MAX_LOG);
+    const text = readFileSync(t.file, 'utf8').slice(MAX_LOG - room);
+    const lines = text.split('\n').filter((l) => l !== '' && l.startsWith('{'));
+    const summaries = lines.map((l) => (JSON.parse(l) as { input_summary: string }).input_summary);
+    expect(summaries[0]).toBe(intakeMark(SESSION_ID));
+    expect(summaries.at(-1)).toBe(INTAKE_FULL);
+    expect(summaries.filter((x) => x === INTAKE_FULL)).toHaveLength(1);
+    expect(summaries.length).toBeGreaterThan(2);
+    expect(summaries.length).toBeLessThan(42);
+    // Whole lines only: every line kept parses.
+    expect(lines.every((l) => (JSON.parse(l) as unknown) !== null)).toBe(true);
+    expect(intakeSessions(t.file)).toEqual(new Set([SESSION_ID]));
+
+    // A later session adds nothing, not even its marker.
+    const later = randomUUID();
+    const folder = dirname(sessionEvents(t.home, later));
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(
+      join(folder, 'session.json'),
+      readFileSync(join(dirname(t.path), 'session.json')),
+    );
+    writeFileSync(sessionEvents(t.home, later), `${t.line({}, later)}\n`);
+    t.append(later);
+    expect(statSync(t.file).size).toBe(size);
+    expect(intakeSessions(t.file)).toEqual(new Set([SESSION_ID]));
+  }, 60_000);
+
+  it('never reads a session folder it cannot look into as one that ran no session (28-5c-4d-2)', () => {
+    const t = intake('');
+    const id = randomUUID();
+    const sessions = join(t.home, '.factory', 'sessions');
+    writeFileSync(join(sessions, id), '');
+    writeFailureRecord(failureFile(t.home, REPO, 42, 1), {
+      ...{ factory: 'a'.repeat(64), count: 1, session: id },
+    });
+    expect(() => {
+      recoverIntakeSession(t.home, REPO, 42, now);
+    }).toThrow(/cannot be read: ENOTDIR/);
+    expect(existsSync(t.file)).toBe(false);
   });
 
   it('keeps the lines of a file that already exists byte for byte', () => {
