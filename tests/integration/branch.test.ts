@@ -1,7 +1,15 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { dirname, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import { EnvironmentError } from '../../src/cli/env.js';
 import { createItemBranch, dispatcherMessage } from '../../src/dispatcher/branch.js';
@@ -14,7 +22,11 @@ import {
   writeFailureRecord,
 } from '../../src/dispatcher/failures.js';
 import { nextTask, pendingStation, writeStationManifest } from '../../src/dispatcher/manifest.js';
-import { intakeEventsFile, intakeSessions } from '../../src/dispatcher/intake-events.js';
+import {
+  intakeEventsFile,
+  intakeMark,
+  intakeSessions,
+} from '../../src/dispatcher/intake-events.js';
 import { groupRecord } from '../../src/dispatcher/launcher/local.js';
 import { LaunchRefused, SessionFailed } from '../../src/dispatcher/launcher/types.js';
 import { checkIntakeIssue } from '../../src/stations/checks/intake.js';
@@ -251,7 +263,7 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
     expect(t.labels()).not.toContain('state:triaged');
   });
 
-  it("appends each Intake session's log to the item's file once it ends, a failed one too (28-5c-4b)", async () => {
+  it("appends each Intake session's log to the item's file once it ends, a failed one too (28-5c-4c)", async () => {
     const t = setup({ labels: ['tier:2'] });
     await dispatchOnce(t.ctx);
     t.local.failure = new SessionFailed('claude exited 1', false);
@@ -259,6 +271,106 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
     expect(t.local.launches.map((l) => l.station)).toEqual([1, 1]);
     const file = intakeEventsFile(t.home, REPO, ISSUE);
     expect([...intakeSessions(file)]).toEqual([fakeLocalId(1), fakeLocalId(2)]);
+  });
+
+  it('recovers the session the failure record names, once, before the next one starts, whether or not its outcome was recorded (28-5c-4d-1)', async () => {
+    const t = setup({ labels: ['tier:2'] });
+    const file = intakeEventsFile(t.home, REPO, ISSUE);
+    const record = failureFile(t.home, REPO, ISSUE, 1);
+    await dispatchOnce(t.ctx);
+    // A crash after the session started and before the append, the outcome recorded.
+    rmSync(file);
+    await dispatchOnce(t.ctx);
+    expect([...intakeSessions(file)]).toEqual([fakeLocalId(1), fakeLocalId(2)]);
+    // The same with no outcome: the record still names the session.
+    rmSync(file);
+    const kept = readFailureRecord(record);
+    if (kept === undefined) throw new Error('no record');
+    const noOutcome = { ...kept };
+    delete noOutcome.outcome;
+    writeFailureRecord(record, noOutcome);
+    await dispatchOnce(t.ctx);
+    expect([...intakeSessions(file)]).toEqual([fakeLocalId(2), fakeLocalId(3)]);
+    // Once: a pass that finds the lines there adds none.
+    await dispatchOnce(t.ctx);
+    expect(readFileSync(file, 'utf8').split(intakeMark(fakeLocalId(3))).length).toBe(2);
+  });
+
+  it('recovers nothing for a session that still runs or never wrote its record, and never reads a broken one as none (28-5c-4d-1)', async () => {
+    const t = setup({ labels: ['tier:2'] });
+    const file = intakeEventsFile(t.home, REPO, ISSUE);
+    writeFailureRecord(failureFile(t.home, REPO, ISSUE, 1), {
+      ...{ factory: HASH, count: 1, session: 'ghost' },
+    });
+    await dispatchOnce(t.ctx);
+    expect([...intakeSessions(file)]).toEqual([fakeLocalId(1)]);
+
+    const u = setup({ labels: ['tier:2'] });
+    const ufile = intakeEventsFile(u.home, REPO, ISSUE);
+    const sessions = join(u.home, '.factory', 'sessions');
+    const dir = join(sessions, 'alive');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'session.json'), '{}');
+    const child = spawn('sleep', ['30'], { detached: true, stdio: 'ignore' });
+    await once(child, 'spawn');
+    const pgid = child.pid;
+    if (pgid === undefined) throw new Error('sleep has no pid');
+    try {
+      writeFileSync(join(dir, 'group.json'), JSON.stringify(groupRecord(pgid)));
+      writeFailureRecord(failureFile(u.home, REPO, ISSUE, 1), {
+        ...{ factory: HASH, count: 1, session: 'alive' },
+      });
+      await dispatchOnce(u.ctx);
+      expect(u.local.launches).toEqual([]);
+      expect(existsSync(ufile)).toBe(false);
+    } finally {
+      process.kill(-pgid, 'SIGKILL');
+    }
+
+    // A session record that cannot be read: loud, never read as no lines to recover.
+    const v = setup({ labels: ['tier:2'] });
+    await dispatchOnce(v.ctx);
+    const kept = readFailureRecord(failureFile(v.home, REPO, ISSUE, 1));
+    if (kept === undefined) throw new Error('no record');
+    rmSync(intakeEventsFile(v.home, REPO, ISSUE));
+    writeFileSync(
+      join(v.home, '.factory', 'sessions', fakeLocalId(1), 'session.json'),
+      '{ not json',
+    );
+    await expect(dispatchOnce(v.ctx)).rejects.toThrow(/session\.json/);
+    expect(existsSync(intakeEventsFile(v.home, REPO, ISSUE))).toBe(false);
+  });
+
+  it("says the per-item file's append failed, never that the outcome was not recorded, and records the outcome first (28-5c-4d-1)", async () => {
+    const t = setup({ labels: ['tier:2'] });
+    const file = intakeEventsFile(t.home, REPO, ISSUE);
+    // A folder where the file goes: the append fails, the failure record is still written.
+    t.local.afterStart = () => {
+      mkdirSync(file, { recursive: true });
+    };
+    t.local.failure = new SessionFailed('claude exited 1', false);
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow(/^could not read Intake's events file /);
+    const failedAlerts = t.inbox().flatMap((c) => {
+      const a = parseAlert({ ...c, id: String(c.id) });
+      return a?.kind === 'session-failed' ? [a.text] : [];
+    });
+    const [alert, ...more] = failedAlerts;
+    expect(more).toEqual([]);
+    expect(alert).toMatch(/nothing of it is pushed; its outcome is recorded, but could not read/);
+    expect(alert).not.toContain('could not be recorded');
+    const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 1));
+    expect(record).toMatchObject({ outcome: 'failed', last: 'claude exited 1' });
+
+    // A session that ended well: the outcome is recorded, and the append's error is its own.
+    const u = setup({ labels: ['tier:2'] });
+    const ufile = intakeEventsFile(u.home, REPO, ISSUE);
+    u.local.afterStart = () => {
+      mkdirSync(ufile, { recursive: true });
+    };
+    await expect(dispatchOnce(u.ctx)).rejects.toThrow(/^could not read Intake's events file /);
+    expect(readFailureRecord(failureFile(u.home, REPO, ISSUE, 1))).toMatchObject({
+      outcome: 'ended',
+    });
   });
 
   it('holds at once on a full context, under a newly installed factory too, and stops the pass at a last session it cannot tell has ended, launching nothing', async () => {
@@ -309,15 +421,23 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
     expect(t.labels()).toContain('state:triaged');
     expect(readFailureRecord(file)).toBeUndefined();
 
-    const u = setup({ labels: ['tier:2'] });
-    const stuck = failureFile(u.home, REPO, ISSUE, 1);
-    mkdirSync(join(stuck, 'x'), { recursive: true });
-    intakeLabels(INTAKE_LABELS);
-    await expect(dispatchOnce(u.ctx)).rejects.toThrow(
-      `the failure record ${stuck} cannot be deleted as #2 leaves new`,
-    );
-    expect(u.labels()).not.toContain('state:triaged');
-    expect(u.local.launches).toEqual([]);
+    // A record that is readable but cannot be deleted: its folder takes no change (not as root).
+    if (process.getuid?.() !== 0) {
+      const u = setup({ labels: ['tier:2'] });
+      await dispatchOnce(u.ctx);
+      const stuck = failureFile(u.home, REPO, ISSUE, 1);
+      chmodSync(dirname(stuck), 0o500);
+      try {
+        intakeLabels(INTAKE_LABELS);
+        await expect(dispatchOnce(u.ctx)).rejects.toThrow(
+          `the failure record ${stuck} cannot be deleted as #2 leaves new`,
+        );
+      } finally {
+        chmodSync(dirname(stuck), 0o700);
+      }
+      expect(u.labels()).not.toContain('state:triaged');
+      expect(u.local.launches).toHaveLength(1);
+    }
 
     const c = setup({ labels: ['tier:2'], agents: 'cloud' });
     await dispatchOnce(c.ctx);

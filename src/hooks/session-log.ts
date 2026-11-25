@@ -48,6 +48,9 @@ function notEvent(line: Buffer, cut: boolean, session: string): string | undefin
   let why: string;
   try {
     const event = validateEvent(JSON.parse(line.toString('utf8')));
+    // `Dispatcher` is the factory's own tool, and its lines are the markers of Intake's per-item
+    // file: a session's line naming it never passes, whatever session it names.
+    if (event.tool === 'Dispatcher') return "it names the factory's own tool, Dispatcher";
     if (event.session === session) return undefined;
     why = `it names session ${event.session}, not this log's`;
   } catch (err) {

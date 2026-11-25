@@ -396,6 +396,19 @@ describe('the events commit the passing head names (T086, 28-5c-3b)', () => {
       /^line 2 .* ts: RFC 3339/,
     ],
     [
+      "a line naming another session's",
+      (g: string) =>
+        `${g}\n${g.replace(SESSION_ID, '7a1d9c52-0e3b-4f68-8a21-abcdef012345')}\n${g}\n`,
+      3,
+      /^line 2 .* it names session 7a1d9c52-0e3b-4f68-8a21-abcdef012345, not this log's$/,
+    ],
+    [
+      "a line naming the dispatcher's tool",
+      (g: string) => `${g}\n${JSON.stringify({ ...JSON.parse(g), tool: 'Dispatcher' })}\n${g}\n`,
+      3,
+      /^line 2 .* it names the factory's own tool, Dispatcher$/,
+    ],
+    [
       'an empty line',
       (g: string) => `${g}\n\n${g}\n`,
       3,

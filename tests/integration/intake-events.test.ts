@@ -1,4 +1,4 @@
-// Intake's per-item file (T086, slice 28-5c-4b): each ended Intake session's log appended on the
+// Intake's per-item file (T086, slice 28-5c-4c): each ended Intake session's log appended on the
 // laptop after the factory's marker, once, every line checked as one of that session's events.
 import { randomUUID } from 'node:crypto';
 import {
@@ -9,6 +9,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -20,6 +21,7 @@ import {
   intakeSessions,
 } from '../../src/dispatcher/intake-events.js';
 import { makeEvent } from '../../src/events/append.js';
+import { MAX_LOG } from '../../src/hooks/events-commit.js';
 import { readSessionRecord, recordEvent, sessionEvents } from '../../src/hooks/session.js';
 import { recordSession, SESSION_ID } from '../helpers/session.js';
 
@@ -54,7 +56,7 @@ function intake(log?: string) {
   return { home, path, file, line, append, lines };
 }
 
-describe("Intake's per-item file (T086, 28-5c-4b)", () => {
+describe("Intake's per-item file (T086, 28-5c-4c)", () => {
   it("appends the marker and then the session's lines, its folders 0700 and the file 0600", () => {
     const t = intake();
     writeFileSync(t.path, `${t.line()}\n${t.line({ input_summary: 'second' })}\n`);
@@ -124,6 +126,34 @@ describe("Intake's per-item file (T086, 28-5c-4b)", () => {
     expect(readFileSync(t.file, 'utf8')).not.toContain(intakeMark(other));
   });
 
+  it("never reads a session's own line naming the Dispatcher as its marker, even for its own session", () => {
+    const t = intake();
+    const own = t.line({
+      kind: 'alert',
+      tool: 'Dispatcher',
+      input_summary: intakeMark(SESSION_ID),
+    });
+    writeFileSync(t.path, `${own}\n`);
+    t.append();
+    const marks = t.lines().filter((e) => e.input_summary === intakeMark(SESSION_ID));
+    expect(marks).toHaveLength(1);
+    expect(t.lines().at(-1)?.input_summary).toMatch(
+      /^line 1 of the session's log is not an event: it names the factory's own tool, Dispatcher$/,
+    );
+  });
+
+  it('reads a file past the work log limit as an error, naming the way out, and appends nothing', () => {
+    const t = intake('');
+    mkdirSync(dirname(t.file), { recursive: true });
+    writeFileSync(t.file, '');
+    truncateSync(t.file, MAX_LOG + 1);
+    expect(() => intakeSessions(t.file)).toThrow(
+      /^could not read Intake's events file .*: it is \d+ bytes, past the 48 MiB .*close the item and file it again, or delete the file/,
+    );
+    expect(t.append).toThrow(/past the 48 MiB/);
+    expect(statSync(t.file).size).toBe(MAX_LOG + 1);
+  });
+
   it('keeps the lines of a file that already exists byte for byte', () => {
     const t = intake('');
     const before = 'not json at all\n{"kind":"x"}\nno newline';
@@ -133,6 +163,9 @@ describe("Intake's per-item file (T086, 28-5c-4b)", () => {
     const after = readFileSync(t.file, 'utf8');
     expect(after.startsWith(before)).toBe(true);
     expect(after.slice(before.length)).toContain(intakeMark(SESSION_ID));
+    // The cut line stays as it was, and the marker starts a line of its own: the session is found.
+    expect(after.slice(before.length).startsWith(`\n{`)).toBe(true);
+    expect(intakeSessions(t.file)).toEqual(new Set([SESSION_ID]));
   });
 
   it('refuses a link planted at the file, leaving its target untouched', () => {
@@ -145,18 +178,21 @@ describe("Intake's per-item file (T086, 28-5c-4b)", () => {
     expect(readFileSync(target, 'utf8')).toBe('theirs\n');
   });
 
-  it('stops with an error on a file it cannot read or write, never reading it as none', () => {
-    const t = intake('');
-    mkdirSync(t.file, { recursive: true });
-    expect(() => intakeSessions(t.file)).toThrow(/it is not a regular file/);
-    rmSync(t.file, { recursive: true });
-    mkdirSync(dirname(t.file), { recursive: true });
-    chmodSync(dirname(t.file), 0o500);
-    try {
-      expect(t.append).toThrow(/^could not open Intake's events file /);
-    } finally {
-      chmodSync(dirname(t.file), 0o700);
-    }
-    expect(existsSync(t.file)).toBe(false);
-  });
+  it.skipIf(process.getuid?.() === 0)(
+    'stops with an error on a file it cannot read or write, never reading it as none',
+    () => {
+      const t = intake('');
+      mkdirSync(t.file, { recursive: true });
+      expect(() => intakeSessions(t.file)).toThrow(/it is not a regular file/);
+      rmSync(t.file, { recursive: true });
+      mkdirSync(dirname(t.file), { recursive: true });
+      chmodSync(dirname(t.file), 0o500);
+      try {
+        expect(t.append).toThrow(/^could not open Intake's events file /);
+      } finally {
+        chmodSync(dirname(t.file), 0o700);
+      }
+      expect(existsSync(t.file)).toBe(false);
+    },
+  );
 });
