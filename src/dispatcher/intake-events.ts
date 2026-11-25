@@ -1,10 +1,10 @@
-// Intake's per-item file (design, Branches, "Before the branch exists"; T086, slice 28-5c-4b):
+// Intake's per-item file (design, Branches, "Before the branch exists"; T086, built in slice 28-5c-4c):
 // each time an Intake session ends, failed ones included, the dispatcher appends that session's
 // log to `~/.factory/items/<owner>/<repo>/<issue>/events.jsonl` on the laptop, after one factory
 // line naming the session, never overwriting, the attempts in order. Each line is checked as an
 // event of that session, and one that is not is replaced by a factory line saying which and why;
 // a log missing or unreadable gets one such line. A copied line names its own session alone, so
-// no session can write a line that passes for another session's marker. Slice 28-5c-4c reads the
+// no session can write a line that passes for another session's marker. Slice 28-5c-4d reads the
 // file: the sessions its markers name, for recovery, and its lines, for the item branch's seed.
 // The file is telemetry, never a decision; only its read or write failing stops the pass.
 import {
@@ -14,6 +14,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readSync,
   fsyncSync,
   writeSync,
 } from 'node:fs';
@@ -26,7 +27,7 @@ import { sessionLines } from '../hooks/session-log.js';
 import { visible } from '../notify/summary.js';
 import { repoParts } from './failures.js';
 
-/** The item's file of Intake's events, kept until its branch carries them (28-5c-4c). */
+/** The item's file of Intake's events, kept until its branch carries them (built in 28-5c-4c, read in 28-5c-4d). */
 export function intakeEventsFile(home: string, repo: string, issue: number): string {
   const [owner, name] = repoParts(repo);
   return join(home, '.factory', 'items', owner, name, String(issue), 'events.jsonl');
@@ -118,19 +119,24 @@ export function appendIntakeSession(
   const added = Buffer.concat(
     [note(intakeMark(session)), ...lines].flatMap((l) => [l, Buffer.from('\n')]),
   );
+  // A crash mid-append can leave a last line with no newline: the marker starts a line of its own.
+  const cut = Buffer.from('\n');
   let fd: number;
   try {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    const flags =
-      constants.O_WRONLY | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW;
+    const flags = constants.O_RDWR | constants.O_APPEND | constants.O_CREAT | constants.O_NOFOLLOW;
     fd = openSync(file, flags | constants.O_NONBLOCK, 0o600);
   } catch (err) {
     throw failed('could not open', file, err);
   }
   try {
-    if (!fstatSync(fd).isFile()) throw new Error('it is not a regular file');
-    for (let done = 0; done < added.length;)
-      done += writeSync(fd, added, done, added.length - done);
+    const stat = fstatSync(fd);
+    if (!stat.isFile()) throw new Error('it is not a regular file');
+    const last = Buffer.alloc(1);
+    const endsCut =
+      stat.size > 0 && readSync(fd, last, 0, 1, stat.size - 1) === 1 && last[0] !== 0x0a;
+    const out = endsCut ? Buffer.concat([cut, added]) : added;
+    for (let done = 0; done < out.length;) done += writeSync(fd, out, done, out.length - done);
     fsyncSync(fd);
   } catch (err) {
     throw failed('could not append to', file, err);

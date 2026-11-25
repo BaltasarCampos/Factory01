@@ -251,7 +251,7 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
     expect(t.labels()).not.toContain('state:triaged');
   });
 
-  it("appends each Intake session's log to the item's file once it ends, a failed one too (28-5c-4b)", async () => {
+  it("appends each Intake session's log to the item's file once it ends, a failed one too (28-5c-4c)", async () => {
     const t = setup({ labels: ['tier:2'] });
     await dispatchOnce(t.ctx);
     t.local.failure = new SessionFailed('claude exited 1', false);
@@ -259,6 +259,38 @@ describe('Intake bounded in local mode (T061)', { timeout: 60_000 }, () => {
     expect(t.local.launches.map((l) => l.station)).toEqual([1, 1]);
     const file = intakeEventsFile(t.home, REPO, ISSUE);
     expect([...intakeSessions(file)]).toEqual([fakeLocalId(1), fakeLocalId(2)]);
+  });
+
+  it("says the per-item file's append failed, never that the outcome was not recorded, and records the outcome first (28-5c-4d-1)", async () => {
+    const t = setup({ labels: ['tier:2'] });
+    const file = intakeEventsFile(t.home, REPO, ISSUE);
+    // A folder where the file goes: the append fails, the failure record is still written.
+    t.local.afterStart = () => {
+      mkdirSync(file, { recursive: true });
+    };
+    t.local.failure = new SessionFailed('claude exited 1', false);
+    await expect(dispatchOnce(t.ctx)).rejects.toThrow(/^could not read Intake's events file /);
+    const failedAlerts = t.inbox().flatMap((c) => {
+      const a = parseAlert({ ...c, id: String(c.id) });
+      return a?.kind === 'session-failed' ? [a.text] : [];
+    });
+    const [alert, ...more] = failedAlerts;
+    expect(more).toEqual([]);
+    expect(alert).toMatch(/nothing of it is pushed; its outcome is recorded, but could not read/);
+    expect(alert).not.toContain('could not be recorded');
+    const record = readFailureRecord(failureFile(t.home, REPO, ISSUE, 1));
+    expect(record).toMatchObject({ outcome: 'failed', last: 'claude exited 1' });
+
+    // A session that ended well: the outcome is recorded, and the append's error is its own.
+    const u = setup({ labels: ['tier:2'] });
+    const ufile = intakeEventsFile(u.home, REPO, ISSUE);
+    u.local.afterStart = () => {
+      mkdirSync(ufile, { recursive: true });
+    };
+    await expect(dispatchOnce(u.ctx)).rejects.toThrow(/^could not read Intake's events file /);
+    expect(readFailureRecord(failureFile(u.home, REPO, ISSUE, 1))).toMatchObject({
+      outcome: 'ended',
+    });
   });
 
   it('holds at once on a full context, under a newly installed factory too, and stops the pass at a last session it cannot tell has ended, launching nothing', async () => {

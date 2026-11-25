@@ -551,6 +551,8 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
   let starting: { starting: (id: string, launched: string) => void } | undefined;
   /** How the session that started ended, in its failure record, in local mode (T061). */
   let settled: ((outcome: Parameters<typeof recordOutcome>[4]) => void) | undefined;
+  /** At Intake, the ended session's log into the item's file; a step of its own (28-5c-4d-1). */
+  let filed: (() => void) | undefined;
   const where = { repo, item: item.issue.number, station };
   /**
    * Each attempt counted as it starts, and its outcome after: on manifest `sha`, or at Intake,
@@ -562,9 +564,13 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
         recordSession(ctx.failures, where, sha, id, launched);
         settled = (outcome) => {
           recordOutcome(ctx.failures, where, sha, id, outcome);
-          // Intake's events wait on the laptop until the item's branch exists (28-5c-4b).
-          if (station === 1) appendIntakeSession(ctx.failures.home, repo, where.item, id, git.now);
         };
+        // Intake's events wait on the laptop until the item's branch exists (built in 28-5c-4c, read in 28-5c-4d). Never
+        // inside `settled`, whose failure means the outcome was not recorded.
+        if (station === 1)
+          filed = () => {
+            appendIntakeSession(ctx.failures.home, repo, where.item, id, git.now);
+          };
       },
     };
   };
@@ -657,15 +663,26 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
       } catch (thrown) {
         unrecorded = thrown instanceof Error ? thrown : new Error(String(thrown));
       }
+      // The file's append is its own step, tried whether or not the outcome was recorded.
+      let unfiled: Error | undefined;
+      try {
+        filed?.();
+      } catch (thrown) {
+        unfiled = thrown instanceof Error ? thrown : new Error(String(thrown));
+      }
       const lost =
-        unrecorded === undefined
+        (unrecorded === undefined
           ? ''
-          : `; its outcome could not be recorded: ${visible(unrecorded.message)}`;
+          : `; its outcome could not be recorded: ${visible(unrecorded.message)}`) +
+        (unfiled === undefined
+          ? ''
+          : `; ${unrecorded === undefined ? 'its outcome is recorded, but ' : ''}${visible(unfiled.message)}`);
       const text = `a ${role} session for ${repo}#${String(item.issue.number)} failed: ${err.message}; nothing of it is pushed${lost}`;
       const urgency = err.urgent ? 'urgent' : 'info';
       const kind = err instanceof SessionCapped ? 'session-capped' : 'session-failed';
       await alertOnce({ urgency, kind, text });
       if (unrecorded !== undefined) throw unrecorded;
+      if (unfiled !== undefined) throw unfiled;
       return { ...result, failed: text };
     }
     if (!(err instanceof LaunchRefused)) throw err;
@@ -686,6 +703,7 @@ async function startSession(pass: Pass, target: Target): Promise<PassResult | un
     return refuse(refused, err.urgent);
   }
   settled?.('ended');
+  filed?.();
   for (const { kind, text } of notices) await alertOnce({ urgency: 'info', kind, text });
   const mode = launcher.mode;
   return {
