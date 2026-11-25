@@ -631,7 +631,7 @@ async function until(done: () => boolean): Promise<boolean> {
 }
 
 /** Whether `path` exists; anything but its absence throws, naming it. */
-function present(path: string): boolean {
+export function present(path: string): boolean {
   try {
     lstatSync(path);
     return true;

@@ -10,13 +10,13 @@
 import {
   closeSync,
   constants,
-  existsSync,
   fstatSync,
   mkdirSync,
   openSync,
   readFileSync,
   readSync,
   fsyncSync,
+  rmSync,
   writeSync,
 } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -26,8 +26,9 @@ import { MAX_APPEND, MAX_LOG } from '../hooks/events-commit.js';
 import { readSessionRecord, recordEvent, sessionEvents } from '../hooks/session.js';
 import { sessionLines } from '../hooks/session-log.js';
 import { visible } from '../notify/summary.js';
+import { validateEvent } from '../events/schema.js';
 import { failureFile, readFailureRecord, repoParts } from './failures.js';
-import { sessionRunning } from './launcher/local.js';
+import { present, sessionRunning } from './launcher/local.js';
 
 /** The item's file of Intake's events, kept until its branch carries them (built in 28-5c-4c, read in 28-5c-4d). */
 export function intakeEventsFile(home: string, repo: string, issue: number): string {
@@ -44,20 +45,33 @@ const failed = (what: string, file: string, err: unknown) =>
     `${what} Intake's events file ${file}: ${visible(err instanceof Error ? err.message : String(err))}`,
   );
 
+/** The factory's line that says the file is full: written once, and then nothing is appended. */
+export const INTAKE_FULL = `Intake's events file is full, past ${String(MAX_LOG / (1024 * 1024))} MiB; the rest of this session's lines and later sessions' lines are left out`;
+
+interface Scanned {
+  text: string;
+  sessions: Set<string>;
+  /** Whether the factory's full line is in the file. */
+  full: boolean;
+  size: number;
+}
+
 /**
- * The sessions whose marker the file holds, none when it is missing: a marker is the factory's
- * `alert` line by the `Dispatcher` whose text names its own `session` field. Any other read
- * failure throws, never reading as none.
+ * The file's sessions, whose marker the file holds, and whether it is full; none and not full
+ * when it is missing. A marker is the factory's `alert` line by the `Dispatcher` whose text names
+ * its own `session` field. Any other read failure throws, never reading as none.
  */
-export function intakeSessions(file: string): Set<string> {
+function scan(file: string): Scanned {
   let text: string;
+  let size: number;
   try {
     const fd = openSync(file, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
     try {
       const stat = fstatSync(fd);
-      const { size } = stat;
+      size = stat.size;
       if (!stat.isFile()) throw new Error('it is not a regular file');
-      // Bounded as the work's event log is: past it nothing is read, and nothing is appended.
+      // Bounded as the work's event log is: past it nothing is read. The factory's own appends
+      // stop short of it, so this catches a file the factory did not write.
       if (size > MAX_LOG)
         throw new Error(
           `it is ${String(size)} bytes, past the ${String(MAX_LOG / (1024 * 1024))} MiB the factory reads; close the item and file it again, or delete the file`,
@@ -67,10 +81,12 @@ export function intakeSessions(file: string): Set<string> {
       closeSync(fd);
     }
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return new Set();
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT')
+      return { text: '', sessions: new Set(), full: false, size: 0 };
     throw failed('could not read', file, err);
   }
   const found = new Set<string>();
+  let full = false;
   for (const line of text.split('\n')) {
     let e: unknown;
     try {
@@ -80,11 +96,14 @@ export function intakeSessions(file: string): Set<string> {
     }
     if (typeof e !== 'object' || e === null) continue;
     const { kind, tool, session, input_summary: summary } = e as Record<string, unknown>;
-    if (kind === 'alert' && tool === 'Dispatcher' && typeof session === 'string')
-      if (summary === intakeMark(session)) found.add(session);
+    if (kind !== 'alert' || tool !== 'Dispatcher') continue;
+    if (summary === INTAKE_FULL) full = true;
+    else if (typeof session === 'string' && summary === intakeMark(session)) found.add(session);
   }
-  return found;
+  return { text, sessions: found, full, size };
 }
+
+export const intakeSessions = (file: string): Set<string> => scan(file).sessions;
 
 /**
  * Appends Intake session `session`'s log to its item's file, once: a session the file already
@@ -99,7 +118,9 @@ export function appendIntakeSession(
   now: () => Date,
 ): void {
   const file = intakeEventsFile(home, repo, issue);
-  if (intakeSessions(file).has(session)) return;
+  const state = scan(file);
+  // A full file takes nothing more: the session's lines are only in its own log.
+  if (state.sessions.has(session) || state.full) return;
   const record = readSessionRecord(home, session);
   if (record.role !== 'intake' || record.item !== issue)
     throw new EnvironmentError(
@@ -125,9 +146,24 @@ export function appendIntakeSession(
         `the session's log from line ${String(left.line)} on, ${String(left.bytes)} bytes, is left out, past the ${String(MAX_APPEND / (1024 * 1024))} MiB one session appends`,
       ),
     );
-  const added = Buffer.concat(
-    [note(intakeMark(session)), ...lines].flatMap((l) => [l, Buffer.from('\n')]),
-  );
+  // What passes the limit is left out, whole lines only, and the full line says so, once.
+  const full = note(INTAKE_FULL);
+  // Room for the full line and a newline before a cut-off last line, never past the limit.
+  let room = MAX_LOG - state.size - (full.length + 2);
+  if (room < 0) return;
+  const kept: Buffer[] = [];
+  let over = false;
+  for (const line of [note(intakeMark(session)), ...lines]) {
+    if (line.length + 1 > room) {
+      over = true;
+      break;
+    }
+    kept.push(line);
+    room -= line.length + 1;
+  }
+  if (over) kept.push(full);
+  if (kept.length === 0) return;
+  const added = Buffer.concat(kept.flatMap((l) => [l, Buffer.from('\n')]));
   // A crash mid-append can leave a last line with no newline: the marker starts a line of its own.
   const cut = Buffer.from('\n');
   let fd: number;
@@ -171,6 +207,69 @@ export function recoverIntakeSession(
   const id = readFailureRecord(failureFile(home, repo, issue, 1))?.session;
   if (id === undefined) return;
   if (sessionRunning(home, id) !== undefined) return;
-  if (!existsSync(join(home, '.factory', 'sessions', id, 'session.json'))) return;
+  if (!present(join(home, '.factory', 'sessions', id, 'session.json'))) return;
   appendIntakeSession(home, repo, issue, id, now);
+}
+
+/** The role version of a factory line that no release wrote: the seed's "not here" line. */
+const NO_RELEASE = 'v0.0.0+000000000000';
+
+/** The seed of an item branch's `events.jsonl`: Intake's lines, and what to alert, if anything. */
+export interface IntakeSeed {
+  text: string;
+  /** An Intake session ran and its lines are not in the file: why, for one alert. */
+  missing?: string;
+}
+
+/**
+ * The first lines of the item branch's `events.jsonl` (design, "Before the branch exists"): the
+ * per-item file's lines that are events of this item's Intake, in order, or one line saying
+ * Intake's events are not here. It reads no comment. The failure record's session, when it ran
+ * and has no marker in the file, is named in `missing`: the lines are lost, so the Owner is told.
+ */
+export function intakeSeed(home: string, repo: string, issue: number, now: () => Date): IntakeSeed {
+  const state = scan(intakeEventsFile(home, repo, issue));
+  const lines = state.text.split('\n').filter((line) => {
+    try {
+      const e = validateEvent(JSON.parse(line));
+      return e.item === issue && e.role === 'intake';
+    } catch {
+      return false;
+    }
+  });
+  const none = JSON.stringify(
+    makeEvent(
+      {
+        ...{ item: issue, station: 1, role: 'intake', role_version: NO_RELEASE },
+        ...{ session: 'dispatcher', model: 'none', kind: 'alert', tool: 'Dispatcher' },
+        input_summary: "Intake's events are not here: none were kept on the laptop for this item",
+      },
+      now,
+    ),
+  );
+  const text = `${(lines.length === 0 ? [none] : lines).join('\n')}\n`;
+  const id = readFailureRecord(failureFile(home, repo, issue, 1))?.session;
+  const ran = id !== undefined && present(join(home, '.factory', 'sessions', id, 'session.json'));
+  if (!ran || state.sessions.has(id)) return { text };
+  // Full by its line, or too near the limit for an append to fit one (see `appendIntakeSession`).
+  const full = state.full || state.size > MAX_LOG - 1024;
+  const why = full ? 'the file is full' : 'it was not appended to the file';
+  return {
+    text,
+    missing: `#${String(issue)}: Intake session ${id}'s lines are not in the item's events file, since ${why}; the branch is created without them, and they are only in the session's own log under ~/.factory/sessions/`,
+  };
+}
+
+/** Whether the item's file exists; anything but its absence throws. */
+export const hasIntakeFile = (home: string, repo: string, issue: number): boolean =>
+  present(intakeEventsFile(home, repo, issue));
+
+/** Deletes the item's file once its lines are on the pushed branch; a missing file is fine. */
+export function dropIntakeFile(home: string, repo: string, issue: number): void {
+  const file = intakeEventsFile(home, repo, issue);
+  try {
+    rmSync(file, { force: true });
+  } catch (err) {
+    throw failed('could not delete', file, err);
+  }
 }
