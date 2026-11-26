@@ -254,8 +254,8 @@ describe('dispatcher core: admission (AC-008, AC-055)', () => {
 
       const result = await dispatchOnce(t.ctx);
 
-      expect(result.skipped.map((s) => s.issue)).toEqual([2, 3, 4]);
-      expect(result.skipped[2]?.reason).toMatch(/no verified owner:approved/);
+      // With no owner: label they are never read (28-5c-5a).
+      expect(result.skipped).toEqual([]);
       expect(t.labelsOf(2)).toEqual([]);
       expect(t.labelsOf(3)).toEqual(['state:building']);
       expect(t.labelsOf(4)).toEqual([]);
@@ -550,6 +550,89 @@ describe('dispatcher core: one pass', () => {
     expect(result.halted).toMatch(/pause:line/);
     expect(result.moves).toEqual([]);
     expect(t.cloud.launches).toEqual([]);
+  });
+});
+
+describe('dispatcher core: which issues it reads (28-5c-5a, FR-016d)', () => {
+  const many = (count: number, label: string) =>
+    Array.from({ length: count }, (_, i) => ({ number: i + 2, labels: [label] }));
+  /** Seeds `count` open pull requests carrying `label`. */
+  const pulls = (count: number, label: string) => {
+    const state = readState();
+    const repo = state.repos[REPO];
+    if (repo === undefined) throw new Error('no repository');
+    repo.prs = Array.from({ length: count }, (_, i) => ({
+      ...{ number: 500 + i, title: 'p', body: '', author: 'owner', headRefName: `x${String(i)}` },
+      ...{ baseRefName: 'main', headRefOid: '', isDraft: false, state: 'OPEN' as const },
+      ...{ comments: [], createdAt: BEFORE, labels: [label] },
+    }));
+    seedState(state);
+  };
+
+  it.each(['owner:spec-approved', 'owner:waiver'])(
+    'an issue with %s and no owner:approved is still read: a label without a record is tampering (AC-068)',
+    async (label) => {
+      const t = setup([{ number: 2, labels: [label] }]);
+      const state = readState();
+      state.repos[REPO]?.issues[1]?.events.push(labeled(label, LATER));
+      seedState(state);
+
+      const result = await dispatchOnce(t.ctx);
+
+      expect(result.moves).toEqual([expect.objectContaining({ issue: 2, to: 'escalated' })]);
+      expect(t.inbox().map((c) => c.body)).toEqual([
+        expect.stringMatching(/urgency=urgent kind=tampering -->\n\n#2/),
+      ]);
+      expect(t.cloud.launches).toEqual([]);
+    },
+  );
+
+  it.each(['owner:approved', 'owner:spec-approved', 'owner:waiver'])(
+    'stops the line, with one urgent alert naming the way out, when %s fills a page',
+    async (label) => {
+      const t = setup(many(100, label));
+
+      const first = await dispatchOnce(t.ctx);
+      await dispatchOnce(t.ctx);
+
+      expect(first.halted).toMatch(`carry ${label}, a full page`);
+      expect(first.moves).toEqual([]);
+      expect(t.cloud.launches).toEqual([]);
+      expect(t.inbox().map((c) => c.body)).toEqual([
+        expect.stringMatching(
+          /urgency=urgent kind=admission-full -->\n\nline stopped: .* until fewer than 100 are open/,
+        ),
+      ]);
+    },
+  );
+
+  it('counts pull requests toward the page, and never reads one as an item', async () => {
+    const t = setup([{ number: 2, approval: 'signed' }]);
+    pulls(98, 'owner:approved');
+
+    const under = await dispatchOnce(t.ctx);
+
+    expect(under.halted).toBeUndefined();
+    expect([...under.moves.map((m) => m.issue), ...under.skipped.map((s) => s.issue)]).toEqual([2]);
+
+    pulls(99, 'owner:approved');
+    expect((await dispatchOnce(t.ctx)).halted).toMatch(/a full page/);
+  });
+
+  it('stops the pass when a query fails, never reading it as no issues', async () => {
+    const t = setup([{ number: 2, approval: 'signed' }]);
+    const dir = tempDir();
+    const real = execFileSync('sh', ['-c', 'command -v gh'], { encoding: 'utf8' }).trim();
+    const script = `#!/bin/sh\ncase "$*" in *"labels=owner%3Awaiver"*) echo 'HTTP 502' >&2; exit 1;; esac\nexec ${real} "$@"\n`;
+    writeFileSync(join(dir, 'gh'), script, { mode: 0o755 });
+    vi.stubEnv('PATH', `${dir}:${process.env.PATH ?? ''}`);
+    try {
+      await expect(dispatchOnce(t.ctx)).rejects.toThrow(/HTTP 502/);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+    expect(t.cloud.launches).toEqual([]);
+    expect(t.inbox()).toEqual([]);
   });
 });
 

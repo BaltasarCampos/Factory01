@@ -51,6 +51,8 @@ export interface FakePr {
   headRepository?: string;
   /** Label events; pull requests are issues, so they have a timeline too. */
   events?: FakeLabelEvent[];
+  /** Labels, as the REST issues list shows a pull request that carries them. */
+  labels?: string[];
 }
 
 export interface FakeLabel {
@@ -130,6 +132,7 @@ function normaliseRepo(repo: DeepPartialRepo, clock: string): FakeRepo {
       comments: p.comments ?? [],
       createdAt: p.createdAt ?? clock,
       ...(p.headRepository === undefined ? {} : { headRepository: p.headRepository }),
+      ...(p.labels === undefined ? {} : { labels: p.labels }),
     })),
   };
 }
@@ -639,6 +642,30 @@ function prCommand(state: FakeGhState, sub: string | undefined, p: Parsed, out: 
   }
 }
 
+/**
+ * `GET repos/{repo}/issues`, one page: issues and pull requests, newest first, filtered by
+ * `state` and `labels` (all of them), 30 unless `per_page` says up to 100.
+ */
+function restIssues(repo: FakeRepo, query: string) {
+  const q = new URLSearchParams(query);
+  const state = (q.get('state') ?? 'open').toUpperCase();
+  const labels = q.get('labels')?.split(',') ?? [];
+  const size = Math.min(Number(q.get('per_page') ?? '30'), 100);
+  return [...repo.issues.map((i) => ({ i, pr: false })), ...repo.prs.map((i) => ({ i, pr: true }))]
+    .filter(({ i }) => state === 'ALL' || i.state === state)
+    .filter(({ i }) => labels.every((l) => (i.labels ?? []).includes(l)))
+    .sort((a, b) => b.i.number - a.i.number)
+    .slice(0, size)
+    .map(({ i, pr }) => ({
+      number: i.number,
+      title: i.title,
+      body: i.body === '' ? null : i.body,
+      user: { login: i.author },
+      labels: (i.labels ?? []).map((name) => ({ name })),
+      ...(pr ? { pull_request: {} } : {}),
+    }));
+}
+
 function apiCommand(state: FakeGhState, p: Parsed, out: string[]): void {
   const path = (p.positional[0] ?? '').replace(/^\//, '');
   const paginate = flag(p, 'paginate') === 'true';
@@ -658,6 +685,11 @@ function apiCommand(state: FakeGhState, p: Parsed, out: string[]): void {
     if (pages.length === 0) pages.push([]);
     // `gh api --paginate` prints each page's JSON array back to back.
     out.push((paginate ? pages : pages.slice(0, 1)).map((page) => JSON.stringify(page)).join(''));
+    return;
+  }
+  const list = /^repos\/([^/]+\/[^/]+)\/issues\?(.*)$/.exec(path);
+  if (list) {
+    out.push(JSON.stringify(restIssues(getRepo(state, list[1] ?? ''), list[2] ?? '')));
     return;
   }
   if (path === 'user') {
