@@ -24,7 +24,7 @@ import { EnvironmentError } from '../cli/env.js';
 import { makeEvent } from '../events/append.js';
 import { MAX_APPEND, MAX_LOG } from '../hooks/events-commit.js';
 import { readSessionRecord, recordEvent, sessionEvents } from '../hooks/session.js';
-import { sessionLines } from '../hooks/session-log.js';
+import { brief, sessionLines } from '../hooks/session-log.js';
 import { visible } from '../notify/summary.js';
 import { validateEvent } from '../events/schema.js';
 import { failureFile, readFailureRecord, repoParts } from './failures.js';
@@ -222,32 +222,73 @@ export interface IntakeSeed {
 }
 
 /**
- * The first lines of the item branch's `events.jsonl` (design, "Before the branch exists"): the
- * per-item file's lines that are events of this item's Intake, in order, or one line saying
- * Intake's events are not here. It reads no comment. The failure record's session, when it ran
- * and has no marker in the file, is named in `missing`: the lines are lost, so the Owner is told.
+ * The file's lines for the seed, by the events commit's rules (Owner decision 2026-11-19): each
+ * line that is not an event of this item's Intake is replaced by a factory line naming its number
+ * and why, and past `limit` bytes the rest is left out, whole lines only, with one line saying so.
  */
-export function intakeSeed(home: string, repo: string, issue: number, now: () => Date): IntakeSeed {
-  const state = scan(intakeEventsFile(home, repo, issue));
-  const lines = state.text.split('\n').filter((line) => {
+function seedLines(
+  text: string,
+  issue: number,
+  note: (summary: string) => string,
+  limit: number,
+): string[] {
+  const all = text.split('\n');
+  const cut = all.at(-1) !== '';
+  if (!cut) all.pop();
+  const lines = all.map((line, i) => {
+    let why: string;
     try {
       const e = validateEvent(JSON.parse(line));
-      return e.item === issue && e.role === 'intake';
-    } catch {
-      return false;
+      if (e.item === issue && e.role === 'intake') return line;
+      why = `it is an event of item ${String(e.item)}, role ${e.role}`;
+    } catch (err) {
+      why = err instanceof Error ? err.message : String(err);
+      if (cut && i === all.length - 1) why = `it is cut short, with no newline at its end: ${why}`;
     }
+    const what = `line ${String(i + 1)} of Intake's events file is not an event of this item's Intake`;
+    return note(`${what}: ${brief(why)}`);
   });
-  const none = JSON.stringify(
-    makeEvent(
-      {
-        ...{ item: issue, station: 1, role: 'intake', role_version: NO_RELEASE },
-        ...{ session: 'dispatcher', model: 'none', kind: 'alert', tool: 'Dispatcher' },
-        input_summary: "Intake's events are not here: none were kept on the laptop for this item",
-      },
-      now,
-    ),
-  );
-  const text = `${(lines.length === 0 ? [none] : lines).join('\n')}\n`;
+  // A replacement can be longer than its line, so the file's own bound does not bound the seed.
+  const size = (line: string) => Buffer.byteLength(line) + 1;
+  if (lines.reduce((sum, line) => sum + size(line), 0) <= limit) return lines;
+  const left = (n: number) =>
+    note(
+      `Intake's events file from line ${String(n)} on is left out, past the ${String(limit)} bytes the seed holds`,
+    );
+  let room = limit - size(left(lines.length));
+  const kept = lines.findIndex((line) => (room -= size(line)) < 0);
+  return [...lines.slice(0, kept), left(kept + 1)];
+}
+
+/**
+ * The first lines of the item branch's `events.jsonl` (design, "Before the branch exists"): the
+ * per-item file's lines, as `seedLines` passes them, or one line saying Intake's events are not
+ * here. It reads no comment. The failure record's session, when it ran and has no marker in the
+ * file, is named in `missing`: the lines are lost, so the Owner is told. Only tests pass `limit`.
+ */
+export function intakeSeed(
+  home: string,
+  repo: string,
+  issue: number,
+  now: () => Date,
+  limit = MAX_LOG,
+): IntakeSeed {
+  const state = scan(intakeEventsFile(home, repo, issue));
+  const note = (summary: string) =>
+    JSON.stringify(
+      makeEvent(
+        {
+          ...{ item: issue, station: 1, role: 'intake', role_version: NO_RELEASE },
+          ...{ session: 'dispatcher', model: 'none', kind: 'alert', tool: 'Dispatcher' },
+          input_summary: summary,
+        },
+        now,
+      ),
+    );
+  const lines = seedLines(state.text, issue, note, limit);
+  if (lines.length === 0)
+    lines.push(note("Intake's events are not here: none were kept on the laptop for this item"));
+  const text = `${lines.join('\n')}\n`;
   const id = readFailureRecord(failureFile(home, repo, issue, 1))?.session;
   const ran = id !== undefined && present(join(home, '.factory', 'sessions', id, 'session.json'));
   if (!ran || state.sessions.has(id)) return { text };
