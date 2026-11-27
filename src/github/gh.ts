@@ -191,6 +191,13 @@ export class Fields {
     return this.field(key).str('login');
   }
 
+  /** A field GitHub always sends, null or not: one left out is refused, never read as null. */
+  nullable(key: string): unknown {
+    if (this.obj[key] === undefined)
+      throw new GhError(`unexpected gh output: ${this.what}.${key} is missing`);
+    return this.obj[key];
+  }
+
   has(key: string): boolean {
     return this.obj[key] !== undefined && this.obj[key] !== null;
   }

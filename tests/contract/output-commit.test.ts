@@ -300,7 +300,8 @@ describe("the Stop hook's own deadline (T086, 28-5c-1)", () => {
     const stop = (wait: number, limit?: number) => {
       writeFileSync(
         join(bin, 'gh'),
-        `#!/bin/sh\nsleep ${String(wait)}\necho '{"number":42,"state":"OPEN","labels":[],"comments":[]}'\n`,
+        // The item's view, and its comments from REST.
+        `#!/bin/sh\nsleep ${String(wait)}\ncase "$1" in api) echo '[]';; *) echo '{"number":42,"state":"OPEN","labels":[]}';; esac\n`,
         {
           mode: 0o755,
         },

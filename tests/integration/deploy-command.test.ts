@@ -35,6 +35,7 @@ import {
   owner,
   posted,
   pushRunAt,
+  outsiderWaiver,
 } from '../helpers/merge-deploy.js';
 import {
   APP,
@@ -422,6 +423,19 @@ describe(
       expect(releasesOf(d.t.home)).toEqual([]);
       expect(d.units()).toEqual({});
       expect(deployLines(d.t.home)).toEqual([]);
+    });
+
+    it('T068: an outsider’s waiver record on a shipped item, no listed key’s, holds nothing', async () => {
+      const d = deployable(product('node build.mjs'), {
+        chain: (_, standard) => [...standard, outsiderWaiver(903)],
+      });
+      mergeItem(d.t.repo);
+
+      const r = await d.deploy();
+
+      expect(r.stderr).toBe('');
+      expect(r.code).toBe(0);
+      expect(r.stdout).toContain('re-verified the approvals of #7\n');
     });
 
     it('re-verifies with the key lists at main’s head: a key revoked since the merge refuses', async () => {

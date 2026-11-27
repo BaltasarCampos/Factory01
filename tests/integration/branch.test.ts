@@ -571,6 +571,33 @@ describe('Intake duplicates (AC-009, slice 24a-2)', { timeout: 60_000 }, () => {
     expect(alerts(t)).toEqual([text(5001)]);
   });
 
+  /** A copy of the marker posted by someone else, listed before the item's other comments. */
+  const outsider = (id: number, over: { author: string; app?: string }) => {
+    editItem((i) => i.comments.unshift({ id, ...mark(), ...over }));
+  };
+
+  it('an outsider’s marker, or an App’s, holds nothing: Intake runs and no alert goes out (T060)', async () => {
+    const t = setup({ labels: [], comments: [] });
+    original();
+    outsider(8000, { author: 'stranger' });
+    outsider(8001, { author: 'owner', app: 'claude' });
+
+    await dispatchOnce(t.ctx);
+
+    expect(t.local.launches).toEqual([expect.objectContaining({ role: 'intake', item: ISSUE })]);
+    expect(alerts(t)).toEqual([]);
+  });
+
+  it('the alert names the factory’s marker, not an outsider’s earlier one (T060)', async () => {
+    const t = setup({ labels: [], comments: [mark()] });
+    original();
+    outsider(8000, { author: 'stranger' });
+
+    await dispatchOnce(t.ctx);
+
+    expect(alerts(t)).toEqual([text(5001)]);
+  });
+
   it('with the marker deleted Intake runs again on the next pass; marked again, the item gets a new alert', async () => {
     const t = setup({ labels: [], comments: [mark()] });
     original();

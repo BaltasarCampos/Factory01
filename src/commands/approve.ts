@@ -36,7 +36,7 @@ import { inHistory, resignView } from '../git/diff.js';
 import { ledgerPath } from '../git/history.js';
 import { briefMerged, verifiedMerges } from '../git/merges.js';
 import { ExitCode, RefusedError, UsageError } from '../cli/env.js';
-import { listComments, postComment } from '../github/comments.js';
+import { listComments, ownComments, postComment } from '../github/comments.js';
 import { Fields, gh, numberArg, repoArg } from '../github/gh.js';
 import { addLabel, removeLabel } from '../github/labels.js';
 import { viewPr } from '../github/prs.js';
@@ -70,9 +70,14 @@ export async function postSigned(
   const body = renderComment(record, signed);
   await postComment(project.repo, record.issue, body, project);
   const comments = await listComments(project.repo, record.issue, project);
-  const posted = comments.findLast((c) => c.body.trim() === body.trim());
+  // Anyone may copy the record's comment: the ledger names the Owner's own (T030).
+  const same = comments.filter((c) => c.body.trim() === body.trim());
+  const { own, otherAccount, viaApp } = await ownComments(same, project);
+  const posted = own.at(-1);
   if (posted === undefined)
-    throw new RefusedError(`the record posted on #${String(record.issue)} could not be read back`);
+    throw new RefusedError(
+      `the record posted on #${String(record.issue)} could not be read back as yours (left out: ${String(otherAccount)} from another account, ${String(viaApp)} through a GitHub App)`,
+    );
   const ref = `${project.repo}#${String(record.issue)}/${posted.id}`;
   new NonceLedger(nonceLedgerPath(project.home)).claim(record.nonce, ref);
   return posted.id;

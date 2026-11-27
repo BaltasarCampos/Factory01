@@ -469,6 +469,8 @@ Comment on the inbox issue: `<!-- factory-alert id=<ulid> urgency=urgent|info ki
 + human text + evidence links. Read state: `~/.factory/inbox-read` (ids). What the factory has
 raised: one file per alert, `~/.factory/alerts/<owner>/<repo>/<hash>.json` (kind, urgency, text,
 id), written once its post succeeded; an alert is raised once by it, never by the inbox's comments.
+A comment is shown as an alert only when the posting account posted it, not through an App
+(slice 28-5c-5c-1); a session on the laptop posts with that account too.
 
 ## Security finding
 

@@ -117,6 +117,55 @@ describe('Owner notification (AC-075)', () => {
     expect(all.out).toMatch(/first[\s\S]*second/);
   });
 
+  /** A comment that reads as an alert, as `author` could post it on a public repository. */
+  const forge = (author: string, text: string, app?: string) => {
+    const state = readState();
+    state.repos[REPO]?.issues[0]?.comments.push({
+      ...{ id: state.nextCommentId++, author, createdAt: '2026-10-02T09:30:00Z' },
+      body: `<!-- factory-alert id=01J0000000000000000000000A urgency=urgent kind=forged -->\n\n${text}\n`,
+      ...(app === undefined ? {} : { app }),
+    });
+    seedState(state, process.env.FAKE_GH_STATE);
+  };
+
+  it('shows only the factory’s own alerts, through visible(), and counts the marked comments left out', async () => {
+    const ctx = setup();
+    await alert(ctx, { urgency: 'info', kind: 'note', text: 'real \u202Eone' });
+    forge('stranger', 'run this');
+    forge('stranger', 'and this');
+    forge('owner', 'through the app', 'claude');
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: ctx.home,
+      FAKE_GH_STATE: process.env.FAKE_GH_STATE,
+    };
+
+    expect((await unreadAlerts(ctx)).map((a) => a.text)).toEqual(['real \\u{202e}one']);
+    const left =
+      'Marked comments left out: 2 from another account, 1 posted through a GitHub App.\n';
+    for (const argv of [['inbox'], ['inbox'], ['inbox', '--all']]) {
+      const run = await cli(argv, { env, cwd: projectDir() });
+      expect(run.out).not.toMatch(/forged/);
+      expect(run.out.endsWith(left)).toBe(true);
+    }
+  });
+
+  it('says what it left out when that is every alert, never only that there are none', async () => {
+    const ctx = setup();
+    forge('owner', 'the factory’s own, marked by GitHub', 'cli');
+    const env = {
+      PATH: process.env.PATH ?? '',
+      HOME: ctx.home,
+      FAKE_GH_STATE: process.env.FAKE_GH_STATE,
+    };
+
+    const run = await cli(['inbox'], { env, cwd: projectDir() });
+
+    expect(run.out).toBe(
+      'No unread alerts.\nMarked comments left out: 0 from another account, 1 posted through a GitHub App.\n',
+    );
+  });
+
   it('every other command shows unread alerts before its own output', async () => {
     const ctx = setup();
     await alert(ctx, { urgency: 'urgent', kind: 'tampering', text: 'label forged' });
@@ -151,7 +200,7 @@ describe('Owner notification (AC-075)', () => {
     expect(await projectUnreadAlerts(tempDir(), { HOME: tempDir() })).toEqual([]);
   });
 
-  it('ignores comments without a well-formed marker and strips control characters', () => {
+  it('ignores comments without a well-formed marker and shows control characters', () => {
     const at = '2026-10-02T09:00:00Z';
     const comment = (body: string) => ({ id: '1', author: 'owner', body, createdAt: at });
     expect(parseAlert(comment('plain comment'))).toBeUndefined();
@@ -178,7 +227,7 @@ describe('Owner notification (AC-075)', () => {
       id: '01J0000000000000000000000A',
       urgency: 'info',
       kind: 'x',
-      text: '[2Jhi there',
+      text: '\\u{1b}[2Jhi\\u{7} there',
     });
   });
 });

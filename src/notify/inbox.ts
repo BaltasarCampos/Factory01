@@ -12,7 +12,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { EnvironmentError } from '../cli/env.js';
-import { listComments, postComment, type IssueComment } from '../github/comments.js';
+import { listComments, ownComments, postComment, type IssueComment } from '../github/comments.js';
 import type { GhOptions } from '../github/gh.js';
 import { loadConfig } from '../model/config.js';
 import type { Alert } from '../model/types.js';
@@ -137,10 +137,10 @@ export async function alertOnce(target: AlertTarget, input: NewAlert): Promise<v
 
 /**
  * The alert in a comment, or undefined when the comment does not start with a well-formed
- * marker. The text is its first non-empty line with control characters removed, so a comment
- * cannot drive the Owner's terminal.
+ * marker. The text is its first non-empty line, shown through `visible()`, so a comment cannot
+ * drive the Owner's terminal or hide what it says.
  */
-export function parseAlert(comment: IssueComment): Alert | undefined {
+export function parseAlert(comment: Omit<IssueComment, 'viaApp'>): Alert | undefined {
   const match = MARKER_RE.exec(comment.body);
   if (!match) return undefined;
   const [marker, id = '', urgency, kind = ''] = match;
@@ -149,14 +149,27 @@ export function parseAlert(comment: IssueComment): Alert | undefined {
       .slice(marker.length)
       .split('\n')
       .find((l) => l.trim() !== '') ?? '';
-  const text = line.replace(/[\u0000-\u001f\u007f-\u009f]/g, '').trim();
+  const text = visible(line.trim());
   return { id, urgency: urgency === 'urgent' ? 'urgent' : 'info', kind, text };
 }
 
-/** Every alert on the inbox issue, oldest first. */
-export async function listAlerts(target: InboxTarget): Promise<Alert[]> {
-  const comments = await listComments(target.repo, target.inboxIssue, target);
-  return comments.map(parseAlert).filter((a): a is Alert => a !== undefined);
+/**
+ * The factory's own alerts among the comments, oldest first, with when each was posted, and how
+ * many other marked comments were left out: anyone may comment on a public repository's issue.
+ */
+export async function ownAlerts(comments: readonly IssueComment[], options: GhOptions) {
+  const marked = comments.filter((c) => parseAlert(c) !== undefined);
+  const { own, otherAccount, viaApp } = await ownComments(marked, options);
+  const alerts = own.flatMap((c) => {
+    const a = parseAlert(c);
+    return a === undefined ? [] : [{ ...a, at: c.createdAt }];
+  });
+  return { alerts, otherAccount, viaApp };
+}
+
+/** The factory's own alerts on the inbox issue, and what was left out. */
+export async function listAlerts(target: InboxTarget) {
+  return ownAlerts(await listComments(target.repo, target.inboxIssue, target), target);
 }
 
 export function inboxReadPath(home: string): string {
@@ -182,7 +195,7 @@ export function markRead(home: string, ids: readonly string[]): void {
 
 export async function unreadAlerts(target: AlertTarget): Promise<Alert[]> {
   const read = readIds(target.home);
-  return (await listAlerts(target)).filter((a) => !read.has(a.id));
+  return (await listAlerts(target)).alerts.filter((a) => !read.has(a.id));
 }
 
 /** The inbox named by `<dir>/.factory/config`, or undefined outside a factory project. */

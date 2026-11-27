@@ -21,7 +21,7 @@ import { asList, Fields, gh, repoArg } from '../github/gh.js';
 import { removeLabel } from '../github/labels.js';
 import { timeline } from '../github/timeline.js';
 import type { ApprovalRecord } from '../model/types.js';
-import { parseAlert } from '../notify/inbox.js';
+import { ownAlerts } from '../notify/inbox.js';
 import { buildSummary, type PauseFacts } from '../notify/summary.js';
 import { resumeEntries, type LabelEvent } from '../pause/derive.js';
 import { postSigned } from './approve.js';
@@ -55,12 +55,8 @@ async function pauseFacts(
     if (start === undefined) throw new Error('no pause label was added');
     const since = (at: string) => Date.parse(at) >= Date.parse(start.createdAt);
 
-    const alerts = comments
-      .filter((c) => since(c.createdAt))
-      .flatMap((c) => {
-        const a = parseAlert(c);
-        return a === undefined ? [] : [{ at: c.createdAt, ...a }];
-      });
+    const during = comments.filter((c) => since(c.createdAt));
+    const { alerts } = await ownAlerts(during, project);
     const updated = `updated:>=${start.createdAt}`;
     const args = ['issue', 'list', '--repo', repoArg(repo), '--state', 'all', '--search', updated];
     const listed = await gh([...args, '--json', 'number,title', '--limit', '1000'], {
