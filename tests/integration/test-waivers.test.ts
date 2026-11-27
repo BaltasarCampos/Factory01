@@ -11,7 +11,7 @@ import { ownerKeyPath, sign } from '../../src/approvals/sign.js';
 import { verifySignature } from '../../src/approvals/verify.js';
 import { runCli } from '../../src/cli/commands.js';
 import type { ApprovalRecord } from '../../src/model/types.js';
-import { readState, seedState } from '../helpers/fake-gh.js';
+import { failWorkflows, readState, seedState } from '../helpers/fake-gh.js';
 import { makeRepo, mergeBrief, signedReleaseTag, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 
@@ -269,6 +269,20 @@ describe('test: waivers (T151, AC-061)', () => {
       expect.stringMatching(
         /^<!-- factory-alert id=\w+ urgency=urgent kind=tampering -->\n\n#7: the head eeeeeeeeeeee/,
       ),
+    ]);
+  });
+
+  it('T030: an email that cannot be triggered still refuses with the alert posted and pending', async () => {
+    seed(first, { waives: 'test:tests/calc.test.ts#adds', head: 'e'.repeat(40) });
+    failWorkflows(REPO, 'HTTP 502');
+
+    const r = await approve('test:tests/calc.test.ts#adds');
+
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain('the Owner inbox has an alert');
+    expect(inbox()).toEqual([
+      expect.stringContaining('urgency=urgent kind=tampering'),
+      expect.stringContaining('urgency=info kind=email-failing'),
     ]);
   });
 

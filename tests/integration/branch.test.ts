@@ -1194,7 +1194,11 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     ] as const;
     for (const [blocked, factory, why] of cases) {
       const t = setup({ branch: CREATED, states: ['state:triaged'] });
-      if (blocked) writeFileSync(join(t.home, '.factory'), '');
+      // `failures/` alone: the alert records beside it are listed first, at the pass's start.
+      if (blocked) {
+        mkdirSync(join(t.home, '.factory'), { recursive: true });
+        writeFileSync(join(t.home, '.factory', 'failures'), '');
+      }
       t.ctx.failures = { home: t.home, factory };
       const before = tip(t);
 
