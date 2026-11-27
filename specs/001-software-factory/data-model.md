@@ -466,7 +466,9 @@ configs, thresholds and test-path patterns shipped in that release
 ## Owner inbox entry
 
 Comment on the inbox issue: `<!-- factory-alert id=<ulid> urgency=urgent|info kind=<kind> -->`
-+ human text + evidence links. Read state: `~/.factory/inbox-read` (ids).
++ human text + evidence links. Read state: `~/.factory/inbox-read` (ids). What the factory has
+raised: one file per alert, `~/.factory/alerts/<owner>/<repo>/<hash>.json` (kind, urgency, text,
+id), written once its post succeeded; an alert is raised once by it, never by the inbox's comments.
 
 ## Security finding
 
