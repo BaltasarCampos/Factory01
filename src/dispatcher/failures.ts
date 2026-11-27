@@ -134,22 +134,17 @@ export function readFailureRecord(file: string): FailureRecord | undefined {
 }
 
 /**
- * Writes the record by rename; one the reader would refuse, or one that cannot be written, throws,
- * naming the file, so a bad record never stops every later pass.
+ * Writes `text` as `file` by rename, whole on disk before it, and the rename itself on disk
+ * after: a power cut leaves the old file or the new, never an empty one (T061, deferred (14)).
+ * The file is 0600 and its folders 0700; a failure throws, leaving no temporary file.
  */
-export function writeFailureRecord(file: string, record: FailureRecord): void {
-  if (!isRecord(record, file))
-    throw new EnvironmentError(
-      `the failure record ${file} is not written: ${visible(JSON.stringify(record))} is malformed`,
-    );
+export function replaceFile(file: string, text: string): void {
   const temp = `${file}.${randomUUID()}.tmp`;
   try {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    // Whole on disk before the rename, and the rename itself on disk after: a power cut leaves
-    // the old record or the new, never an empty one (T061, deferred (14)).
     const fd = openSync(temp, 'wx', 0o600);
     try {
-      writeFileSync(fd, `${JSON.stringify(record, null, 2)}\n`);
+      writeFileSync(fd, text);
       fsyncSync(fd);
     } finally {
       closeSync(fd);
@@ -167,6 +162,22 @@ export function writeFailureRecord(file: string, record: FailureRecord): void {
     } catch {
       // Its folder cannot be reached either: there is no temporary file to remove.
     }
+    throw err;
+  }
+}
+
+/**
+ * Writes the record by rename; one the reader would refuse, or one that cannot be written, throws,
+ * naming the file, so a bad record never stops every later pass.
+ */
+export function writeFailureRecord(file: string, record: FailureRecord): void {
+  if (!isRecord(record, file))
+    throw new EnvironmentError(
+      `the failure record ${file} is not written: ${visible(JSON.stringify(record))} is malformed`,
+    );
+  try {
+    replaceFile(file, `${JSON.stringify(record, null, 2)}\n`);
+  } catch (err) {
     throw new EnvironmentError(
       `the failure record ${file} cannot be written: ${why(err)}; check that ${dirname(file)} can be written and its disk has free space, then run the factory again`,
     );

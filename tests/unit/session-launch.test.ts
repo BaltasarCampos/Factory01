@@ -55,10 +55,12 @@ import { runPreCompact } from '../../src/hooks/pre-compact.js';
 import { logBlocked, readSessionRecord } from '../../src/hooks/session.js';
 import { DEFINE_BRANCH } from '../../src/install/project.js';
 import { MCP_JSON } from '../../src/install/render.js';
-import type { NewAlert } from '../../src/notify/inbox.js';
+import { alertFile } from '../../src/notify/alert-record.js';
+import { parseAlert } from '../../src/notify/inbox.js';
 import type { SessionSettings } from '../../src/install/session-settings.js';
 import type { GuardrailManifest, ReleasePin } from '../../src/model/types.js';
 import { ReleaseTagError } from '../../src/release/tag.js';
+import { readState, seedState } from '../helpers/fake-gh.js';
 import { gitEnv, makeRepo, runGit } from '../helpers/git-repo.js';
 import {
   HOOKED_SETTINGS,
@@ -2510,14 +2512,20 @@ describe('LocalLauncher (research R8, R9)', () => {
 });
 
 describe('factory run: the alert for a pass that throws (T061)', () => {
-  const inbox = { repo: 'owner/project', inboxIssue: 1 };
+  /** An inbox on the fake GitHub, with a home of its own for the factory's alert record. */
+  const seeded = () => {
+    seedState({
+      repos: { 'owner/project': { issues: [{ number: 1, title: 'Owner inbox' }] } },
+    });
+    return { repo: 'owner/project', inboxIssue: 1, home: homeDir() };
+  };
+  const posted = () =>
+    (readState().repos['owner/project']?.issues[0]?.comments ?? []).flatMap(
+      (c) => parseAlert({ ...c, id: String(c.id) }) ?? [],
+    );
   const sink = () => {
     const lines: string[] = [];
     return { lines, write: (s: string) => void lines.push(s) };
-  };
-  const into = (posted: NewAlert[]) => (input: NewAlert) => {
-    posted.push(input);
-    return Promise.resolve();
   };
 
   it('alerts once per main head and message, compared with no temporary path, session id, pid or time', async () => {
@@ -2531,11 +2539,10 @@ describe('factory run: the alert for a pass that throws (T061)', () => {
     );
     expect(thrownText('96ca65d33f7c', thrown('2'))).toBe(text);
     expect(thrownText('0123456789ab', thrown('2'))).not.toBe(text);
-    const posted: NewAlert[] = [];
-    const read = () => Promise.resolve(posted.map((a, i) => ({ ...a, id: String(i) })));
-    await alertThrown(inbox, text, sink(), { read, post: into(posted) });
-    await alertThrown(inbox, text, sink(), { read, post: into(posted) });
-    expect(posted).toEqual([{ urgency: 'urgent', kind: 'pass-threw', text }]);
+    const inbox = seeded();
+    await alertThrown(inbox, text, sink());
+    await alertThrown(inbox, text, sink());
+    expect(posted()).toMatchObject([{ urgency: 'urgent', kind: 'pass-threw', text }]);
   });
 
   it("keeps a temporary path's file name, replacing only mkdtemp's suffix, and only in a path that starts at /tmp (T061)", () => {
@@ -2577,32 +2584,37 @@ describe('factory run: the alert for a pass that throws (T061)', () => {
       return thrownText('96ca65d33f7c', thrown);
     });
     expect(texts[0]).toContain(`whether session ${ids[0] ?? ''} still runs is unknown`);
-    const posted: NewAlert[] = [];
-    const read = () => Promise.resolve(posted.map((a, i) => ({ ...a, id: String(i) })));
-    for (const text of [...texts, ...texts])
-      await alertThrown(inbox, text, sink(), { read, post: into(posted) });
-    expect(posted.map((a) => a.text)).toEqual(texts);
+    const inbox = seeded();
+    for (const text of [...texts, ...texts]) await alertThrown(inbox, text, sink());
+    expect(posted().map((a) => a.text)).toEqual(texts);
   });
 
-  it('shows the message through visible(), posts when the alerts cannot be read, and writes both errors to stderr when the post fails', async () => {
+  it('shows the message through visible(), posts when its record cannot be read, and writes both errors to stderr when the post fails', async () => {
     const text = thrownText('96ca65d33f7c', new Error('bad \u001b[2J name'));
     expect(text).toBe(
       'factory run stopped: a pass threw Error: bad \\u{1b}[2J name; main is at 96ca65d33f7c',
     );
-    const posted: NewAlert[] = [];
+    const inbox = seeded();
+    const input = { urgency: 'urgent', kind: 'pass-threw', text } as const;
+    const record = alertFile(inbox.home, inbox.repo, input);
+    mkdirSync(dirname(record), { recursive: true });
+    writeFileSync(record, '{');
     const unread = sink();
-    const read = () => Promise.reject(new Error('gh: HTTP 502'));
-    await alertThrown(inbox, text, unread, { read, post: into(posted) });
-    expect(posted).toHaveLength(1);
-    expect(unread.lines.join('')).toBe(
-      "factory run: the inbox's alerts cannot be read, so it is alerted anyway: gh: HTTP 502\n",
+    await alertThrown(inbox, text, unread);
+    expect(unread.lines.join('')).toMatch(
+      /^factory run: the alert's record cannot be read, so it is alerted anyway: the alert record .* cannot be read: /,
     );
+    // The new record replaces the broken one, so the next pass is quiet.
+    await alertThrown(inbox, text, sink());
+    expect(posted()).toHaveLength(1);
     const both = sink();
-    const post = () => Promise.reject(new Error('gh: HTTP 401'));
-    await alertThrown(inbox, text, both, { read: () => Promise.resolve([]), post });
-    expect(both.lines.join('')).toBe(
-      `factory run: ${text}\nfactory run: its alert cannot be posted: gh: HTTP 401\n`,
+    await alertThrown({ ...inbox, inboxIssue: 99, home: homeDir() }, text, both);
+    expect(both.lines.join('')).toMatch(
+      new RegExp(
+        `^factory run: factory run stopped: [^\\n]*\nfactory run: its alert cannot be posted or recorded: gh issue comment 99 `,
+      ),
     );
+    expect(posted()).toHaveLength(1);
   });
 });
 

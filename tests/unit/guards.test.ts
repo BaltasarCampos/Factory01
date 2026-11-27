@@ -624,6 +624,11 @@ describe('the path guard: each role writes only its own files, inside the clone 
     ],
     ['define', '../other/x', /^outside: /],
     ['define', '~/.factory/verified/ledger', /^outside: /],
+    // A record there would silence an alert or pass for Intake's events (T030, T086).
+    ['define', '~/.factory/alerts/owner/project/a.json', /^outside: /],
+    ['builder', join(home, '.factory/alerts/owner/project/a.json'), /^outside: /],
+    ['test', '../../../.factory/alerts/owner/project/a.json', /^outside: /],
+    ['define', '~/.factory/items/owner/project/42/events.jsonl', /^outside: /],
     ['define', '.', /^outside: /],
     ['builder', 'linked/x.ts', /^outside: /],
     ['builder', 'src/key.ts', /^outside: /],

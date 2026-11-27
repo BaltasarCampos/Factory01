@@ -1484,7 +1484,8 @@ describe('station manifest (T059)', { timeout: 60_000 }, () => {
     expect(result.refused).toBe(refused);
     expect(heldAlerts(t, 'launcher-missing')).toEqual([`urgent ${refused}`]);
     expect(t.cloud.launches).toEqual([]);
-    expect(readdirSync(t.home)).toEqual([]);
+    // The alert's own record, and no session or failure record.
+    expect(readdirSync(join(t.home, '.factory'))).toEqual(['alerts']);
   });
 
   it("in local mode holds an item whose record names its tip while the evidence reads a new head, once per head, and starts the next item's session (T061)", async () => {

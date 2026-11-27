@@ -11,8 +11,8 @@ import { ExitCode } from '../cli/env.js';
 import { dispatchOnce, type PassResult } from '../dispatcher/dispatch.js';
 import { SessionUnknown } from '../dispatcher/launcher/types.js';
 import { configOnMain } from '../model/config.js';
-import type { Alert } from '../model/types.js';
-import { alert, listAlerts, type InboxTarget, type NewAlert } from '../notify/inbox.js';
+import { alertFile, readAlertRecord } from '../notify/alert-record.js';
+import { alert, type AlertTarget } from '../notify/inbox.js';
 import { visible } from '../notify/summary.js';
 import { passLines, projectDispatch } from './dispatch.js';
 
@@ -67,33 +67,29 @@ export function thrownText(head: string, err: unknown): string {
 }
 
 /**
- * One urgent alert per main head and message for a pass that threw (T061): when the inbox's
- * alerts cannot be read it is posted anyway, an extra alert being the safe direction, and when the
- * post fails too, why goes to stderr, beside the pass's own error.
+ * One urgent alert per main head and message for a pass that threw (T061): when its record cannot
+ * be read it is posted anyway, an extra alert being safer than a lost one, and when it cannot be
+ * posted or recorded, why goes to stderr, beside the pass's own error.
  */
 export async function alertThrown(
-  inbox: InboxTarget,
+  inbox: AlertTarget,
   text: string,
   stderr: { write: (s: string) => void },
-  deps: { read?: () => Promise<Alert[]>; post?: (input: NewAlert) => Promise<unknown> } = {},
 ): Promise<void> {
-  let posted: Alert[] = [];
+  const input = { urgency: 'urgent', kind: 'pass-threw', text } as const;
   try {
-    posted = await (deps.read ?? (() => listAlerts(inbox)))();
+    if (readAlertRecord(alertFile(inbox.home, inbox.repo, input)) !== undefined) return;
   } catch (err) {
     stderr.write(
-      `factory run: the inbox's alerts cannot be read, so it is alerted anyway: ${why(err)}\n`,
+      `factory run: the alert's record cannot be read, so it is alerted anyway: ${why(err)}\n`,
     );
   }
-  if (posted.some((a) => a.kind === 'pass-threw' && a.text === text)) return;
   try {
-    await (deps.post ?? ((input) => alert(inbox, input)))({
-      urgency: 'urgent',
-      kind: 'pass-threw',
-      text,
-    });
+    await alert(inbox, input);
   } catch (err) {
-    stderr.write(`factory run: ${text}\nfactory run: its alert cannot be posted: ${why(err)}\n`);
+    stderr.write(
+      `factory run: ${text}\nfactory run: its alert cannot be posted or recorded: ${why(err)}\n`,
+    );
   }
 }
 

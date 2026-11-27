@@ -331,6 +331,28 @@ describe('dispatcher core: launcher selection (AC-002)', () => {
   });
 });
 
+describe('dispatcher core: alerts (T030)', () => {
+  it('raises each alert once by the laptop’s record: not again though its comment is gone, and again from another home', async () => {
+    const t = setup([{ number: 2, approval: 'signed' }], { config: '' });
+    const empty = () => {
+      const state = readState();
+      const inbox = state.repos[REPO]?.issues.find((i) => i.number === INBOX);
+      if (inbox !== undefined) inbox.comments = [];
+      seedState(state);
+    };
+
+    await dispatchOnce(t.ctx);
+    expect(t.inbox()).toHaveLength(1);
+    empty();
+    await dispatchOnce(t.ctx);
+    expect(t.inbox()).toEqual([]);
+    t.ctx.failures = { ...t.ctx.failures, home: tempDir() };
+    await dispatchOnce(t.ctx);
+
+    expect(t.inbox()).toHaveLength(1);
+  });
+});
+
 describe('dispatcher core: station prompts (T072)', () => {
   it('launches with the prompt rendered from the release pinned on main', async () => {
     const t = setup([{ number: 2, approval: 'signed' }]);

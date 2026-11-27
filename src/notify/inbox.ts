@@ -4,8 +4,9 @@
 //   <!-- factory-alert id=<ulid> urgency=urgent|info kind=<kind> -->
 //
 // Urgent alerts also fail the owner-alert workflow so GitHub emails the Owner, because comments
-// and @mentions alone notify no one (agents act as the Owner's account). Which alerts the Owner
-// has read is laptop state: ids in ~/.factory/inbox-read.
+// and @mentions alone notify no one (agents act as the Owner's account). What the factory has
+// raised is laptop state (alert-record.ts), and so are the alerts the Owner has read: ids in
+// ~/.factory/inbox-read.
 import { randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -14,12 +15,16 @@ import { listComments, postComment, type IssueComment } from '../github/comments
 import type { GhOptions } from '../github/gh.js';
 import { loadConfig } from '../model/config.js';
 import type { Alert } from '../model/types.js';
+import { alertFile, readAlertRecord, writeAlertRecord } from './alert-record.js';
 import { triggerOwnerAlert } from './owner-alert.js';
 
 export interface InboxTarget extends GhOptions {
   repo: string;
   inboxIssue: number;
 }
+
+/** Where alerts are raised from: the inbox, and the home that records them. */
+export type AlertTarget = InboxTarget & { home: string };
 
 export interface NewAlert {
   urgency: Alert['urgency'];
@@ -47,9 +52,12 @@ export function ulid(now: number = Date.now(), random: Buffer = randomBytes(10))
   return time + rest;
 }
 
-/** Post an alert to the inbox (and, if urgent, fail owner-alert.yml); returns its id. */
+/**
+ * Post an alert to the inbox, record it once the post succeeded (and, if urgent, fail
+ * owner-alert.yml); returns its id.
+ */
 export async function alert(
-  target: InboxTarget,
+  target: AlertTarget,
   input: NewAlert,
   deps: { now?: () => number } = {},
 ): Promise<string> {
@@ -60,8 +68,17 @@ export async function alert(
   const evidence = (input.evidence ?? []).map((link) => `- ${link}`);
   const body = [marker, '', input.text, ...(evidence.length > 0 ? ['', ...evidence] : [])];
   await postComment(target.repo, target.inboxIssue, `${body.join('\n')}\n`, target);
+  const { urgency, kind, text } = input;
+  const file = alertFile(target.home, target.repo, input);
+  writeAlertRecord(file, { urgency, kind, text, id });
   if (input.urgency === 'urgent') await triggerOwnerAlert(target.repo, id, target);
   return id;
+}
+
+/** One alert per kind, text and urgency, by the laptop's record, however often it is raised. */
+export async function alertOnce(target: AlertTarget, input: NewAlert): Promise<void> {
+  if (readAlertRecord(alertFile(target.home, target.repo, input)) !== undefined) return;
+  await alert(target, input);
 }
 
 /**
@@ -109,7 +126,7 @@ export function markRead(home: string, ids: readonly string[]): void {
   appendFileSync(file, ids.map((id) => `${id}\n`).join(''));
 }
 
-export async function unreadAlerts(target: InboxTarget & { home: string }): Promise<Alert[]> {
+export async function unreadAlerts(target: AlertTarget): Promise<Alert[]> {
   const read = readIds(target.home);
   return (await listAlerts(target)).filter((a) => !read.has(a.id));
 }
@@ -118,7 +135,7 @@ export async function unreadAlerts(target: InboxTarget & { home: string }): Prom
 export async function projectInbox(
   dir: string,
   env: NodeJS.ProcessEnv,
-): Promise<(InboxTarget & { home: string }) | undefined> {
+): Promise<AlertTarget | undefined> {
   const file = join(dir, '.factory', 'config');
   if (!existsSync(file)) return undefined;
   const config = await loadConfig(file);
