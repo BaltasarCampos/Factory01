@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdirSync,
@@ -26,6 +27,7 @@ import { nextTask, pendingStation, writeStationManifest } from '../../src/dispat
 import {
   intakeEventsFile,
   intakeMark,
+  intakeSeed,
   intakeSessions,
 } from '../../src/dispatcher/intake-events.js';
 import { groupRecord } from '../../src/dispatcher/launcher/local.js';
@@ -85,7 +87,7 @@ describe('work-item branch creation (AC-066, FR-016a)', { timeout: 60_000 }, () 
     return file;
   };
 
-  it("seeds events.jsonl from Intake's per-item file, its events only and no comment, and drops the file once pushed (AC-066, 28-5c-4d-2)", async () => {
+  it("seeds events.jsonl from Intake's per-item file, a bad line replaced and no comment, and drops the file once pushed (AC-066, 28-5c-4d-2)", async () => {
     const at = '2026-10-01T08:30:00Z';
     const comment = eventComment(intakeEvent({ session: 'from-a-comment' }));
     const t = setup({ comments: [{ body: comment, createdAt: at }] });
@@ -99,8 +101,55 @@ describe('work-item branch creation (AC-066, FR-016a)', { timeout: 60_000 }, () 
 
     await dispatchOnce(t.ctx);
 
-    expect(seededLines(t)).toEqual([own]);
+    const replaced = (line: number, why: RegExp) =>
+      expect.objectContaining({
+        ...{ item: ISSUE, role: 'intake', session: 'dispatcher', kind: 'alert' },
+        input_summary: expect.stringMatching(
+          new RegExp(
+            `^line ${String(line)} of Intake's events file is not an event of this item's Intake: ${why.source}`,
+          ),
+        ) as string,
+      }) as unknown;
+    expect(seededLines(t)).toEqual([
+      own,
+      replaced(2, /.*JSON/),
+      replaced(3, /it is an event of item 3, role intake$/),
+      replaced(4, /it is an event of item 2, role builder$/),
+    ]);
     expect(existsSync(file)).toBe(false);
+  });
+
+  it('replaces a last line cut short, saying so (28-5c-5a)', async () => {
+    const t = setup();
+    const own = intakeEvent({ session: 'intake-1', kind: 'alert', tool: 'Dispatcher' });
+    const file = intakeFile(t, [JSON.stringify(own)]);
+    appendFileSync(file, '{"item":2,"role":"intake"');
+
+    await dispatchOnce(t.ctx);
+
+    const why = /^line 2 of Intake's events file .*: it is cut short, with no newline at its end: /;
+    expect(seededLines(t)).toEqual([
+      own,
+      expect.objectContaining({ input_summary: expect.stringMatching(why) as string }),
+    ]);
+  });
+
+  it('never takes the seed past its limit, leaving out whole lines with one line saying from where (28-5c-5a)', () => {
+    const t = setup();
+    const own = JSON.stringify(intakeEvent({ session: 'intake-1' }));
+    // Short bad lines, each replaced by a longer factory line.
+    intakeFile(t, [own, ...Array<string>(30).fill('x')]);
+    const limit = 2000;
+
+    const { text } = intakeSeed(t.home, REPO, ISSUE, () => new Date(), limit);
+
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(limit);
+    const lines = text.trimEnd().split('\n');
+    expect(lines[0]).toBe(own);
+    expect(lines.length).toBeGreaterThan(2);
+    expect((JSON.parse(lines.at(-1) ?? '') as { input_summary: string }).input_summary).toBe(
+      `Intake's events file from line ${String(lines.length)} on is left out, past the ${String(limit)} bytes the seed holds`,
+    );
   });
 
   it("with no file the first line says Intake's events are not here, and nothing alerts (28-5c-4d-2)", async () => {

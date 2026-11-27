@@ -657,9 +657,8 @@ describe('dispatcher waits for the Define merge (AC-006, AC-064)', { timeout: 60
 
     const result = await dispatchOnce(ctx);
 
-    expect(result.skipped).toEqual([
-      { issue: 3, reason: expect.stringMatching(/no verified owner:approved/) as string },
-    ]);
+    // #3, with no owner: label, is never read (28-5c-5a).
+    expect(result.skipped).toEqual([]);
     expect(result.moves).toEqual([
       expect.objectContaining({ issue: 2, from: 'new', to: 'triaged' }),
     ]);
@@ -680,9 +679,8 @@ describe('dispatcher waits for the Define merge (AC-006, AC-064)', { timeout: 60
 
     const result = await dispatchOnce(ctx);
 
-    expect(result.skipped).toEqual([
-      { issue: 7, reason: expect.stringMatching(/no verified owner:approved/) as string },
-    ]);
+    // #7, with no owner: label, is never read (28-5c-5a).
+    expect(result.skipped).toEqual([]);
     expect(local.launches).toEqual([expect.objectContaining({ item: 2 })]);
   });
 });

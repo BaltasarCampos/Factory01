@@ -45,7 +45,7 @@ import {
   recoverIntakeSession,
 } from './intake-events.js';
 import { derivePause, resumeEntries, type LabelEvent } from '../pause/derive.js';
-import { listOpenIssues, notAdmitted, type IssueSummary } from './admission.js';
+import { listOpenIssues, notAdmitted, TooManyOpen, type IssueSummary } from './admission.js';
 import {
   createItemBranch,
   ensureDraftPr,
@@ -371,7 +371,16 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   const mainRef = ctx.mainRef ?? 'origin/main';
   /** Every item with a session to start, in order: the first that is not held gets it. */
   const targets: Target[] = [];
-  for (const issue of await listOpenIssues(repo, options)) {
+  let open: IssueSummary[];
+  try {
+    open = await listOpenIssues(repo, options);
+  } catch (err) {
+    if (!(err instanceof TooManyOpen)) throw err;
+    const text = `line stopped: ${err.message}`;
+    await alertOnce({ urgency: 'urgent', kind: 'admission-full', text });
+    return { ...result, halted: err.message };
+  }
+  for (const issue of open) {
     if (issue.number === config.inbox_issue) continue;
     const comments: PostedComment[] = await listComments(repo, issue.number, options);
     const events = await timeline(repo, issue.number, options);
