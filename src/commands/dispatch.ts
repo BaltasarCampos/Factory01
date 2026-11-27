@@ -14,7 +14,7 @@ import { gatherEvidence } from '../dispatcher/evidence.js';
 import { auditMain } from '../dispatcher/history-audit.js';
 import { installedHash, snapshotFactory } from '../dispatcher/launcher/local.js';
 import { pinnedRelease, stationPrompt } from '../dispatcher/prompts.js';
-import type { InboxTarget } from '../notify/inbox.js';
+import type { AlertTarget } from '../notify/inbox.js';
 import { projectHere } from './pause.js';
 
 /**
@@ -23,7 +23,7 @@ import { projectHere } from './pause.js';
  */
 export async function projectDispatch(
   ctx: CommandContext,
-): Promise<{ context: DispatchContext; close: () => void; inbox: InboxTarget }> {
+): Promise<{ context: DispatchContext; close: () => void; inbox: AlertTarget }> {
   // The installed factory read once, at the start of `factory dispatch` or `factory run` (T061).
   snapshotFactory();
   const project = await projectHere(ctx);
@@ -64,7 +64,7 @@ export async function projectDispatch(
   const close = () => {
     rmSync(dir, { recursive: true, force: true });
   };
-  return { context, close, inbox: project };
+  return { context, close, inbox: { ...project, home: failures.home } };
 }
 
 /** What one pass did, for the Owner or the routine log. */

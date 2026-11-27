@@ -33,7 +33,7 @@ import {
   type StationManifest,
   type Tier,
 } from '../model/types.js';
-import { alert, parseAlert, type InboxTarget, type NewAlert } from '../notify/inbox.js';
+import { alertOnce as raiseOnce, type AlertTarget, type NewAlert } from '../notify/inbox.js';
 import { visible } from '../notify/summary.js';
 import { duplicateOf } from '../stations/checks/intake.js';
 import {
@@ -304,16 +304,12 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   const options = ctx.gh ?? {};
   const config = configOnMain(ctx.projectDir, ctx.mainRef);
   const { repo } = config;
-  const inbox: InboxTarget = { ...options, repo, inboxIssue: config.inbox_issue };
+  const { home } = ctx.failures;
+  const inbox: AlertTarget = { ...options, repo, inboxIssue: config.inbox_issue, home };
+  /** One inbox alert per kind, text and urgency, however many passes see the same problem. */
+  const alertOnce = (input: NewAlert) => raiseOnce(inbox, input);
 
   const inboxComments = await listComments(repo, config.inbox_issue, options);
-  const posted = inboxComments.map(parseAlert).filter((a) => a !== undefined);
-  /** One inbox alert per kind and text, however many passes see the same problem. */
-  const alertOnce = async (input: NewAlert) => {
-    if (posted.some((a) => a.kind === input.kind && a.text === input.text)) return;
-    await alert(inbox, input);
-    posted.push({ id: '', urgency: input.urgency, kind: input.kind, text: input.text });
-  };
 
   /** Main cannot be checked: admit nothing, move nothing, alert the Owner once. */
   const unverifiable = async (err: unknown): Promise<PassResult> => {
