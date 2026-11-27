@@ -1,7 +1,7 @@
 # Contract: local sessions
 
 The lifecycle of a session the local launcher starts (`agents: local` in main's `.factory/config`,
-T061), as the code on main stands after slice 28-5c-5b-2. Every slice that changes it keeps this page
+T061), as the code on main stands after slice 28-5c-5c-1. Every slice that changes it keeps this page
 current in its notes commit. Code: `src/dispatcher/failures.ts`, `evidence.ts` (`tipState`,
 `spentTip`, `intakeBound`), `dispatch.ts` (`startSession`, `held`, `hold`), `manifest.ts`
 (`testEnded`), `launcher/local.ts` (`launch`, `sessionRunning`, `stillRunning`),
@@ -89,8 +89,10 @@ it refuses the launch with an urgent `session-running` alert naming the group an
 
 The count read is the record's under the same installed hash, else 0, with nothing written.
 
-**Intake** (`intakeBound`), in local mode, read only while Intake's output is incomplete; the
-record's last session is read through `sessionRunning`, in all seven states:
+**Intake** (`intakeBound`), in local mode, read only while Intake's output is incomplete; a
+duplicate marker counts toward that output only from the account `gh api user` returns for the
+token in use and never through an App (slice 28-5c-5c-1). The record's last session is read
+through `sessionRunning`, in all seven states:
 
 | Last session | Record | Leads to |
 |---|---|---|
