@@ -119,20 +119,21 @@ export async function verifyChain(
     chain.push(verify({ ...bound, gate: 'spec-approved', specSha }, () => true));
   }
 
-  // Every waiver target any record names for this item, whatever its signature.
-  const targets = [
-    ...new Set(
-      held
-        .filter((h) => h.record.gate === 'waiver' && h.record.repo === repo)
-        .filter((h) => h.record.issue === issue)
-        .map((h) => h.record.waives ?? ''),
-    ),
-  ];
+  // The waiver targets that records signed by a listed key name for this item: anyone may comment
+  // on a public repository, so a record that does not verify names none (T068).
+  const waiverRecords = held
+    .filter((h) => h.record.gate === 'waiver' && h.record.repo === repo)
+    .filter((h) => h.record.issue === issue);
+  const verified = waiverRecords.filter((h) => verifySignature(h.signed, c.keys, c.env));
   const waiverLabel = events.filter((e) => e.label === 'owner:waiver').at(-1);
-  if (targets.length === 0 && waiverLabel?.event === 'labeled')
+  const unbacked = verified.length === 0 && waiverLabel?.event === 'labeled';
+  if (unbacked && waiverRecords.length === 0)
     throw new RefusedError(
       `owner:waiver is on #${String(issue)} with no waiver record behind it, so it grants nothing; if you did not add it, remove the label ${RUN_AGAIN}`,
     );
+  // A label no verified record backs: the refusal names the record that does not verify.
+  const named = unbacked ? waiverRecords : verified;
+  const targets = [...new Set(named.map((h) => h.record.waives ?? ''))];
   const stale: string[] = [];
   for (const waives of targets) {
     const expected: Expected = { ...bound, gate: 'waiver', waives, head: c.head };

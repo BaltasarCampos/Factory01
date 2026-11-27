@@ -277,6 +277,16 @@ export function posted(id: number, record: ApprovalRecord, at: string, keys = ow
   };
 }
 
+/**
+ * A waiver record anyone on a public repository could post: signed by a key no release lists,
+ * naming a target of its own, with no label, which only the Owner or a session can add.
+ */
+export function outsiderWaiver(id: number): Posted {
+  const record = itemRecord('waiver', { waives: 'gate:plan' });
+  const { comment } = posted(id, record, '2026-10-01T09:00:00Z', other);
+  return { comment: { ...comment, author: 'stranger' } };
+}
+
 export function mergeSetup(o: MergeSetup = {}) {
   const release = o.release ?? [owner];
   const factory = makeRepo({

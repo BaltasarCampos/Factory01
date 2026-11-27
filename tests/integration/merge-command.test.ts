@@ -62,6 +62,7 @@ import {
   posted,
   project,
   seed,
+  outsiderWaiver,
 } from '../helpers/merge-deploy.js';
 
 vi.setConfig({ testTimeout: 60_000 });
@@ -846,6 +847,15 @@ describe('factory merge: the approval chain (T068, slice 22a-2)', { timeout: 240
 
     expect(r.code).toBe(1);
     expect(r.stderr).toContain(`comment 903 ${GROUNDLESS}`);
+  });
+
+  it('T068: an outsider’s waiver record no listed key signed, naming a new target, holds nothing', async () => {
+    const t = mergeSetup({ chain: (_, standard) => [...standard, outsiderWaiver(903)] });
+
+    const r = await t.cli();
+
+    expect(r.stderr).not.toContain(GROUNDLESS);
+    expect(r.stderr).toContain(DECLINED);
   });
 
   it('refuses a record copied from another item, naming it', async () => {
