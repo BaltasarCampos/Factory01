@@ -1,7 +1,7 @@
 # Contract: local sessions
 
 The lifecycle of a session the local launcher starts (`agents: local` in main's `.factory/config`,
-T061), as the code on main stands after slice 28-5c-5b-1. Every slice that changes it keeps this page
+T061), as the code on main stands after slice 28-5c-5b-2. Every slice that changes it keeps this page
 current in its notes commit. Code: `src/dispatcher/failures.ts`, `evidence.ts` (`tipState`,
 `spentTip`, `intakeBound`), `dispatch.ts` (`startSession`, `held`, `hold`), `manifest.ts`
 (`testEnded`), `launcher/local.ts` (`launch`, `sessionRunning`, `stillRunning`),
@@ -34,7 +34,8 @@ No session can reach `~/.factory/` (T183).
 | `~/factory-work/<owner>/<repo>/<name>-<id>.install`, the install folder | Launcher, after the checks: the head's `package.json` and lockfile blobs alone | `mkdir` 0700 after removing a leftover; npm writes only here | The launcher, whatever happens, once `node_modules` is renamed into the clone |
 | `/tmp/factory-<item>-<random>/`, the session's temporary folder | Launcher, before the install and the session's environment, which names it as `TMPDIR`; the install's `HOME` and npm cache are in its `npm-install/`, the only part the install can write | `mkdtemp` | The launcher, at the end of the launch; not when the factory exits on a signal |
 | `~/.factory/failures/<owner>/<repo>/<item>-<station>.json`, the failure record | Dispatcher: `recordIssued` before a new manifest's push; `recordSession`, the `starting()` callback the launcher calls just before the spawn, which makes Intake's (`<item>-1.json`) at its first count; `recordOutcome` after the launch returns | A `wx` 0600 temporary file, fsynced, renamed into place, then the folder fsynced, folder 0700, checked with the reader's own checks first: a reader sees the old record or the new, never half, and a power cut leaves no empty one | Never by the factory, but for Intake's, which the dispatcher deletes before any move out of `new`, a failed delete stopping the pass with the item still in `new`; `recordIssued` replaces it at a new manifest. The Owner, to start the count again |
-| `~/.factory/alerts/<owner>/<repo>/<hash>.json`, the alert record; `<hash>` is SHA-256 over kind, urgency and text | The factory (`alert`: the dispatcher, `factory run`, `factory approve`, `factory new`), once an alert's post has succeeded, before an urgent one's email trigger: kind, urgency, text and the posted id. `alertOnce` and `pass-threw` read it, never the inbox's comments (T030, slice 28-5c-5b-1) | A `wx` 0600 temporary file, fsynced, renamed into place, folders 0700 | Never by the factory. The Owner, when an error names it, or to have an alert posted again |
+| `~/.factory/alerts/<owner>/<repo>/<hash>.json`, the alert record; `<hash>` is SHA-256 over kind, urgency and text | The factory (`alert`: the dispatcher, `factory run`, `factory approve`, `factory new`), once an alert's post has succeeded, before an urgent one's email trigger: kind, urgency, text, the posted id, and for an urgent one `email: pending`, rewritten without it once the trigger succeeds. `alertOnce` and `pass-threw` read it, never the inbox's comments (T030, slice 28-5c-5b-1) | A `wx` 0600 temporary file, fsynced, renamed into place, folders 0700 | Never by the factory. The Owner, when an error names it, or to have an alert posted again |
+| `~/.factory/alerts/<owner>/<repo>/email-failing`, a failing spell: the id of its alert | The factory, once the spell's `email-failing` alert is posted and recorded (slice 28-5c-5b-2) | As the record | The factory, at the next trigger that succeeds. The Owner, when an error names it |
 | `refs/factory/build/<branch>`, the issued ref | Dispatcher, in its own clone, after a Build manifest's push succeeds | `git update-ref` | Never by the factory. The Owner restores it with the command a `manifest-held` alert names |
 | `refs/factory/test/<branch>`, the Test ref | Dispatcher, in its own clone, after a Test manifest's push succeeds (T181) | `git update-ref` | Never by the factory. Verify's Test session has ended only when this commit is in the tip's history, is not the tip, and the issued ref, if any, is its ancestor, never by a commit subject; missing or older, Test runs once more; a git failure reading it, other than exit 1, stops the pass |
 | `refs/factory/sessions/<id>`, the session's head | The Stop hook, in the record's `project`, once the head passes the pack checks (slice 28-5a): git in the factory's bubblewrap, the clone read-only and nothing writable, with `protocol.allow=never`, sends a full pack of what the session added since the record's head on its stdout, read with a 64 MiB cap; `index-pack --strict` indexes it in a quarantine under the session's own folder, the factory's clone's objects its alternate; there the head must be a commit of that pack, its history back to the record's head whole (`rev-list --objects --missing=error`) and that head its ancestor; only then does the pack move into the factory's clone. Every git call is bounded at 120 s, killed with SIGKILL | `git update-ref`, written again at each stop, before the output check. For Spec, the Planner, Test, the Reviewer and Security, which commit nothing, it names the Stop hook's own commit of their output in the factory's clone (slice 28-5b), or the record's head when their files change nothing | Never yet: 28-6c's clean-up rule. It can name a failing or an old head: the passing head is kept apart, below, and 28-6a never pushes this ref |
@@ -172,8 +173,17 @@ Every alert below is posted once per kind, text and urgency, against the laptop'
 (section 1), never the inbox's comments, so "once per" is what the text holds. Only a missing record
 means not yet posted: any other failure to read one, or a malformed one, stops the pass, naming the
 file and the way out, delete it; for `pass-threw` it is posted anyway, why going to stderr. A failed
-post records nothing, so the next pass posts it. A failed email trigger is not retried
-(28-5c-5b-2). Not every text carries `#<issue>`: the holds start with it, a failed
+post records nothing, so the next pass posts it.
+
+An urgent alert's email is the run of `owner-alert.yml` (slice 28-5c-5b-2). A trigger that fails
+leaves the record pending and stops nothing; every pass tries each pending one once at its start,
+before it reads the inbox or verifies main, so also when the line is halted or paused, and never
+posts the comment again. A record that cannot be listed or read, a failed post of the spell's
+alert, and a spell file that cannot be read, written or removed stop the pass. A record that cannot
+be written still sends the email, then stops the caller. `factory approve` and `factory new` send
+without deduplication, and the next pass on this laptop retries theirs.
+
+Not every text carries `#<issue>`: the holds start with it, a failed
 session names `<repo>#<issue>`, and a refusal names the repository and, after the fetch, the
 branch and its head, but no issue. A refusal tied to one item holds it, alerted as `#<issue>
 holds: <refusal>; <branch> is at <head>`, keeping the refusal's kind and urgency, and the pass goes
@@ -186,6 +196,7 @@ on; any other refusal ends the pass.
 | `manifest-unreadable` | urgent | The record names the tip and its manifest cannot be read as the item's | Tip and record | Reinstall the pinned release, or delete the record |
 | `manifest-held` | info | `recordIssued` refuses a manifest on the record's own spent one | Parent head; at Build, the issued ref's state | Delete the record; at Build also `git -C <the dispatcher's clone> update-ref refs/factory/build/<branch> <sha>` when the ref is missing or elsewhere |
 | `session-failed`, `session-capped` | info, urgent for an urgent failure | A session that spawned failed or hit a cap; nothing of it is pushed | Its text: role, item, failure | The failure's own; the item relaunches or holds as above |
+| `email-failing` | info | An urgent alert's email trigger fails and no spell is open | Spell, until a trigger succeeds; it sends no email | Check that `owner-alert.yml` is on the default branch and enabled, and that `gh` can run it |
 | `admission-full` | urgent | A page of 100 open issues and pull requests carries an `owner:` label | The label | Close them or remove the label until fewer than 100 are open; the pass halts |
 | `session-running` | urgent | The still-running scan finds a live group | Session and group | `kill -TERM -<pgid>` if no factory runs it, then run again. The pass ends there |
 | `launcher-unavailable`, `tampering` | info, urgent | A `LaunchRefused` with no kind of its own, `recordSession`'s refusals included; `available()`'s refusals too, unless they carry a kind of their own | Text and branch head; a refusal before the fetch carries no head, so once per text | Its own: run the factory again for a moved branch; for a protected path in the branch's own commits, a role file or model the branch's release lacks, or hooks the installed factory refuses in a release the branch kept, close the item and file it again (on main: re-pin main to a release that has it); for Test's failed install: after npm's status, waiting until the registry or the network is back; after a failed check, close the item and file it again; tried again each pass. A refusal tied to one item holds it; any other ends the pass |

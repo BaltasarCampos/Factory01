@@ -69,6 +69,8 @@ export interface FakeRepo {
   issues: FakeIssue[];
   prs: FakePr[];
   workflowRuns: { workflow: string; inputs: Record<string, string>; createdAt: string }[];
+  /** What `gh workflow run` fails with; unset, it starts a run. */
+  workflowFailure?: string;
   /** Canned responses for other `gh api` paths, keyed by path without the leading slash. */
   api: Record<string, unknown>;
 }
@@ -106,6 +108,7 @@ function normaliseRepo(repo: DeepPartialRepo, clock: string): FakeRepo {
     ...(repo.origin === undefined ? {} : { origin: repo.origin }),
     labels: repo.labels ?? [],
     workflowRuns: repo.workflowRuns ?? [],
+    ...(repo.workflowFailure === undefined ? {} : { workflowFailure: repo.workflowFailure }),
     api: repo.api ?? {},
     issues: (repo.issues ?? []).map((i) => ({
       number: i.number,
@@ -183,6 +186,16 @@ function statePath(path?: string): string {
 
 export function readState(path?: string): FakeGhState {
   return JSON.parse(readFileSync(statePath(path), 'utf8')) as FakeGhState;
+}
+
+/** Makes `gh workflow run` on `repo` fail with `why` from now on; undefined lets it run again. */
+export function failWorkflows(repo: string, why: string | undefined, path?: string): void {
+  const state = readState(path);
+  const found = state.repos[repo];
+  if (found === undefined) throw new Error(`the fake has no repository ${repo}`);
+  if (why === undefined) delete found.workflowFailure;
+  else found.workflowFailure = why;
+  writeFileSync(statePath(path), JSON.stringify(state, null, 2));
 }
 
 /** Every recorded `gh` invocation (argument vectors), oldest first. */
@@ -764,6 +777,7 @@ function repoCommand(state: FakeGhState, sub: string | undefined, p: Parsed, out
 function workflowCommand(state: FakeGhState, sub: string | undefined, p: Parsed): void {
   if (sub !== 'run') throw new GhFailure(`unknown command "workflow ${sub ?? ''}"`);
   const repo = getRepo(state, repoName(state, p));
+  if (repo.workflowFailure !== undefined) throw new GhFailure(repo.workflowFailure);
   const inputs: Record<string, string> = {};
   for (const kv of p.flags.get('raw-field') ?? []) {
     const eq = kv.indexOf('=');

@@ -18,7 +18,8 @@ import { RefusedError } from '../../src/cli/env.js';
 import { verifiedMerges } from '../../src/git/merges.js';
 import { STATES, STATIONS, type ApprovalRecord } from '../../src/model/types.js';
 import { FakeLauncher } from '../helpers/fake-launcher.js';
-import { readState, seedState, type FakeIssue } from '../helpers/fake-gh.js';
+import { failWorkflows, readState, seedState, type FakeIssue } from '../helpers/fake-gh.js';
+import { alert } from '../../src/notify/inbox.js';
 import { gitEnv, makeRepo, mergeBrief, mergeIntoMain, type TestRepo } from '../helpers/git-repo.js';
 import { makeKeys, makeOtherKeys, tempDir, writeKeyFiles, type TestKeys } from '../helpers/keys.js';
 import { testPrompts } from '../helpers/release.js';
@@ -332,6 +333,23 @@ describe('dispatcher core: launcher selection (AC-002)', () => {
 });
 
 describe('dispatcher core: alerts (T030)', () => {
+  it.each([
+    ['paused', { inboxLabels: ['pause:line'] }],
+    ['unable to verify main', { unreadable: 'allowedSigners' as const }],
+  ])('retries a pending email at the start of a pass, even when %s', async (_name, options) => {
+    const t = setup([], options);
+    const target = { repo: REPO, inboxIssue: INBOX, home: t.local.home };
+    failWorkflows(REPO, 'HTTP 502');
+    const id = await alert(target, { urgency: 'urgent', kind: 'tampering', text: 'earlier' });
+
+    const down = await dispatchOnce(t.ctx);
+    failWorkflows(REPO, undefined);
+    await dispatchOnce(t.ctx);
+
+    expect(down.halted).toBeDefined();
+    expect(t.runs().map((run) => run.inputs.alert_id)).toContain(id);
+  });
+
   it('raises each alert once by the laptop’s record: not again though its comment is gone, and again from another home', async () => {
     const t = setup([{ number: 2, approval: 'signed' }], { config: '' });
     const empty = () => {

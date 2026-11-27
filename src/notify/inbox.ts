@@ -4,19 +4,31 @@
 //   <!-- factory-alert id=<ulid> urgency=urgent|info kind=<kind> -->
 //
 // Urgent alerts also fail the owner-alert workflow so GitHub emails the Owner, because comments
-// and @mentions alone notify no one (agents act as the Owner's account). What the factory has
-// raised is laptop state (alert-record.ts), and so are the alerts the Owner has read: ids in
-// ~/.factory/inbox-read.
+// and @mentions alone notify no one (agents act as the Owner's account); a trigger that fails is
+// tried again at the start of every dispatcher pass. What the factory has raised is laptop state
+// (alert-record.ts), and so are the alerts the Owner has read: ids in ~/.factory/inbox-read.
 import { randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { EnvironmentError } from '../cli/env.js';
 import { listComments, postComment, type IssueComment } from '../github/comments.js';
 import type { GhOptions } from '../github/gh.js';
 import { loadConfig } from '../model/config.js';
 import type { Alert } from '../model/types.js';
-import { alertFile, readAlertRecord, writeAlertRecord } from './alert-record.js';
-import { triggerOwnerAlert } from './owner-alert.js';
+import {
+  alertFile,
+  endSpell,
+  openSpell,
+  pendingEmails,
+  readAlertRecord,
+  spellFile,
+  spellOpen,
+  writeAlertRecord,
+  type AlertRecord,
+} from './alert-record.js';
+import { OWNER_ALERT_WORKFLOW, triggerOwnerAlert } from './owner-alert.js';
+import { visible } from './summary.js';
 
 export interface InboxTarget extends GhOptions {
   repo: string;
@@ -34,6 +46,8 @@ export interface NewAlert {
   /** Links to the evidence (runs, commits, comments). */
   evidence?: readonly string[];
 }
+
+const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 const KIND_RE = /^[a-z]+(-[a-z]+)*$/;
 const ULID_CHARS = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -53,8 +67,35 @@ export function ulid(now: number = Date.now(), random: Buffer = randomBytes(10))
 }
 
 /**
- * Post an alert to the inbox, record it once the post succeeded (and, if urgent, fail
- * owner-alert.yml); returns its id.
+ * One try at a pending email. A trigger that fails leaves the record pending and is never thrown:
+ * the first of a failing spell raises one info alert, which sends no email, saying why. One that
+ * succeeds ends the spell, then the record's wait, so a stop between them only sends it twice.
+ */
+async function sendEmail(target: AlertTarget, file: string, record: AlertRecord): Promise<void> {
+  const spell = spellFile(target.home, target.repo);
+  try {
+    await triggerOwnerAlert(target.repo, record.id, target);
+  } catch (err) {
+    if (spellOpen(spell)) return;
+    // The way out comes first: `factory inbox` shows an alert's first line only.
+    const text = `urgent alerts' emails are not going out: check that ${OWNER_ALERT_WORKFLOW} is on the default branch and enabled, and that gh can run it; the alerts are on this inbox, and every pass tries their emails again. The trigger failed: ${visible(message(err))}`;
+    openSpell(spell, await alert(target, { urgency: 'info', kind: 'email-failing', text }));
+    return;
+  }
+  endSpell(spell);
+  const { urgency, kind, text, id } = record;
+  writeAlertRecord(file, { urgency, kind, text, id }, 'its email is sent again until it can');
+}
+
+/** One try at each email still to be sent, never posting its alert again. */
+export async function retryEmails(target: AlertTarget): Promise<void> {
+  for (const { file, record } of pendingEmails(target.home, target.repo))
+    await sendEmail(target, file, record);
+}
+
+/**
+ * Post an alert to the inbox and record it once the post succeeded; an urgent one's email is
+ * recorded as pending, then tried, and is sent even when it cannot be recorded. Returns its id.
  */
 export async function alert(
   target: AlertTarget,
@@ -70,8 +111,21 @@ export async function alert(
   await postComment(target.repo, target.inboxIssue, `${body.join('\n')}\n`, target);
   const { urgency, kind, text } = input;
   const file = alertFile(target.home, target.repo, input);
-  writeAlertRecord(file, { urgency, kind, text, id });
-  if (input.urgency === 'urgent') await triggerOwnerAlert(target.repo, id, target);
+  const pending = urgency === 'urgent' ? ({ email: 'pending' } as const) : {};
+  const record: AlertRecord = { urgency, kind, text, id, ...pending };
+  try {
+    writeAlertRecord(file, record);
+  } catch (unrecorded) {
+    // The email still goes out; then the record's failure stops the caller (T030).
+    if (urgency === 'urgent')
+      await triggerOwnerAlert(target.repo, id, target).catch((err: unknown) => {
+        throw new EnvironmentError(
+          `${message(unrecorded)}; and its email trigger failed: ${visible(message(err))}`,
+        );
+      });
+    throw unrecorded;
+  }
+  if (urgency === 'urgent') await sendEmail(target, file, record);
   return id;
 }
 

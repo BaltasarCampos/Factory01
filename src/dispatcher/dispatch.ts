@@ -33,7 +33,12 @@ import {
   type StationManifest,
   type Tier,
 } from '../model/types.js';
-import { alertOnce as raiseOnce, type AlertTarget, type NewAlert } from '../notify/inbox.js';
+import {
+  alertOnce as raiseOnce,
+  retryEmails,
+  type AlertTarget,
+  type NewAlert,
+} from '../notify/inbox.js';
 import { visible } from '../notify/summary.js';
 import { duplicateOf } from '../stations/checks/intake.js';
 import {
@@ -308,6 +313,8 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   const inbox: AlertTarget = { ...options, repo, inboxIssue: config.inbox_issue, home };
   /** One inbox alert per kind, text and urgency, however many passes see the same problem. */
   const alertOnce = (input: NewAlert) => raiseOnce(inbox, input);
+  // Before main is verified, so a halted or paused line still sends its urgent emails (T030).
+  await retryEmails(inbox);
 
   const inboxComments = await listComments(repo, config.inbox_issue, options);
 
