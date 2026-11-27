@@ -20,6 +20,8 @@ export interface FakeComment {
   author: string;
   body: string;
   createdAt: string;
+  /** The GitHub App it was posted through, as `performed_via_github_app` shows it. */
+  app?: string;
 }
 
 export interface FakeIssue {
@@ -388,6 +390,27 @@ function prJson(repoFull: string, repo: FakeRepo, pr: FakePr): Record<string, un
   };
 }
 
+/** A comment as REST lists it: its node id is what `gh issue view` prints as its id. */
+function restComment(c: FakeComment) {
+  return {
+    id: 4_000_000_000 + c.id,
+    node_id: String(c.id),
+    user: c.author === '' ? null : { login: c.author },
+    body: c.body,
+    created_at: c.createdAt,
+    performed_via_github_app: c.app === undefined ? null : { slug: c.app },
+  };
+}
+
+/** `gh api --paginate` prints each page's JSON array back to back. */
+function pagesOut(state: FakeGhState, rows: unknown[], paginate: boolean): string {
+  const pages: unknown[][] = [];
+  for (let i = 0; i < rows.length; i += state.pageSize)
+    pages.push(rows.slice(i, i + state.pageSize));
+  if (pages.length === 0) pages.push([]);
+  return (paginate ? pages : pages.slice(0, 1)).map((page) => JSON.stringify(page)).join('');
+}
+
 function pick(obj: Record<string, unknown>, fields: string | undefined): Record<string, unknown> {
   if (fields === undefined || fields === '') return obj;
   const out: Record<string, unknown> = {};
@@ -692,12 +715,16 @@ function apiCommand(state: FakeGhState, p: Parsed, out: string[]): void {
     const events = [...(item.events ?? [])].sort((a, b) =>
       a.created_at.localeCompare(b.created_at),
     );
-    const pages: FakeLabelEvent[][] = [];
-    for (let i = 0; i < events.length; i += state.pageSize)
-      pages.push(events.slice(i, i + state.pageSize));
-    if (pages.length === 0) pages.push([]);
-    // `gh api --paginate` prints each page's JSON array back to back.
-    out.push((paginate ? pages : pages.slice(0, 1)).map((page) => JSON.stringify(page)).join(''));
+    out.push(pagesOut(state, events, paginate));
+    return;
+  }
+  const thread = /^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/comments(\?per_page=\d+)?$/.exec(path);
+  if (thread) {
+    const repo = getRepo(state, thread[1] ?? '');
+    const n = Number(thread[2]);
+    const item = repo.issues.find((i) => i.number === n) ?? repo.prs.find((p) => p.number === n);
+    if (!item) throw new GhFailure('Not Found (HTTP 404)');
+    out.push(pagesOut(state, item.comments.map(restComment), paginate));
     return;
   }
   const list = /^repos\/([^/]+\/[^/]+)\/issues\?(.*)$/.exec(path);

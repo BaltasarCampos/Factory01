@@ -2,7 +2,12 @@ import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ExitCode, EnvironmentError } from '../../src/cli/env.js';
-import { listComments, postComment } from '../../src/github/comments.js';
+import {
+  listComments,
+  ownComments,
+  postComment,
+  postingAccount,
+} from '../../src/github/comments.js';
 import { Fields, gh, GhError, parseJsonStream } from '../../src/github/gh.js';
 import { addLabel, ensureLabels, removeLabel } from '../../src/github/labels.js';
 import * as prs from '../../src/github/prs.js';
@@ -206,16 +211,86 @@ describe('GitHub helpers (T028)', () => {
       author: 'owner',
       body,
       createdAt: '2026-10-02T09:00:00Z',
+      viaApp: false,
     });
   });
 
   it('comments: pull request threads too', async () => {
     seed({ repos: { [REPO]: { prs: [{ number: 7, headRefName: 'claude/7-x' }] } } });
     await postComment(REPO, 7, 'waiver', { thread: 'pr' });
-    expect((await listComments(REPO, 7, { thread: 'pr' })).map((c) => c.body)).toEqual(['waiver']);
-    // As on GitHub, the issue reader cannot read a pull request's thread, but its timeline is there.
-    await expect(listComments(REPO, 7)).rejects.toThrow(/Could not resolve to an issue/);
+    // As on GitHub, REST serves a pull request's thread and timeline at the issue's path.
+    expect((await listComments(REPO, 7)).map((c) => c.body)).toEqual(['waiver']);
     expect(await timeline(REPO, 7)).toEqual([]);
+    await expect(listComments(REPO, 8)).rejects.toThrow(/Not Found/);
+  });
+
+  const thread = (...rows: { author: string; app?: string }[]) =>
+    rows.map((row, i) => ({
+      ...{ id: i + 1, body: `c${String(i + 1)}`, createdAt: '2026-10-02T09:00:00Z' },
+      ...row,
+    }));
+
+  it('comments: every page, with the node id, a deleted account and the App mark', async () => {
+    const comments = thread({ author: 'owner' }, { author: '' }, { author: 'owner', app: 'x' });
+    seed({ pageSize: 1, repos: { [REPO]: { issues: [{ number: 1, comments }] } } });
+
+    const read = await listComments(REPO, 1);
+
+    expect(read.map((c) => [c.id, c.author, c.viaApp])).toEqual([
+      ['1', 'owner', false],
+      ['2', '', false],
+      ['3', 'owner', true],
+    ]);
+    expect(calls()).toEqual([
+      ['api', `repos/${REPO}/issues/1/comments?per_page=100`, '--paginate'],
+    ]);
+  });
+
+  it('comments: only the posting account’s, never through an App, and the others counted', async () => {
+    const comments = thread(
+      { author: 'stranger' },
+      { author: 'owner' },
+      { author: 'owner', app: 'claude' },
+      { author: 'stranger', app: 'claude' },
+      { author: '' },
+    );
+    seed({ repos: { [REPO]: { issues: [{ number: 1, comments }] } } });
+    const read = await listComments(REPO, 1);
+
+    const sorted = await ownComments(read);
+
+    expect(sorted.own.map((c) => c.id)).toEqual(['2']);
+    expect(sorted).toMatchObject({ otherAccount: 3, viaApp: 1 });
+    // The account is the token's, whoever the repository's owner is.
+    const env = { ...process.env, FAKE_GH_USER: 'stranger' };
+    expect((await ownComments(read, { env })).own.map((c) => c.id)).toEqual(['1']);
+  });
+
+  it('comments: with none to sort, the account is not asked for', async () => {
+    seed({ repos: { [REPO]: {} } });
+    expect(await ownComments([])).toEqual({ own: [], otherAccount: 0, viaApp: 0 });
+    expect(calls()).toEqual([]);
+  });
+
+  /** A `gh` that prints `out`, or fails when there is none. */
+  const stub = (out?: string) => {
+    const bin = tempDir();
+    const script = out === undefined ? 'echo down >&2; exit 1' : `echo '${out}'`;
+    writeFileSync(join(bin, 'gh'), `#!/bin/sh\n${script}\n`, { mode: 0o755 });
+    return { env: { PATH: bin } };
+  };
+
+  it('comments: one with no App field is refused, never read as unmarked', async () => {
+    const row = { node_id: 'IC_1', user: { login: 'owner' }, body: '', created_at: '' };
+    await expect(listComments(REPO, 1, stub(JSON.stringify([row])))).rejects.toThrow(
+      /performed_via_github_app is missing/,
+    );
+  });
+
+  it('the posting account: a failed or empty read throws, never matching no one', async () => {
+    const one = { id: '1', author: '', viaApp: false, body: '', createdAt: '' };
+    await expect(ownComments([one], stub())).rejects.toThrow(/gh api user failed: down/);
+    await expect(postingAccount(stub('{"login":""}'))).rejects.toThrow(/login is empty/);
   });
 
   it('pull requests: one draft PR is created, viewed by number or branch, listed, closed', async () => {

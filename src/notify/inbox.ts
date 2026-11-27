@@ -140,7 +140,7 @@ export async function alertOnce(target: AlertTarget, input: NewAlert): Promise<v
  * marker. The text is its first non-empty line with control characters removed, so a comment
  * cannot drive the Owner's terminal.
  */
-export function parseAlert(comment: IssueComment): Alert | undefined {
+export function parseAlert(comment: Omit<IssueComment, 'viaApp'>): Alert | undefined {
   const match = MARKER_RE.exec(comment.body);
   if (!match) return undefined;
   const [marker, id = '', urgency, kind = ''] = match;
