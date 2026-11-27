@@ -125,6 +125,16 @@ function seedPr(head: string) {
   writeFileSync(process.env.FAKE_GH_STATE ?? '', JSON.stringify(state));
 }
 
+function editRepo(
+  edit: (repo: NonNullable<ReturnType<typeof readState>['repos'][string]>) => void,
+) {
+  const state = readState();
+  const repo = state.repos[REPO];
+  if (repo === undefined) throw new Error('no repo');
+  edit(repo);
+  seedState(state, process.env.FAKE_GH_STATE);
+}
+
 interface Setup {
   issues?: (Partial<FakeIssue> & { number: number })[];
   prs?: (Partial<FakePr> & { number: number; headRefName: string })[];
@@ -256,6 +266,29 @@ describe('factory approve (AC-068)', { timeout: 60_000 }, () => {
     expect(order.indexOf('issue comment')).toBeLessThan(order.indexOf('issue edit'));
     const ledger = readFileSync(nonceLedgerPath(t.home), 'utf8');
     expect(ledger).toContain(`${t.posted(ITEM).nonce} ${REPO}#7/`);
+  });
+
+  it('the ledger names the posted record’s comment, not an outsider’s later copy of it (T030)', async () => {
+    const t = setup();
+    editRepo((repo) => (repo.copiedBy = 'stranger'));
+
+    expect((await t.cli(['approve', String(ITEM)])).code).toBe(0);
+
+    const [mine, copy] = t.issue(ITEM).comments;
+    expect(copy).toMatchObject({ author: 'stranger', body: mine?.body });
+    const ledger = readFileSync(nonceLedgerPath(t.home), 'utf8');
+    expect(ledger).toMatch(new RegExp(`${REPO}#7/${String(mine?.id)}\n$`));
+  });
+
+  it('approve refuses, labelling nothing, when its record reads back as an App’s (T030)', async () => {
+    const t = setup();
+    editRepo((repo) => (repo.postsThrough = 'claude'));
+
+    const r = await t.cli(['approve', String(ITEM)]);
+
+    expect(r.code).not.toBe(0);
+    expect(r.stderr).toMatch(/could not be read back as yours .*1 through a GitHub App/);
+    expect(t.issue(ITEM).labels).not.toContain('owner:approved');
   });
 
   it('approve <issue> warns while main has no Owner-signed Factory-Merge: define, and still signs (AC-006)', async () => {
@@ -608,6 +641,7 @@ describe('factory pause and resume (AC-077)', { timeout: 60_000 }, () => {
         comments: [
           alert(101, '2026-10-02T08:00:00Z', 'an alert from before the pause'),
           alert(102, '2026-10-02T08:59:30Z', 'a secret in the logs'),
+          { ...alert(103, '2026-10-02T08:59:35Z', 'a forged alert'), author: 'stranger' },
         ],
       },
       issues: [
@@ -636,7 +670,7 @@ describe('factory pause and resume (AC-077)', { timeout: 60_000 }, () => {
     expect(r.stdout).toContain('Approval summary for #1 (resume)');
     expect(r.stdout).toMatch(/pause:line added at 2026-10-02T08:59:00Z by ops-bot/);
     expect(r.stdout).toMatch(/urgent tampering: a secret in the logs/);
-    expect(r.stdout).not.toMatch(/before the pause/);
+    expect(r.stdout).not.toMatch(/before the pause|a forged alert/);
     expect(r.stdout).toMatch(/#7 Add login: state:building/);
     expect(r.stdout).not.toMatch(/#8/);
     // Only issues updated since the pause are read, so #8's timeline is never fetched.

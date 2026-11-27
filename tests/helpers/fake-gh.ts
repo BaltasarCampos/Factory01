@@ -71,6 +71,10 @@ export interface FakeRepo {
   issues: FakeIssue[];
   prs: FakePr[];
   workflowRuns: { workflow: string; inputs: Record<string, string>; createdAt: string }[];
+  /** Who copies each `gh issue comment`, right after it is posted. */
+  copiedBy?: string;
+  /** The App each `gh issue comment` is marked as posted through. */
+  postsThrough?: string;
   /** What `gh workflow run` fails with; unset, it starts a run. */
   workflowFailure?: string;
   /** Canned responses for other `gh api` paths, keyed by path without the leading slash. */
@@ -110,6 +114,8 @@ function normaliseRepo(repo: DeepPartialRepo, clock: string): FakeRepo {
     ...(repo.origin === undefined ? {} : { origin: repo.origin }),
     labels: repo.labels ?? [],
     workflowRuns: repo.workflowRuns ?? [],
+    ...(repo.copiedBy === undefined ? {} : { copiedBy: repo.copiedBy }),
+    ...(repo.postsThrough === undefined ? {} : { postsThrough: repo.postsThrough }),
     ...(repo.workflowFailure === undefined ? {} : { workflowFailure: repo.workflowFailure }),
     api: repo.api ?? {},
     issues: (repo.issues ?? []).map((i) => ({
@@ -558,6 +564,8 @@ function issueCommand(state: FakeGhState, sub: string | undefined, p: Parsed, ou
     case 'comment': {
       const issue = findIssue(repo, p.positional[0]);
       const c = addComment(state, issue, body(p));
+      if (repo.postsThrough !== undefined) c.app = repo.postsThrough;
+      if (repo.copiedBy !== undefined) addComment(state, issue, c.body).author = repo.copiedBy;
       out.push(
         `https://github.com/${full}/issues/${String(issue.number)}#issuecomment-${String(c.id)}`,
       );

@@ -13,11 +13,11 @@
 // Owner. An item Intake marked a duplicate waits in `new`, and the Owner gets one info alert per
 // marker comment (slice 24a-2).
 import { checkSecondCopy, type KeyCheck, type ReleaseKeys } from '../approvals/keys.js';
-import { verifyGate, type PostedComment, type Verdict } from '../approvals/verify.js';
+import { verifyGate, type Verdict } from '../approvals/verify.js';
 import { RefusedError } from '../cli/env.js';
 import type { KeysFor } from '../git/history.js';
 import { briefMerged, verifiedMerges, type MainMerges } from '../git/merges.js';
-import { listComments } from '../github/comments.js';
+import { listComments, ownComments } from '../github/comments.js';
 import type { GhOptions } from '../github/gh.js';
 import { addLabel, removeLabel } from '../github/labels.js';
 import { timeline } from '../github/timeline.js';
@@ -385,7 +385,7 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
   }
   for (const issue of open) {
     if (issue.number === config.inbox_issue) continue;
-    const comments: PostedComment[] = await listComments(repo, issue.number, options);
+    const comments = await listComments(repo, issue.number, options);
     const events = await timeline(repo, issue.number, options);
     const labelAdds = events.filter((e) => e.event === 'labeled');
     const verdict = (gate: OwnerGate, specSha?: string): Verdict => {
@@ -504,7 +504,8 @@ export async function dispatchOnce(ctx: DispatchContext): Promise<PassResult> {
     const original = item.state === 'new' ? found.duplicateOf : undefined;
     if (original !== undefined) {
       // One alert per marker comment: an item un-marked and marked again gets a new one.
-      const marker = comments.find((c) => duplicateOf(c.body) === original);
+      const marked = comments.filter((c) => duplicateOf(c.body) === original);
+      const [marker] = (await ownComments(marked, options)).own;
       const n = String(issue.number);
       await alertOnce({
         urgency: 'info',

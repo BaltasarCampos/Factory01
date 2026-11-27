@@ -116,6 +116,30 @@ describe('Intake output check: duplicates (AC-009)', () => {
 describe('Intake output check against GitHub (AC-009)', () => {
   const seed = (issues: Parameters<typeof seedState>[0]) => seedState(issues);
 
+  /** Item 7 with labels, whose comments mark it a duplicate of each number, as each row says. */
+  const markedBy = (...rows: [number, string, string?][]) => {
+    const comments = rows.map(([n, author, app], i) => ({
+      ...{ id: i + 1, author, body: `<!-- duplicate-of #${String(n)} -->` },
+      ...{ createdAt: '2026-10-05T08:00:00Z', ...(app === undefined ? {} : { app }) },
+    }));
+    const item = { number: 7, title: 'Add login', labels: LABELS, comments };
+    seed({ repos: { [REPO]: { issues: [{ number: 3, title: 'Login' }, item] } } });
+  };
+
+  it('T060: another account’s markers and an App’s neither hold the item nor fail it', async () => {
+    markedBy([3, 'stranger'], [4, 'stranger'], [3, 'owner', 'claude']);
+
+    const result = await checkIntakeIssue(REPO, 7, 2);
+
+    expect(result).toMatchObject({ complete: true, missing: [] });
+    expect(result.duplicateOf).toBeUndefined();
+  });
+
+  it('T060: the factory’s marker counts among an outsider’s', async () => {
+    markedBy([4, 'stranger'], [3, 'owner']);
+    expect(await checkIntakeIssue(REPO, 7, 2)).toMatchObject({ complete: true, duplicateOf: 3 });
+  });
+
   it('AC-009: reads the item from GitHub and checks it', async () => {
     seed({ repos: { [REPO]: { issues: [{ number: 7, title: 'Add login', labels: LABELS }] } } });
     expect(await checkIntakeIssue(REPO, 7, 2)).toMatchObject({ complete: true, tier: 2 });

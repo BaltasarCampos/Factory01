@@ -9,7 +9,7 @@ export async function inbox(ctx: CommandContext): Promise<number> {
   if (target === undefined) {
     throw new RefusedError('factory inbox: no .factory/config here; run it in a project clone');
   }
-  const alerts = await listAlerts(target);
+  const { alerts, otherAccount, viaApp } = await listAlerts(target);
   const read = readIds(target.home);
   const unread = alerts.filter((a) => !read.has(a.id));
   const shown = ctx.options.all === true ? alerts : unread;
@@ -18,6 +18,11 @@ export async function inbox(ctx: CommandContext): Promise<number> {
   } else {
     ctx.io.stdout.write(alertLines(shown));
   }
+  // A filter that dropped the factory's own alerts must not look like an empty inbox.
+  if (otherAccount + viaApp > 0)
+    ctx.io.stdout.write(
+      `Marked comments left out: ${String(otherAccount)} from another account, ${String(viaApp)} posted through a GitHub App.\n`,
+    );
   markRead(
     target.home,
     unread.map((a) => a.id),

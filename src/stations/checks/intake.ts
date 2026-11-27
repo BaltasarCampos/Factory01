@@ -5,7 +5,9 @@
 // lower one (AC-009).
 // A duplicate gets no labels: Intake marks it with a `<!-- duplicate-of #<n> -->` comment and
 // leaves it open, since closing an approved item is the Owner's; the dispatcher holds it in `new`
-// and alerts the Owner (slice 24a-2), so it never enters the line twice.
+// and alerts the Owner (slice 24a-2), so it never enters the line twice. A marker counts only
+// from the account the factory posts with, never through an App (T060).
+import { listComments, ownComments } from '../../github/comments.js';
 import { gh, Fields, GhError, numberArg, repoArg, type GhOptions } from '../../github/gh.js';
 import { ITEM_TYPES, type ItemType, type Priority, type Tier } from '../../model/types.js';
 import type { CheckResult } from '../../hooks/stop.js';
@@ -103,12 +105,16 @@ export async function checkIntakeIssue(
       ...options,
       json: true,
     });
-  const f = Fields.of(await view(issue, 'number,state,labels,comments'), 'issue');
+  const f = Fields.of(await view(issue, 'number,state,labels'), 'issue');
+  // A marker holds the item, and two fail the check, so only the factory's own count (T060).
+  const marked = (await listComments(repo, issue, options)).filter(
+    (c) => duplicateOf(c.body) !== undefined,
+  );
   const result = checkIntake({
     number: f.num('number'),
     state: f.str('state'),
     labels: f.list('labels').map((l) => Fields.of(l, 'label').str('name')),
-    comments: f.list('comments').map((c) => ({ body: Fields.of(c, 'comment').str('body') })),
+    comments: (await ownComments(marked, options)).own,
     confirmedTier,
   });
   if (result.duplicateOf === undefined) return result;
