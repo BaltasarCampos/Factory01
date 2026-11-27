@@ -11,12 +11,14 @@ import { randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { EnvironmentError } from '../cli/env.js';
 import { listComments, postComment, type IssueComment } from '../github/comments.js';
 import type { GhOptions } from '../github/gh.js';
 import { loadConfig } from '../model/config.js';
 import type { Alert } from '../model/types.js';
 import { alertFile, readAlertRecord, writeAlertRecord } from './alert-record.js';
 import { triggerOwnerAlert } from './owner-alert.js';
+import { visible } from './summary.js';
 
 export interface InboxTarget extends GhOptions {
   repo: string;
@@ -34,6 +36,8 @@ export interface NewAlert {
   /** Links to the evidence (runs, commits, comments). */
   evidence?: readonly string[];
 }
+
+const message = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
 const KIND_RE = /^[a-z]+(-[a-z]+)*$/;
 const ULID_CHARS = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
@@ -54,7 +58,7 @@ export function ulid(now: number = Date.now(), random: Buffer = randomBytes(10))
 
 /**
  * Post an alert to the inbox, record it once the post succeeded (and, if urgent, fail
- * owner-alert.yml); returns its id.
+ * owner-alert.yml, even when it cannot be recorded); returns its id.
  */
 export async function alert(
   target: AlertTarget,
@@ -70,8 +74,21 @@ export async function alert(
   await postComment(target.repo, target.inboxIssue, `${body.join('\n')}\n`, target);
   const { urgency, kind, text } = input;
   const file = alertFile(target.home, target.repo, input);
-  writeAlertRecord(file, { urgency, kind, text, id });
-  if (input.urgency === 'urgent') await triggerOwnerAlert(target.repo, id, target);
+  const email = async () => {
+    if (urgency === 'urgent') await triggerOwnerAlert(target.repo, id, target);
+  };
+  try {
+    writeAlertRecord(file, { urgency, kind, text, id });
+  } catch (unrecorded) {
+    // The email still goes out; then the record's failure stops the caller (T030).
+    await email().catch((err: unknown) => {
+      throw new EnvironmentError(
+        `${message(unrecorded)}; and its email trigger failed: ${visible(message(err))}`,
+      );
+    });
+    throw unrecorded;
+  }
+  await email();
   return id;
 }
 

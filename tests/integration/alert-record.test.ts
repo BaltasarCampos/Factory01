@@ -6,7 +6,7 @@ import { basename, dirname, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { alertFile } from '../../src/notify/alert-record.js';
 import { alert, alertOnce, type NewAlert } from '../../src/notify/inbox.js';
-import { readState, seedState } from '../helpers/fake-gh.js';
+import { failWorkflows, readState, seedState } from '../helpers/fake-gh.js';
 import { tempDir } from '../helpers/keys.js';
 
 const REPO = 'owner/project';
@@ -35,6 +35,7 @@ function setup(comments: string[] = []) {
 }
 
 const posted = () => (readState().repos[REPO]?.issues[0]?.comments ?? []).map((c) => c.body);
+const emailed = () => readState().repos[REPO]?.workflowRuns ?? [];
 
 describe('alertOnce: one alert per kind, text and urgency, by the laptop’s record (T030)', () => {
   it('posts once and records the posted id, however often it is raised', async () => {
@@ -132,5 +133,24 @@ describe('alertOnce: one alert per kind, text and urgency, by the laptop’s rec
     );
 
     expect(posted()).toHaveLength(1);
+  });
+
+  it('still sends an urgent alert’s email when it cannot be recorded, then fails', async () => {
+    const { target } = setup();
+    writeFileSync(join(target.home, '.factory'), '');
+
+    await expect(alert(target, { ...NOTE, urgency: 'urgent' })).rejects.toThrow(/posted again/);
+
+    expect(emailed()).toHaveLength(1);
+  });
+
+  it('names both failures when the record cannot be written and the email trigger fails', async () => {
+    const { target } = setup();
+    writeFileSync(join(target.home, '.factory'), '');
+    failWorkflows(REPO, 'no workflow owner-alert.yml');
+
+    await expect(alert(target, { ...NOTE, urgency: 'urgent' })).rejects.toThrow(
+      /the alert record .*cannot be written: [^]*; and its email trigger failed: .*no workflow owner-alert\.yml/,
+    );
   });
 });
